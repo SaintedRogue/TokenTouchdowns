@@ -32,7 +32,13 @@ export function enrichPlayers(players, { crosswalk, adpIndex, capabilities = [] 
       const query = {
         name: p.name?.full ?? xw?.name,
         position: p.display_position ?? xw?.position,
-        team: xw?.team,
+        // Sleeper assigns no yahoo_id to team defenses, so a DEF can never
+        // appear in the crosswalk and xw is always null -- without this
+        // fallback to Yahoo's own editorial_team_abbr, every defense
+        // silently resolves to 'absent' (DEF has no name-only fallback; see
+        // identity.js). Prefer the crosswalk's team when present: it is the
+        // authoritative post-trade value for a player who did get matched.
+        team: xw?.team ?? p.editorial_team_abbr,
       };
       const state = adpMatchState(adpIndex, query);
       stats.adp[state] += 1;

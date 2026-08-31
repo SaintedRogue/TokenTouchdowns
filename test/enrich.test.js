@@ -96,3 +96,26 @@ test('enrichPlayers passes through a player with no player_key without throwing'
   assert.equal(out[0].injury, undefined);
   assert.equal(stats.total, 1);
 });
+
+test('enrichPlayers matches a team defense using the player\'s own team abbreviation', () => {
+  // Sleeper gives team defenses no yahoo_id, so they never appear in the
+  // crosswalk. Without falling back to Yahoo's editorial_team_abbr, every
+  // defense silently resolves to "absent".
+  const crosswalk = buildCrosswalk([]);           // deliberately empty: no DEF ever present
+  const adpIndex = buildAdpIndex([
+    { name: 'Atlanta Defense', position: 'DEF', team: 'ATL', adp: 120.5 },
+  ]);
+  const players = [{
+    player_key: '470.p.100001',
+    name: { full: 'Falcons' },
+    display_position: 'DEF',
+    editorial_team_abbr: 'Atl',                   // note: Yahoo sends mixed case
+  }];
+
+  const { players: out, stats } = enrichPlayers(players, {
+    crosswalk, adpIndex, capabilities: ['adp'] });
+
+  assert.equal(out[0].adp, 120.5);
+  assert.equal(stats.adp.matched, 1);
+  assert.equal(stats.adp.absent, 0);
+});
