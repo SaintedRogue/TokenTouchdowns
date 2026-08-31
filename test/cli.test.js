@@ -274,3 +274,40 @@ test('transactions reports (none) for a league with no transactions', async () =
   assert.equal(code, 0);
   assert.match(out.text(), /\(none\)/);
 });
+
+import { buildRosterResource } from '../src/cli.js';
+
+test('buildRosterResource requests the current roster when no week is given', () => {
+  assert.equal(buildRosterResource('470.l.1.t.4', {}), 'team/470.l.1.t.4/roster');
+});
+
+test('buildRosterResource appends the week as a matrix parameter', () => {
+  assert.equal(buildRosterResource('470.l.1.t.4', { week: '3' }), 'team/470.l.1.t.4/roster;week=3');
+});
+
+test('buildRosterResource ignores --week used as a bare flag', () => {
+  // `--week` with no value parses as true; it must not become ";week=true".
+  assert.equal(buildRosterResource('470.l.1.t.4', { week: true }), 'team/470.l.1.t.4/roster');
+});
+
+test('roster requests the week the user asked for', async () => {
+  let seen;
+  const client = {
+    async get(resource) {
+      seen = resource;
+      if (resource.endsWith('/teams')) return fx('league-teams');
+      if (resource.includes('users;use_login=1')) return fx('user-leagues');
+      return fx('team-roster');
+    },
+  };
+  await runCommand({ command: 'roster', args: ['470.l.1433971.t.4'], flags: { week: '3' } },
+    { client, out: capture() });
+  assert.match(seen, /;week=3$/);
+});
+
+test('roster labels which week it is showing', async () => {
+  const out = capture();
+  await runCommand({ command: 'roster', args: ['470.l.1433971.t.4'], flags: {} },
+    { client: fakeClient, out });
+  assert.match(out.text(), /Week 1/);
+});

@@ -41,7 +41,12 @@ export function createClient({ cookieHeader, fetch: fetchImpl = globalThis.fetch
       throw new SessionExpiredError(`Yahoo returned ${res.status} for ${resource}`);
     }
     if (!res.ok) {
-      throw new YahooApiError(`Yahoo returned ${res.status} for ${resource}`, res.status);
+      // Yahoo explains its 4xx responses in the body ("Invalid week 99
+      // specified in the URI."). Surfacing that beats a bare status code.
+      let description = null;
+      try { description = JSON.parse(await res.text())?.error?.description; } catch {}
+      throw new YahooApiError(
+        description ?? `Yahoo returned ${res.status} for ${resource}`, res.status);
     }
 
     const body = await res.json();

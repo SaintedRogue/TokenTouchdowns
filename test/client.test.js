@@ -66,3 +66,31 @@ test('get surfaces a Yahoo error envelope as YahooApiError with its description'
     return true;
   });
 });
+
+test('get surfaces Yahoo\'s own description on a non-OK status', async () => {
+  // Yahoo explains 400s in the body: "Invalid week 99 specified in the URI."
+  // Discarding that leaves the user with a bare status code.
+  const client = createClient({
+    cookieHeader: 'c',
+    fetch: async () => ({
+      ok: false, status: 400,
+      text: async () => JSON.stringify({ error: { description: 'Invalid week 99 specified in the URI.' } }),
+    }),
+  });
+  await assert.rejects(() => client.get('team/x/roster;week=99'), (e) => {
+    assert.ok(e instanceof YahooApiError);
+    assert.match(e.message, /Invalid week 99/);
+    return true;
+  });
+});
+
+test('get falls back to the status code when a non-OK body is not JSON', async () => {
+  const client = createClient({
+    cookieHeader: 'c',
+    fetch: async () => ({ ok: false, status: 500, text: async () => '<html>oops</html>' }),
+  });
+  await assert.rejects(() => client.get('x'), (e) => {
+    assert.match(e.message, /500/);
+    return true;
+  });
+});

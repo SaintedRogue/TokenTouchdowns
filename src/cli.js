@@ -46,7 +46,7 @@ Commands:
   leagues                List your fantasy leagues
   teams [league_key]     List teams in a league
   standings [league_key] Show league standings
-  roster [team_key]      Show a team roster
+  roster [team_key]      Show a team roster (--week=N for a past/future week)
   matchup [week]         Show your matchup for a week (default: current)
   transactions [league]  Recent adds, drops and trades
   players [league_key]   Browse the player pool
@@ -78,6 +78,16 @@ export function buildPlayersResource(leagueKey, flags = {}) {
     .map((f) => `${f}=${withDefaults[f]}`);
   parts.push(`start=${flags.start ?? 0}`, `count=${flags.count ?? 25}`);
   return `league/${leagueKey}/players;${parts.join(';')}`;
+}
+
+/**
+ * Build a `roster` resource path, optionally scoped to a week.
+ * A bare `--week` parses as `true` and must not become ";week=true".
+ */
+export function buildRosterResource(teamKey, flags = {}) {
+  const week = flags.week;
+  if (week === undefined || week === true) return `team/${teamKey}/roster`;
+  return `team/${teamKey}/roster;week=${week}`;
 }
 
 /** Yahoo epoch seconds -> YYYY-MM-DD. UTC so output does not vary by machine. */
@@ -207,7 +217,8 @@ export async function runCommand(
           teamKey = league.teams.find((t) => t.is_owned_by_current_login === 1)?.team_key;
           if (!teamKey) throw new YahooApiError('Could not find your team in that league');
         }
-        const { team } = await client.get(`team/${teamKey}/roster`);
+        const { team } = await client.get(buildRosterResource(teamKey, flags));
+        if (!flags?.json) out.write(`Week ${team.roster?.week ?? '?'}\n`);
         const rows = (team.roster?.players ?? []).map((p) => ({
           name: p.name?.full,
           pos: p.display_position,

@@ -16,6 +16,7 @@ node bin/tt.js leagues
 node bin/tt.js teams        # league resolved from your leagues
 node bin/tt.js standings 470.l.1433971
 node bin/tt.js roster       # your team resolved automatically
+node bin/tt.js roster --week=3
 node bin/tt.js matchup      # current week; `matchup 5` for a specific week
 node bin/tt.js players --position=RB --status=A --count=10
 node bin/tt.js players --search=kelce
