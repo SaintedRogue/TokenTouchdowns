@@ -10,6 +10,9 @@ export function cachePath(name, dir = CACHE_DIR) {
 }
 
 export function isStale(fetchedAt, ttlHours, now = Date.now()) {
+  // A non-finite ttl (undefined, null, NaN) is treated as stale to force a refetch,
+  // never fresh forever.
+  if (!Number.isFinite(ttlHours)) return true;
   return now - fetchedAt > ttlHours * 60 * 60 * 1000;
 }
 
