@@ -6,3 +6,6 @@ captures/
 .env
 .env.*
 node_modules/
+
+# PII scrub map for fixture capture — contains real names/GUIDs
+tools/scrub-map.local.json

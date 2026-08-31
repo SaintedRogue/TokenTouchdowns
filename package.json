@@ -1,0 +1,17 @@
+{
+  "name": "tokentouchdowns",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Yahoo fantasy football CLI",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "test:watch": "node --test --watch test/"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}

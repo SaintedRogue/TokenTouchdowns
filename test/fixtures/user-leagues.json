@@ -1,0 +1,87 @@
+{
+  "fantasy_content": {
+    "xml:lang": "en-US",
+    "yahoo:uri": "/fantasy/v2/users;use_login=1/games;game_keys=nfl/leagues",
+    "users": {
+      "0": {
+        "user": [
+          {
+            "guid": "GUIDTESTFIXTURE0000000001"
+          },
+          {
+            "games": {
+              "0": {
+                "game": [
+                  {
+                    "game_key": "470",
+                    "game_id": "470",
+                    "name": "Football",
+                    "code": "nfl",
+                    "type": "full",
+                    "url": "https://football.fantasysports.yahoo.com/f1",
+                    "season": "2026",
+                    "is_registration_over": 0,
+                    "is_game_over": 0,
+                    "is_offseason": 0,
+                    "is_live_draft_lobby_active": 1
+                  },
+                  {
+                    "leagues": {
+                      "0": {
+                        "league": [
+                          {
+                            "league_key": "470.l.1433971",
+                            "league_id": "1433971",
+                            "name": "Definitely Not Bots",
+                            "url": "https://football.fantasysports.yahoo.com/f1/1433971",
+                            "recordbook_url": "https://football.fantasysports.yahoo.com/f1/1433971/recordbook?layout=webview&device=smartphone",
+                            "logo_url": "https://s.yimg.com/ep/cx/blendr/v2/image-avatar-football-trophy-kc-png_1721783527415.png",
+                            "draft_status": "predraft",
+                            "num_teams": 4,
+                            "max_teams": "10",
+                            "edit_key": "1",
+                            "weekly_deadline": "",
+                            "roster_type": "week",
+                            "league_update_timestamp": null,
+                            "scoring_type": "head",
+                            "scoring_label": "H2H",
+                            "league_type": "private",
+                            "renew": "",
+                            "renewed": "",
+                            "felo_tier": "bronze",
+                            "is_highscore": false,
+                            "is_guillotine": "0",
+                            "matchup_week": 1,
+                            "iris_group_chat_id": "",
+                            "short_invitation_url": "",
+                            "allow_add_to_dl_extra_pos": 1,
+                            "is_pro_league": "0",
+                            "is_cash_league": "0",
+                            "current_week": 1,
+                            "start_week": "1",
+                            "start_date": "2026-09-09",
+                            "end_week": "17",
+                            "end_date": "2027-01-04",
+                            "is_plus_league": "0",
+                            "game_code": "nfl",
+                            "season": "2026"
+                          }
+                        ]
+                      },
+                      "count": 1
+                    }
+                  }
+                ]
+              },
+              "count": 1
+            }
+          }
+        ]
+      },
+      "count": 1
+    },
+    "time": "74.64599609375ms",
+    "copyright": "Certain Data by Sportradar, Stats Perform and Rotowire",
+    "refresh_rate": "30"
+  }
+}
