@@ -86,6 +86,9 @@ function setOrMarkAmbiguous(index, key, record) {
  *   for every non-DEF position. Indexing an empty name would let one
  *   malformed source row become a join key that matches every other
  *   malformed query, attaching a real ADP to nothing in particular.
+ * - The same applies to an empty position, for the same reason: position is
+ *   half of every non-DEF key, so a missing one is a live join key that
+ *   collides with every other position-less row rather than an absent one.
  * - Every remaining record is indexed under its base key (name + position).
  *   Records that also carry a team are additionally indexed under a
  *   team-qualified key so an exact team can act as a tiebreaker. Both key
@@ -95,6 +98,9 @@ export function buildAdpIndex(records) {
   const index = new Map();
   for (const r of records ?? []) {
     const pos = normalizePosition(r?.position);
+    // An absent position is not a position: dropped rather than indexed under
+    // an empty one, exactly as an empty name is below.
+    if (!pos) continue;
 
     if (pos === 'DEF') {
       const t = normalizeTeam(r?.team);
@@ -123,6 +129,9 @@ export function buildAdpIndex(records) {
  */
 function resolve(index, { name, position, team } = {}) {
   const pos = normalizePosition(position);
+  // Mirrors buildAdpIndex: a query with no position cannot be keyed, and
+  // must report absent rather than probing an empty-position namespace.
+  if (!pos) return { status: 'absent' };
 
   if (pos === 'DEF') {
     // Team defenses never fall back to name matching (spec rule 5): no team

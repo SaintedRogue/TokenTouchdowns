@@ -56,6 +56,17 @@ Verification notes:
   it must degrade gracefully, never hard-fail.
 - **nflverse** is a community dataset published on GitHub; treat availability as
   good but not guaranteed.
+- **Fantasy Football Calculator**: no auth, no key. Its **license terms are
+  unverified** — the endpoint is public and the response format is documented,
+  but FFC publishes no statement of reuse rights, so redistribution or any
+  commercial use must be cleared before it is relied on. `meta.license` for
+  this source reads `'unverified'`, not `'public'`, for that reason.
+- **FFC serves a different dataset per scoring format and league size.** The
+  2026 Non-PPR 12-team board (1,884 drafts, 220 players) and the Half-PPR
+  10-team board (3,208 drafts, 233 players) are different numbers over
+  different samples. ADP is therefore only meaningful when displayed with the
+  variant it came from; `tt sync --scoring=<fmt> --teams=<n>` selects it and
+  the footer, `tt sources` and `tt sync` all label it.
 
 ## 3. Source module interface
 
@@ -107,6 +118,18 @@ is worse than a missing one, because it would be drafted on.
 3. Team is a tiebreaker only — preseason trades make FFC's team lag Yahoo's.
 4. More than one candidate after those rules -> **unmatched**. Never pick one.
 5. Team defenses (`DEF`) are matched by team abbreviation, not by name.
+
+**Limit of the guarantee.** Ambiguity is detected only *within* the FFC feed —
+two FFC rows colliding on a key. It is not a guarantee that a match is the
+right player: a Yahoo player sharing a normalised name and position with a
+different FFC-listed player, whose team matches no FFC row, will match that row
+by design under rule 3, because team is a tiebreaker and never a filter, so a
+non-matching team cannot suppress an otherwise-unambiguous base-key match.
+
+Rule 3 is also why the team on a lookup is taken from **Yahoo**
+(`editorial_team_abbr`) and only falls back to the Sleeper crosswalk: Yahoo is
+the league of record, and a Sleeper team left stale by a trade would otherwise
+send the team-qualified lookup at a different player's row.
 
 `tt sync` reports the match rate. A silent drop from ~95% to ~60% after a name
 format change is the failure this reporting exists to catch.
@@ -160,8 +183,15 @@ cache degrades to "enrichment unavailable" rather than failing the command —
 tt players --with=adp,injury      add ADP and injury columns
 tt roster  --with=proj,injury     decorate your roster
 tt sync [--force] [--source=ffc]  refresh caches, report match rates
+tt sync --scoring=half-ppr --teams=10   which ADP board to cache
 tt sources                        registered sources, cache age, staleness
 ```
+
+`--with` accepts only capabilities enrichment actually attaches
+(`IMPLEMENTED_CAPABILITIES` in `enrich.js`), which is a subset of
+`meta.provides`: a flag the registry advertises but nothing implements would
+otherwise validate and then do nothing. Only the sources providing a requested
+capability need a cache, so `--with=injury` runs off Sleeper alone.
 
 `--with` accepts capability names from `meta.provides`, not source names, so a
 capability can change provider without changing the user's command.

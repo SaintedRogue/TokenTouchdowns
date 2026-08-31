@@ -36,10 +36,13 @@ export function formatTable(rows, columns) {
 }
 
 import { SessionExpiredError, YahooApiError } from './client.js';
-import { SOURCES, allCapabilities } from './sources/index.js';
+import {
+  SOURCES, sourcesProviding, recordsOf, metaOf, feedVariantLabel,
+} from './sources/index.js';
+import { SCORING_FORMATS } from './sources/ffc.js';
 import { readCache, writeCache } from './cache.js';
 import { buildCrosswalk, buildAdpIndex } from './identity.js';
-import { enrichPlayers } from './enrich.js';
+import { enrichPlayers, IMPLEMENTED_CAPABILITIES } from './enrich.js';
 
 /**
  * The user's input was invalid -- distinct from a Yahoo-side failure. A typo
@@ -76,6 +79,11 @@ Transaction filters:
 
 Sync flags:
   --source=<name>  --force
+  --scoring=standard|half-ppr|ppr   ADP scoring format (default: standard)
+  --teams=<n>                       ADP league size (default: 12)
+  ADP is published per scoring format and league size; the two flags above
+  select which board --with=adp shows, and the format is labelled in the
+  footer so an unlabelled number can never be read as the wrong one.
 
 Omitted keys are resolved from your own leagues and team.`;
 
@@ -149,10 +157,17 @@ export function transactionRows(transactions) {
   return rows;
 }
 
-/** Parse `--with=adp,injury` into validated capability names. */
+/**
+ * Parse `--with=adp,injury` into validated capability names.
+ *
+ * Validated against IMPLEMENTED_CAPABILITIES, not the source registry's
+ * `allCapabilities()`: the registry advertises 'identity' and 'depth' that
+ * enrichment does not attach, so validating against it accepted
+ * `--with=depth` and then produced output identical to no flag at all.
+ */
 export function parseWith(value) {
   if (!value || value === true) return [];
-  const known = new Set(allCapabilities());
+  const known = new Set(IMPLEMENTED_CAPABILITIES);
   const caps = String(value).split(',').map((s) => s.trim()).filter(Boolean);
   for (const c of caps) {
     if (!known.has(c)) {
@@ -161,6 +176,77 @@ export function parseWith(value) {
     }
   }
   return caps;
+}
+
+/**
+ * The extra columns `--with` contributes, and the row fields that feed them.
+ * Shared by `players` and `roster`: the two rendered the same enrichment from
+ * two copies of this logic, so a fix (or a new capability) had to be made
+ * twice, and deleting one copy left the whole suite green.
+ */
+export function enrichmentColumns(caps) {
+  const columns = [];
+  if (caps.includes('adp')) columns.push({ key: 'adp', label: 'ADP' });
+  if (caps.includes('injury')) columns.push({ key: 'injury', label: 'INJ' });
+  return columns;
+}
+
+const enrichmentFields = (p) => ({ adp: p.adp, injury: p.injury });
+
+/**
+ * Match-rate visibility per the spec: silent degradation (a source that
+ * stopped matching) must show up somewhere a human will see it. Never under
+ * --json -- it would corrupt machine-readable output.
+ *
+ * The adp line carries the feed variant ("[Half-PPR, 10-team]") whenever the
+ * cache knows it. ADP means nothing without its scoring format: a Non-PPR
+ * number read as Half-PPR is wrong, not approximate, and it gets drafted on.
+ */
+export function writeEnrichmentFooter(out, { stats, adpVariant } = {}, caps = [], flags = {}) {
+  if (!stats || flags?.json) return;
+  if (caps.includes('adp')) {
+    out.write(`adp${adpVariant ? ` [${adpVariant}]` : ''}: ${stats.adp.matched} matched, ` +
+      `${stats.adp.ambiguous} ambiguous, ${stats.adp.absent} absent (of ${stats.total})\n`);
+  }
+  if (caps.includes('injury')) {
+    out.write(`injury: ${stats.injury.matched} matched (of ${stats.total})\n`);
+  }
+}
+
+/** Whole hours since a cache entry was written, for staleness reporting. */
+const ageHours = (fetchedAt, now = Date.now()) =>
+  Math.max(0, Math.round((now - fetchedAt) / (60 * 60 * 1000)));
+
+/**
+ * ADP fetch options for `sync`, validated before any network call.
+ *
+ * FFC publishes a different dataset per scoring format and league size, and
+ * `sync` passed neither -- so the module defaults (12-team Non-PPR) were the
+ * only reachable board. These flags make the others reachable without
+ * hardcoding any one league's settings into the source module.
+ */
+export function syncFetchOptions(flags = {}) {
+  const options = {};
+  if (flags.scoring !== undefined) {
+    if (flags.scoring === true) {
+      throw new UsageError(`--scoring needs a value. Available: ${SCORING_FORMATS.join(', ')}`);
+    }
+    const scoring = String(flags.scoring).toLowerCase();
+    if (!SCORING_FORMATS.includes(scoring)) {
+      throw new UsageError(
+        `Unknown scoring format "${flags.scoring}". Available: ${SCORING_FORMATS.join(', ')}`);
+    }
+    options.scoring = scoring;
+  }
+  if (flags.teams !== undefined) {
+    if (flags.teams === true) throw new UsageError('--teams needs a value, e.g. --teams=10');
+    const teams = Number(flags.teams);
+    if (!Number.isInteger(teams) || teams < 2 || teams > 32) {
+      throw new UsageError(`--teams must be a whole number between 2 and 32 (got "${flags.teams}")`);
+    }
+    options.teams = teams;
+  }
+  return options;
 }
 
 // A source's TTL lives on its own meta object; looking it up here instead of
@@ -178,20 +264,49 @@ const ttlFor = (name) => SOURCES.find((s) => s.meta.name === name)?.meta.ttlHour
  * the cache was not ready).
  */
 async function tryEnrich(players, caps, { cacheDir, err }) {
-  if (caps.length === 0) return { players, stats: null };
-  const sleeperCached = await readCache('sleeper', { dir: cacheDir, ttlHours: ttlFor('sleeper') });
-  const ffcCached = await readCache('ffc', { dir: cacheDir, ttlHours: ttlFor('ffc') });
-  if (!sleeperCached || !ffcCached) {
-    err.write('Enrichment cache is empty. Run: tt sync\n');
-    return { players, stats: null };
+  const unenriched = { players, stats: null, adpVariant: null };
+  if (caps.length === 0) return unenriched;
+
+  // Only the sources that actually PROVIDE a requested capability are
+  // required. Demanding both caches meant `--with=injury` failed whenever the
+  // FFC cache was missing, even though a fresh Sleeper cache held exactly
+  // what was asked for. Every present cache is still read -- the crosswalk
+  // sharpens an adp-only run -- but a source nothing asked for may be absent.
+  const required = [...new Set(
+    caps.flatMap((c) => sourcesProviding(c).map((s) => s.meta.name)))];
+  const cached = new Map();
+  for (const s of SOURCES) {
+    cached.set(s.meta.name,
+      await readCache(s.meta.name, { dir: cacheDir, ttlHours: ttlFor(s.meta.name) }));
   }
+
+  const missing = required.filter((name) => !cached.get(name));
+  if (missing.length > 0) {
+    err.write(`Enrichment cache is empty for: ${missing.join(', ')}. Run: tt sync\n`);
+    return unenriched;
+  }
+
+  // Spec §5: an expired cache still enriches -- stale data beats none -- but
+  // it must never do so silently. `readCache` has always computed `.stale`
+  // and nothing outside `sync` read it, so a two-day-old ADP was served as
+  // though it were today's.
+  const stale = required
+    .filter((name) => cached.get(name).stale)
+    .map((name) => `${name} ${ageHours(cached.get(name).fetchedAt)}h`);
+  if (stale.length > 0) {
+    err.write(`Enrichment cache is stale (${stale.join(', ')} old). Run: tt sync\n`);
+  }
+
+  const dataOf = (name) => cached.get(name)?.data;
   try {
+    const ffcData = dataOf('ffc');
+    const sleeperData = dataOf('sleeper');
     const { players: enriched, stats } = enrichPlayers(players, {
-      crosswalk: buildCrosswalk(sleeperCached.data),
-      adpIndex: buildAdpIndex(ffcCached.data),
+      crosswalk: buildCrosswalk(sleeperData === undefined ? [] : recordsOf(sleeperData)),
+      adpIndex: buildAdpIndex(ffcData === undefined ? [] : recordsOf(ffcData)),
       capabilities: caps,
     });
-    return { players: enriched, stats };
+    return { players: enriched, stats, adpVariant: feedVariantLabel(metaOf(ffcData)) };
   } catch (e) {
     // Cache entries carry no schema version and outlive an upgrade: a stale-
     // shape payload (e.g. `data` no longer an array) throws deep inside
@@ -199,7 +314,7 @@ async function tryEnrich(players, caps, { cacheDir, err }) {
     // enrichment must never propagate -- degrade to the unenriched table
     // instead of taking down a command that worked fine before --with.
     err.write(`Enrichment cache is corrupt (${e.message}). Run: tt sync --force\n`);
-    return { players, stats: null };
+    return unenriched;
   }
 }
 
@@ -300,33 +415,24 @@ export async function runCommand(
           if (!teamKey) throw new YahooApiError('Could not find your team in that league');
         }
         const { team } = await client.get(buildRosterResource(teamKey, flags));
-        const { players, stats } = await tryEnrich(team.roster?.players ?? [], caps, { cacheDir, err });
+        const enrichment = await tryEnrich(team.roster?.players ?? [], caps, { cacheDir, err });
 
         if (!flags?.json) out.write(`Week ${team.roster?.week ?? '?'}\n`);
-        const rows = players.map((p) => ({
+        const rows = enrichment.players.map((p) => ({
           name: p.name?.full,
           pos: p.display_position,
           team: p.editorial_team_abbr,
           status: p.status ?? '',
-          adp: p.adp,
-          injury: p.injury,
+          ...enrichmentFields(p),
         }));
-        const columns = [
+        emit(rows, [
           { key: 'name', label: 'PLAYER' },
           { key: 'pos', label: 'POS' },
           { key: 'team', label: 'TEAM' },
           { key: 'status', label: 'STATUS' },
-        ];
-        if (caps.includes('adp')) columns.push({ key: 'adp', label: 'ADP' });
-        if (caps.includes('injury')) columns.push({ key: 'injury', label: 'INJ' });
-        emit(rows, columns);
-        // Match-rate visibility per the spec: silent degradation (a source
-        // that stopped matching) must show up somewhere a human will see it.
-        // Never under --json -- it would corrupt machine-readable output.
-        if (stats && caps.includes('adp') && !flags?.json) {
-          out.write(`adp: ${stats.adp.matched} matched, ${stats.adp.ambiguous} ambiguous, ` +
-            `${stats.adp.absent} absent (of ${stats.total})\n`);
-        }
+          ...enrichmentColumns(caps),
+        ]);
+        writeEnrichmentFooter(out, enrichment, caps, flags);
         return 0;
       }
 
@@ -334,47 +440,57 @@ export async function runCommand(
         const caps = parseWith(flags.with);
         const key = await resolveLeagueKey(client, args[0]);
         const { league } = await client.get(buildPlayersResource(key, flags));
-        const { players, stats } = await tryEnrich(league.players ?? [], caps, { cacheDir, err });
+        const enrichment = await tryEnrich(league.players ?? [], caps, { cacheDir, err });
 
-        const rows = players.map((p) => ({
+        const rows = enrichment.players.map((p) => ({
           name: p.name?.full,
           pos: p.display_position,
           team: p.editorial_team_abbr,
           bye: p.bye_weeks?.week,
           status: p.status ?? '',
-          adp: p.adp,
-          injury: p.injury,
+          ...enrichmentFields(p),
         }));
-        const columns = [
+        emit(rows, [
           { key: 'name', label: 'PLAYER' },
           { key: 'pos', label: 'POS' },
           { key: 'team', label: 'TEAM' },
           { key: 'bye', label: 'BYE' },
           { key: 'status', label: 'STATUS' },
-        ];
-        if (caps.includes('adp')) columns.push({ key: 'adp', label: 'ADP' });
-        if (caps.includes('injury')) columns.push({ key: 'injury', label: 'INJ' });
-        emit(rows, columns);
-        if (stats && caps.includes('adp') && !flags?.json) {
-          out.write(`adp: ${stats.adp.matched} matched, ${stats.adp.ambiguous} ambiguous, ` +
-            `${stats.adp.absent} absent (of ${stats.total})\n`);
-        }
+          ...enrichmentColumns(caps),
+        ]);
+        writeEnrichmentFooter(out, enrichment, caps, flags);
         return 0;
       }
 
       case 'sources': {
-        const rows = SOURCES.map((s) => ({
-          name: s.meta.name,
-          provides: s.meta.provides.join(','),
-          join: s.meta.joinKey,
-          ttl: `${s.meta.ttlHours}h`,
-          documented: s.meta.documented ? 'yes' : 'NO',
-        }));
+        // AGE/STALE/VARIANT are read from the cache, not from meta. TTL alone
+        // is a constant -- the README promised "what's registered and how
+        // stale" while this command never opened a cache file, so a source
+        // could be two days cold and look identical to one synced a minute
+        // ago. VARIANT names WHICH feed the cached numbers came from.
+        const rows = [];
+        for (const s of SOURCES) {
+          const cached = await readCache(s.meta.name,
+            { dir: cacheDir, ttlHours: s.meta.ttlHours });
+          rows.push({
+            name: s.meta.name,
+            provides: s.meta.provides.join(','),
+            join: s.meta.joinKey,
+            ttl: `${s.meta.ttlHours}h`,
+            age: cached ? `${ageHours(cached.fetchedAt)}h` : '-',
+            stale: cached ? (cached.stale ? 'yes' : 'no') : 'never',
+            variant: feedVariantLabel(metaOf(cached?.data)) ?? '-',
+            documented: s.meta.documented ? 'yes' : 'NO',
+          });
+        }
         emit(rows, [
           { key: 'name', label: 'SOURCE' },
           { key: 'provides', label: 'PROVIDES' },
           { key: 'join', label: 'JOIN' },
           { key: 'ttl', label: 'TTL' },
+          { key: 'age', label: 'AGE' },
+          { key: 'stale', label: 'STALE' },
+          { key: 'variant', label: 'VARIANT' },
           { key: 'documented', label: 'DOCUMENTED' },
         ]);
         return 0;
@@ -386,18 +502,52 @@ export async function runCommand(
         // meaningless. Match-rate visibility belongs to players/roster's
         // --with footer, which has real Yahoo rows to classify.
         const only = flags.source;
+        const named = only !== undefined && only !== true;
+        if (named && !SOURCES.some((s) => s.meta.name === only)) {
+          // Previously a silent no-op exiting 0: `tt sync --source=sleper`
+          // reported nothing, synced nothing, and looked like success.
+          throw new UsageError(
+            `Unknown source "${only}". Available: ${SOURCES.map((s) => s.meta.name).join(', ')}`);
+        }
+        const fetchOptions = syncFetchOptions(flags);
+        // A payload we cannot parse is worth replacing, so an unreadable old
+        // cache counts as zero rather than blocking the overwrite guard below.
+        const cachedCount = (data) => { try { return recordsOf(data).length; } catch { return 0; } };
+        let failed = 0;
+
         for (const s of SOURCES) {
-          if (only && only !== true && s.meta.name !== only) continue;
+          if (named && s.meta.name !== only) continue;
           const cached = await readCache(s.meta.name, { dir: cacheDir, ttlHours: ttlFor(s.meta.name) });
           if (cached && !cached.stale && !flags.force) {
             out.write(`${s.meta.name}: fresh (cached)\n`);
             continue;
           }
-          const records = s.normalize(await s.fetchRaw({ fetch: fetchImpl }));
-          await writeCache(s.meta.name, records, { dir: cacheDir });
-          out.write(`${s.meta.name}: ${records.length} records\n`);
+          try {
+            const payload = s.normalize(await s.fetchRaw({ fetch: fetchImpl, ...fetchOptions }));
+            const count = recordsOf(payload).length;
+            const previous = cached ? cachedCount(cached.data) : 0;
+            // A source that renames a field normalizes to zero records. Left
+            // unguarded, sync would overwrite a working 6,750-record
+            // crosswalk with [] and print "0 records", after which every
+            // --with run is blank with nothing to explain why.
+            if (count === 0 && previous > 0) {
+              err.write(`${s.meta.name}: REFUSED to replace ${previous} cached records with 0 — ` +
+                `the source's response shape has probably changed. Keeping the existing cache.\n`);
+              failed += 1;
+              continue;
+            }
+            await writeCache(s.meta.name, payload, { dir: cacheDir });
+            const variant = feedVariantLabel(metaOf(payload));
+            out.write(`${s.meta.name}: ${count} records${variant ? ` [${variant}]` : ''}\n`);
+          } catch (e) {
+            // Per source, not per run: Sleeper is first in SOURCES, so an
+            // unhandled Sleeper failure used to stop FFC from syncing at all
+            // and surfaced as a raw stack trace out of bin/tt.js.
+            err.write(`${s.meta.name}: FAILED (${e.message})\n`);
+            failed += 1;
+          }
         }
-        return 0;
+        return failed > 0 ? 1 : 0;
       }
 
       case 'transactions': {

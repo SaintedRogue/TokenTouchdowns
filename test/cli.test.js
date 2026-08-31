@@ -319,7 +319,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { parseWith, UsageError } from '../src/cli.js';
 import { allCapabilities } from '../src/sources/index.js';
-import { writeCache } from '../src/cache.js';
+import { IMPLEMENTED_CAPABILITIES } from '../src/enrich.js';
+import { readCache, writeCache } from '../src/cache.js';
+
+const HOUR = 60 * 60 * 1000;
 
 const tmpCacheDir = () => mkdtempSync(path.join(tmpdir(), 'tt-cli-cache-'));
 
@@ -346,8 +349,21 @@ test('parseWith throws a UsageError, not a Yahoo-side error, for bad input', () 
   assert.throws(() => parseWith('nonsense'), (e) => e instanceof UsageError);
 });
 
-test('every capability parseWith accepts is one a source actually provides', () => {
-  for (const cap of allCapabilities()) assert.deepEqual(parseWith(cap), [cap]);
+test('the implemented capability list is exactly what enrichment attaches', () => {
+  // Pinned explicitly rather than derived. The previous version of this test
+  // compared parseWith's output against the same set parseWith validated
+  // from, so it passed no matter what either side said.
+  assert.deepEqual(IMPLEMENTED_CAPABILITIES, ['adp', 'injury']);
+  for (const cap of IMPLEMENTED_CAPABILITIES) assert.deepEqual(parseWith(cap), [cap]);
+});
+
+test('parseWith rejects a capability a source advertises but enrichment never attaches', () => {
+  // 'depth' is in meta.provides, so it used to validate -- and then attach
+  // nothing, add no column and print no footer, exiting 0 with output
+  // identical to no --with at all.
+  assert.ok(allCapabilities().includes('depth'), 'precondition: the registry still advertises depth');
+  assert.throws(() => parseWith('depth'), (e) =>
+    e instanceof UsageError && /depth/.test(e.message) && /adp, injury/.test(e.message));
 });
 
 test('sources lists registered sources with their capabilities', async () => {
@@ -631,6 +647,240 @@ test('players --with=adp degrades to an unenriched table on a corrupt cache entr
     assert.equal(code, 0, 'a corrupt cache must not fail a command that worked without --with');
     assert.match(out.text(), /Josh Allen/);
     assert.match(err.text(), /corrupt/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+// --- Final review: staleness, ADP variant, per-source requirements --------
+
+test('players --with=adp still renders, and discloses that the cache is stale', async () => {
+  // Spec §5: stale enrichment beats none, but serving a two-day-old ADP as
+  // though it were today's is exactly the silent failure the spec forbids.
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', SLEEPER_RECORDS, { dir, now: Date.now() - 31 * HOUR });
+    await writeCache('ffc', FFC_RECORDS, { dir, now: Date.now() - 27 * HOUR });
+    const out = capture(); const err = capture();
+    const code = await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB', with: 'adp' } },
+      { client: fakeClient, out, err, cacheDir: dir },
+    );
+    assert.equal(code, 0, 'a stale cache must still render the table');
+    assert.match(out.text(), /Josh Allen/);
+    assert.match(out.text(), /adp: 1 matched/);
+    assert.match(err.text(), /stale/i);
+    assert.match(err.text(), /ffc 27h/);
+    assert.match(err.text(), /tt sync/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('players --with=adp says nothing about staleness when the cache is fresh', async () => {
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', SLEEPER_RECORDS, { dir });
+    await writeCache('ffc', FFC_RECORDS, { dir });
+    const err = capture();
+    await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB', with: 'adp' } },
+      { client: fakeClient, out: capture(), err, cacheDir: dir },
+    );
+    assert.equal(err.text(), '');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sources reports each cache\'s age and staleness, not just its TTL', async () => {
+  const dir = tmpCacheDir();
+  try {
+    // ffc TTL is 12h; 27h old is stale. sleeper is deliberately never synced.
+    await writeCache('ffc', { meta: { type: 'Half-PPR', teams: 10 }, records: FFC_RECORDS },
+      { dir, now: Date.now() - 27 * HOUR });
+    const out = capture();
+    const code = await runCommand({ command: 'sources', args: [], flags: {} },
+      { out, cacheDir: dir });
+    assert.equal(code, 0);
+    const lines = out.text().split('\n');
+    assert.match(lines[0], /AGE/);
+    assert.match(lines[0], /STALE/);
+    const ffc = lines.find((l) => l.startsWith('ffc'));
+    assert.match(ffc, /27h/, 'age comes from the cache file, not from meta');
+    assert.match(ffc, /yes/, 'a 27h-old cache with a 12h TTL is stale');
+    assert.match(ffc, /Half-PPR, 10-team/, 'which ADP board is cached');
+    const sleeper = lines.find((l) => l.startsWith('sleeper'));
+    assert.match(sleeper, /never/, 'a source with no cache reads as never synced');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the adp footer names the scoring variant the numbers came from', async () => {
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', SLEEPER_RECORDS, { dir });
+    await writeCache('ffc',
+      { meta: { type: 'Half-PPR', teams: 10 }, records: FFC_RECORDS }, { dir });
+    const out = capture();
+    await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB', with: 'adp' } },
+      { client: fakeClient, out, cacheDir: dir },
+    );
+    assert.match(out.text(), /adp \[Half-PPR, 10-team\]: 1 matched, 0 ambiguous, 4 absent \(of 5\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--with=injury works from the Sleeper cache alone, with no ADP cache at all', async () => {
+  // Requiring both caches for any capability meant a valid 24h Sleeper cache
+  // holding exactly what was asked for still reported "run tt sync".
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', SLEEPER_RECORDS, { dir });
+    const out = capture(); const err = capture();
+    const code = await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB', with: 'injury' } },
+      { client: fakeClient, out, err, cacheDir: dir },
+    );
+    assert.equal(code, 0);
+    assert.equal(err.text(), '', 'no source providing injury is missing');
+    const allen = out.text().split('\n').find((l) => l.includes('Josh Allen'));
+    assert.match(allen, /Questionable/);
+    assert.match(out.text(), /injury: 1 matched \(of 5\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('--with=adp names the specific source whose cache is missing', async () => {
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', SLEEPER_RECORDS, { dir });
+    const out = capture(); const err = capture();
+    const code = await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB', with: 'adp' } },
+      { client: fakeClient, out, err, cacheDir: dir },
+    );
+    assert.equal(code, 0);
+    assert.match(err.text(), /ffc/);
+    assert.doesNotMatch(err.text(), /sleeper/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sync passes --scoring and --teams through to the ADP request', async () => {
+  const dir = tmpCacheDir();
+  try {
+    let adpUrl;
+    const fetchImpl = async (url) => {
+      if (String(url).includes('fantasyfootballcalculator')) adpUrl = String(url);
+      return fakeSyncFetch(url);
+    };
+    const code = await runCommand(
+      { command: 'sync', args: [], flags: { source: 'ffc', scoring: 'half-ppr', teams: '10' } },
+      { out: capture(), cacheDir: dir, fetch: fetchImpl },
+    );
+    assert.equal(code, 0);
+    const u = new URL(adpUrl);
+    assert.equal(u.pathname, '/api/v1/adp/half-ppr');
+    assert.equal(u.searchParams.get('teams'), '10');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sync rejects a scoring format FFC does not publish', async () => {
+  const out = capture(); const err = capture();
+  const code = await runCommand(
+    { command: 'sync', args: [], flags: { scoring: 'superflex' } },
+    { out, err, cacheDir: tmpCacheDir(), fetch: fakeSyncFetch },
+  );
+  assert.equal(code, 1);
+  assert.match(err.text(), /superflex/);
+  assert.match(err.text(), /half-ppr/);
+});
+
+test('sync --source=<unknown> is an error naming the real sources, not a silent no-op', async () => {
+  const out = capture(); const err = capture();
+  const code = await runCommand(
+    { command: 'sync', args: [], flags: { source: 'sleper' } },
+    { out, err, cacheDir: tmpCacheDir(), fetch: fakeSyncFetch },
+  );
+  assert.equal(code, 1);
+  assert.match(err.text(), /sleper/);
+  assert.match(err.text(), /sleeper, ffc/);
+  assert.equal(out.text(), '');
+});
+
+test('a failing source does not stop the others, and sync exits non-zero', async () => {
+  // Sleeper is first in SOURCES: an unhandled rejection there used to escape
+  // as a raw stack and prevent FFC from syncing at all in that run.
+  const dir = tmpCacheDir();
+  try {
+    const flaky = async (url) => {
+      if (String(url).includes('sleeper')) throw new Error('getaddrinfo ENOTFOUND');
+      return fakeSyncFetch(url);
+    };
+    const out = capture(); const err = capture();
+    const code = await runCommand({ command: 'sync', args: [], flags: {} },
+      { out, err, cacheDir: dir, fetch: flaky });
+    assert.equal(code, 1, 'a failed source must be visible in the exit code');
+    assert.match(err.text(), /sleeper: FAILED \(getaddrinfo ENOTFOUND\)/);
+    assert.match(out.text(), /ffc: 1 records/, 'the other source still synced');
+    assert.equal((await readCache('ffc', { dir, ttlHours: 12 })).data.records.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sync refuses to replace a populated cache with zero records', async () => {
+  // If Sleeper renames yahoo_id, normalize returns []. Overwriting a working
+  // 6,750-record crosswalk with that makes every later --with silently blank.
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', SLEEPER_RECORDS, { dir, now: Date.now() - 48 * HOUR });
+    const renamed = async (url) => {
+      if (String(url).includes('sleeper')) {
+        return { ok: true,
+          json: async () => ({ 1: { player_id: '1', yahoo_id_v2: '30977', full_name: 'Josh Allen' } }) };
+      }
+      return fakeSyncFetch(url);
+    };
+    const out = capture(); const err = capture();
+    const code = await runCommand({ command: 'sync', args: [], flags: {} },
+      { out, err, cacheDir: dir, fetch: renamed });
+    assert.equal(code, 1);
+    assert.match(err.text(), /sleeper: REFUSED/);
+    assert.doesNotMatch(out.text(), /sleeper: 0 records/);
+    const kept = await readCache('sleeper', { dir, ttlHours: 24 });
+    assert.equal(kept.data.length, 1, 'the working cache must survive');
+    assert.equal(kept.data[0].yahooId, '30977');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sync labels which ADP board it cached', async () => {
+  const dir = tmpCacheDir();
+  try {
+    const withMeta = async (url) => {
+      if (String(url).includes('fantasyfootballcalculator')) {
+        return { ok: true, json: async () => ({
+          meta: { type: 'Half-PPR', teams: 10, total_drafts: 3208 },
+          players: [{ name: 'Josh Allen', position: 'QB', team: 'BUF', adp: 3.2 }],
+        }) };
+      }
+      return fakeSyncFetch(url);
+    };
+    const out = capture();
+    await runCommand({ command: 'sync', args: [], flags: { source: 'ffc' } },
+      { out, cacheDir: dir, fetch: withMeta });
+    assert.match(out.text(), /ffc: 1 records \[Half-PPR, 10-team\]/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

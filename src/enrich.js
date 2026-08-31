@@ -1,6 +1,18 @@
 import { lookupByYahooKey, matchAdp, adpMatchState } from './identity.js';
 
 /**
+ * The capabilities `enrichPlayers` below actually attaches. This is NOT
+ * `allCapabilities()` from the source registry: Sleeper's meta also advertises
+ * 'identity' and 'depth', which no code here consumes. Validating `--with`
+ * against the registry accepted `--with=depth` and then silently produced
+ * output identical to no flag at all -- no column, no footer, exit 0.
+ * `--with` validates against this list instead, so the error message offers
+ * only flags that do something. Adding a branch below means adding its name
+ * here, in the same commit.
+ */
+export const IMPLEMENTED_CAPABILITIES = ['adp', 'injury'];
+
+/**
  * Decorate Yahoo players with external attributes.
  * Unmatched players pass through untouched: enrichment is additive and must
  * never break a command that worked without it.
@@ -32,13 +44,17 @@ export function enrichPlayers(players, { crosswalk, adpIndex, capabilities = [] 
       const query = {
         name: p.name?.full ?? xw?.name,
         position: p.display_position ?? xw?.position,
-        // Sleeper assigns no yahoo_id to team defenses, so a DEF can never
-        // appear in the crosswalk and xw is always null -- without this
-        // fallback to Yahoo's own editorial_team_abbr, every defense
-        // silently resolves to 'absent' (DEF has no name-only fallback; see
-        // identity.js). Prefer the crosswalk's team when present: it is the
-        // authoritative post-trade value for a player who did get matched.
-        team: xw?.team ?? p.editorial_team_abbr,
+        // Yahoo first: Yahoo is the league of record, it is the team the
+        // user sees in the TEAM column, and spec 4.1 rule 3 frames the
+        // tiebreaker against Yahoo's team. Preferring Sleeper's team here
+        // meant a Sleeper row left stale by a trade could send the
+        // team-qualified lookup at a DIFFERENT player's FFC row -- the only
+        // path in this module that can attach a wrong player's ADP, which is
+        // exactly the outcome the never-guess policy exists to prevent.
+        // The crosswalk remains the fallback: Sleeper assigns no yahoo_id to
+        // team defenses, so a DEF is never in the crosswalk, and a Yahoo row
+        // without editorial_team_abbr still gets a team to match on.
+        team: p.editorial_team_abbr ?? xw?.team,
       };
       const state = adpMatchState(adpIndex, query);
       stats.adp[state] += 1;

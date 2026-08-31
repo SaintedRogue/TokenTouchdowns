@@ -23,7 +23,8 @@ node bin/tt.js players --search=kelce
 node bin/tt.js transactions --type=add,drop
 node bin/tt.js leagues --json
 node bin/tt.js sync                    # refresh enrichment caches
-node bin/tt.js sources                 # what's registered and how stale
+node bin/tt.js sync --scoring=half-ppr --teams=10   # match your league's ADP
+node bin/tt.js sources                 # what's registered, how old, how stale
 node bin/tt.js players --position=RB --status=A --with=adp,injury
 ```
 
@@ -45,19 +46,32 @@ PLAYER               POS  TEAM  BYE  STATUS  ADP   INJ
 Jahmyr Gibbs         RB   Det   6            1.4   -
 Christian McCaffrey  RB   SF    8    Q       6.9   Questionable
 James Cook III       RB   Buf   7            8.5   -
-adp: 8 matched, 0 ambiguous, 0 absent (of 8)
+adp [Half-PPR, 10-team]: 8 matched, 0 ambiguous, 0 absent (of 8)
+injury: 3 matched (of 8)
 ```
 
 Player filters: `--position` `--status` `--search` `--sort` `--count` `--start`.
 Results are sorted by overall rank unless `--sort` says otherwise.
 
 Enrichment: `--with` accepts capability names (`adp`, `injury`) and adds columns
-from external sources. `tt sync` must be run once before enrichment works; it
-fetches and caches data in `~/.tokentouchdowns/cache/` (override with
-`TT_CACHE_DIR`). If a cache is missing or corrupt, the command renders its table
-unenriched and reports the degradation. The footer line shows the match rate (e.g.,
-`adp: 8 matched, 0 ambiguous, 0 absent`) so a silent degradation is visible. Run
-`tt sources` to see what is registered.
+from external sources. Only the sources that provide a requested capability need
+a cache, so `--with=injury` works from Sleeper alone. `tt sync` must be run once
+before enrichment works; it fetches and caches data in `~/.tokentouchdowns/cache/`
+(override with `TT_CACHE_DIR`). If a required cache is missing or corrupt, the
+command renders its table unenriched and names the source at fault; if a cache is
+past its TTL it still enriches but says so, with the age, on stderr. The footer
+shows the match rate (e.g. `adp [Half-PPR, 10-team]: 8 matched, 0 ambiguous, 0
+absent`) so a silent degradation is visible.
+
+ADP is published per scoring format and league size, and the two are different
+datasets rather than the same board rounded differently — so
+`tt sync --scoring=standard|half-ppr|ppr --teams=<n>` chooses which one is
+cached, and every place ADP is shown is labelled with the variant it came from.
+`tt sync` reports each source separately: one source failing neither stops the
+others nor goes unnoticed (exit code 1), and a source that suddenly normalises
+to zero records will not overwrite a populated cache. Run `tt sources` to see
+what is registered, how old each cache is, whether it is stale, and which ADP
+variant is cached.
 
 Transaction filters: `--type=add,drop` `--team=<team_key>` `--count`.
 One row per player movement, so an add/drop reads as two lines.
