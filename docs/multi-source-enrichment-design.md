@@ -111,6 +111,31 @@ is worse than a missing one, because it would be drafted on.
 `tt sync` reports the match rate. A silent drop from ~95% to ~60% after a name
 format change is the failure this reporting exists to catch.
 
+#### Baseline match rate (2026-08-31)
+
+Measured against live Yahoo and FFC feeds on 2026-08-31:
+
+```
+Overall:  top 25 -> 25/25    top 75 -> 75/75    top 150 -> 149/150 (99.3%)
+By position (25 queried each):
+  QB 24/25 · RB 25/25 · WR 25/25 · TE 18/25 · K 18/25 · DEF 19/25
+```
+
+`ambiguous` was 0 across every sample. Future degradation:
+- A rise in `ambiguous` means FFC and Yahoo naming conventions have drifted
+  apart; investigate name normalisation rules.
+- A rise in `absent` at the **top** of the board (where FFC has full coverage)
+  means something else broke; check FFC payload structure.
+
+**TE, K and DEF misses are CORRECT behaviour.** FFC publishes roughly 19 tight
+ends, 20 kickers and 20 defenses in total. Unmatched players in these positions
+are genuinely absent from the ADP feed, not mismatched.
+
+Team defenses required a special implementation path: Sleeper assigns no
+`yahoo_id` to defenses, so they never appear in the crosswalk. Enrichment falls
+back to Yahoo's `editorial_team_abbr` to match them by team abbreviation. Before
+this fallback existed, DEF matched 0/25.
+
 ## 5. Cache and freshness
 
 Plain JSON files under `~/.tokentouchdowns/cache/`, one per source, each with a

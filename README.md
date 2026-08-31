@@ -22,6 +22,9 @@ node bin/tt.js players --position=RB --status=A --count=10
 node bin/tt.js players --search=kelce
 node bin/tt.js transactions --type=add,drop
 node bin/tt.js leagues --json
+node bin/tt.js sync                    # refresh enrichment caches
+node bin/tt.js sources                 # what's registered and how stale
+node bin/tt.js players --position=RB --status=A --with=adp,injury
 ```
 
 ```
@@ -36,10 +39,25 @@ PLAYER            POS  TEAM  BYE  STATUS
 Jahmyr Gibbs      RB   Det   6
 Bijan Robinson    RB   Atl   11
 Jonathan Taylor   RB   Ind   13
+
+$ tt players --position=RB --status=A --with=adp,injury --count=3
+PLAYER               POS  TEAM  BYE  STATUS  ADP   INJ
+Jahmyr Gibbs         RB   Det   6            1.4   -
+Christian McCaffrey  RB   SF    8    Q       6.9   Questionable
+James Cook III       RB   Buf   7            8.5   -
+adp: 8 matched, 0 ambiguous, 0 absent (of 8)
 ```
 
 Player filters: `--position` `--status` `--search` `--sort` `--count` `--start`.
 Results are sorted by overall rank unless `--sort` says otherwise.
+
+Enrichment: `--with` accepts capability names (`adp`, `injury`) and adds columns
+from external sources. `tt sync` must be run once before enrichment works; it
+fetches and caches data in `~/.tokentouchdowns/cache/` (override with
+`TT_CACHE_DIR`). If a cache is missing or corrupt, the command renders its table
+unenriched and reports the degradation. The footer line shows the match rate (e.g.,
+`adp: 8 matched, 0 ambiguous, 0 absent`) so a silent degradation is visible. Run
+`tt sources` to see what is registered.
 
 Transaction filters: `--type=add,drop` `--team=<team_key>` `--count`.
 One row per player movement, so an add/drop reads as two lines.
