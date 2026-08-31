@@ -185,12 +185,22 @@ async function tryEnrich(players, caps, { cacheDir, err }) {
     err.write('Enrichment cache is empty. Run: tt sync\n');
     return { players, stats: null };
   }
-  const { players: enriched, stats } = enrichPlayers(players, {
-    crosswalk: buildCrosswalk(sleeperCached.data),
-    adpIndex: buildAdpIndex(ffcCached.data),
-    capabilities: caps,
-  });
-  return { players: enriched, stats };
+  try {
+    const { players: enriched, stats } = enrichPlayers(players, {
+      crosswalk: buildCrosswalk(sleeperCached.data),
+      adpIndex: buildAdpIndex(ffcCached.data),
+      capabilities: caps,
+    });
+    return { players: enriched, stats };
+  } catch (e) {
+    // Cache entries carry no schema version and outlive an upgrade: a stale-
+    // shape payload (e.g. `data` no longer an array) throws deep inside
+    // buildCrosswalk/buildAdpIndex. That is exactly the kind of failure
+    // enrichment must never propagate -- degrade to the unenriched table
+    // instead of taking down a command that worked fine before --with.
+    err.write(`Enrichment cache is corrupt (${e.message}). Run: tt sync --force\n`);
+    return { players, stats: null };
+  }
 }
 
 /** The team the logged-in user owns in a league. */

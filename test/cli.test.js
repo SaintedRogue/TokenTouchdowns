@@ -533,14 +533,40 @@ test('players --with degrades to an unenriched table when the cache is empty', a
 });
 
 test('players without --with is unaffected by enrichment machinery', async () => {
-  const out = capture();
-  const code = await runCommand(
-    { command: 'players', args: [], flags: { position: 'QB' } },
-    { client: fakeClient, out, cacheDir: tmpCacheDir() },
-  );
-  assert.equal(code, 0);
-  assert.doesNotMatch(out.text(), /ADP/);
-  assert.doesNotMatch(out.text(), /INJ/);
+  const dir = tmpCacheDir();
+  try {
+    const out = capture();
+    const code = await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB' } },
+      { client: fakeClient, out, cacheDir: dir },
+    );
+    assert.equal(code, 0);
+    assert.doesNotMatch(out.text(), /ADP/);
+    assert.doesNotMatch(out.text(), /INJ/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('players --json without --with never leaks adp/injury keys into rows', async () => {
+  // The row-mapping always sets `adp`/`injury` from the player object, which
+  // is `undefined` when --with was not requested; JSON.stringify happens to
+  // drop undefined-valued keys, but that is worth pinning explicitly rather
+  // than relying on inspection to notice it stays true.
+  const dir = tmpCacheDir();
+  try {
+    const out = capture();
+    const code = await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB', json: true } },
+      { client: fakeClient, out, cacheDir: dir },
+    );
+    assert.equal(code, 0);
+    const rows = JSON.parse(out.text());
+    assert.equal('adp' in rows[0], false);
+    assert.equal('injury' in rows[0], false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('roster --with=adp,injury enriches roster rows', async () => {
@@ -578,6 +604,33 @@ test('roster --with=adp,injury enriches roster rows', async () => {
     const line = out.text().split('\n').find((l) => l.includes('Josh Allen'));
     assert.match(line, /7\.5/);
     assert.match(line, /Out/);
+    // The roster footer is a separate copy of the same logic as players' --
+    // without an assertion here it can drift silently, since deleting the
+    // whole block leaves every other test in the file passing.
+    assert.match(out.text(), /adp: 1 matched, 0 ambiguous, 0 absent \(of 1\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('players --with=adp degrades to an unenriched table on a corrupt cache entry', async () => {
+  // Cache entries carry no schema version and outlive an upgrade: a source's
+  // normalize() shape can change while an old cache file still parses fine.
+  // buildCrosswalk/buildAdpIndex iterate `data` with `for...of`, which throws
+  // a TypeError on a non-array payload -- that must degrade the same way a
+  // cold cache does, not escape as an unhandled rejection.
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', { not: 'an array' }, { dir });
+    await writeCache('ffc', { not: 'an array' }, { dir });
+    const out = capture(); const err = capture();
+    const code = await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB', with: 'adp' } },
+      { client: fakeClient, out, err, cacheDir: dir },
+    );
+    assert.equal(code, 0, 'a corrupt cache must not fail a command that worked without --with');
+    assert.match(out.text(), /Josh Allen/);
+    assert.match(err.text(), /corrupt/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
