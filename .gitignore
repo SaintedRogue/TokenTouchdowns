@@ -1,0 +1,8 @@
+# Session credentials — NEVER commit. These grant full access to a Yahoo account.
+browser-profile/
+*.cookies
+cookies.txt
+captures/
+.env
+.env.*
+node_modules/
