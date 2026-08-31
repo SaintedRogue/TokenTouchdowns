@@ -53,3 +53,17 @@ test('fetchRaw throws a clear error on a non-OK response', async () => {
     () => fetchRaw({ fetch: async () => ({ ok: false, status: 503 }) }),
     /503/);
 });
+
+test('normalize keeps a player whose yahoo_id is 0 rather than treating it as absent', () => {
+  // Guards against a regression to a truthiness check (`if (!p.yahoo_id)`),
+  // which would silently drop a player with id 0. The filter must be nullish.
+  const out = normalize({
+    zero: {
+      player_id: '9999', yahoo_id: 0, espn_id: null, gsis_id: null,
+      full_name: 'Zero Id Player', position: 'WR', team: 'NYJ',
+      injury_status: null, status: 'Active', depth_chart_order: 2,
+    },
+  });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].yahooId, '0');
+});
