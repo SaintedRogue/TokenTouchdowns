@@ -119,3 +119,32 @@ test('enrichPlayers matches a team defense using the player\'s own team abbrevia
   assert.equal(stats.adp.matched, 1);
   assert.equal(stats.adp.absent, 0);
 });
+
+test('enrichPlayers resolves the ADP tiebreaker with Yahoo\'s team, not the crosswalk\'s', () => {
+  // Yahoo is the league of record and the source of the TEAM column the user
+  // reads; Sleeper is a third party whose team can lag a trade. Two FFC rows
+  // collide on name+position, so the team decides which one resolves --
+  // meaning a stale crosswalk team would attach a DIFFERENT player's ADP.
+  // This is the only path in the module that can produce a wrong value, so
+  // the operand order is load-bearing and pinned here.
+  const crosswalk = buildCrosswalk([
+    { yahooId: '55', name: 'Josh Allen', position: 'QB', team: 'JAX', injuryStatus: null },
+  ]);
+  const adpIndex = buildAdpIndex([
+    { name: 'Josh Allen', position: 'QB', team: 'BUF', adp: 30 },
+    { name: 'Josh Allen', position: 'QB', team: 'JAX', adp: 200 },
+  ]);
+  const players = [{
+    player_key: '470.p.55',
+    name: { full: 'Josh Allen' },
+    display_position: 'QB',
+    editorial_team_abbr: 'Buf',        // Yahoo, current — note mixed case
+  }];
+
+  const { players: out, stats } = enrichPlayers(players, {
+    crosswalk, adpIndex, capabilities: ['adp'] });
+
+  assert.equal(out[0].adp, 30, 'must use Yahoo\'s BUF, not the crosswalk\'s stale JAX');
+  assert.notEqual(out[0].adp, 200, 'attaching the JAX row would be another player\'s ADP');
+  assert.equal(stats.adp.matched, 1);
+});

@@ -188,3 +188,25 @@ test('matchAdp returns null for an unknown player rather than throwing', () => {
   const idx = buildAdpIndex([{ name: 'Travis Kelce', position: 'TE', adp: 40.2 }]);
   assert.equal(matchAdp(idx, { name: 'Nobody', position: 'WR' }), null);
 });
+
+test('buildAdpIndex refuses to index a record with no position', () => {
+  // Mirrors the empty-name guard: an absent position is not a position, and
+  // indexing under an empty one creates a key that matches anything sharing
+  // the name -- the never-guess rule applies to both fields equally.
+  assert.equal(buildAdpIndex([{ name: 'Mike Williams', position: '', adp: 90 }]).size, 0);
+  assert.equal(buildAdpIndex([{ name: 'Mike Williams', adp: 90 }]).size, 0);
+});
+
+// NOTE: this pins the observable behaviour, not the guard inside resolve().
+// That guard is defence in depth and is unreachable while buildAdpIndex's guard
+// holds -- nothing is ever indexed under an empty position, so the lookup
+// returns absent either way. Verified by mutation: removing resolve's guard
+// alone leaves this suite green. Pinning it independently would require
+// hand-building a Map against identity.js's internal key format, coupling the
+// test to an implementation detail. Deliberately not done.
+test('matchAdp reports absent for a query with no position', () => {
+  const index = buildAdpIndex([{ name: 'Mike Williams', position: 'WR', team: 'NYJ', adp: 90 }]);
+  assert.equal(matchAdp(index, { name: 'Mike Williams', position: '' }), null);
+  assert.equal(matchAdp(index, { name: 'Mike Williams' }), null);
+  assert.equal(adpMatchState(index, { name: 'Mike Williams' }), 'absent');
+});
