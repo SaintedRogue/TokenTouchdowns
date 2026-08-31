@@ -27,3 +27,13 @@ test('allCapabilities lists every capability exactly once, sorted', () => {
   assert.ok(caps.includes('adp'));
   assert.ok(caps.includes('injury'));
 });
+
+test('allCapabilities collapses a capability provided by two sources into one entry', () => {
+  // The real registry has no overlapping capabilities, so dedup cannot be
+  // exercised against it. Two stubs sharing 'adp' pin the guarantee.
+  const stubs = [
+    { meta: { name: 'a', provides: ['adp', 'injury'] } },
+    { meta: { name: 'b', provides: ['adp'] } },
+  ];
+  assert.deepEqual(allCapabilities(stubs), ['adp', 'injury']);
+});
