@@ -311,3 +311,274 @@ test('roster labels which week it is showing', async () => {
     { client: fakeClient, out });
   assert.match(out.text(), /Week 1/);
 });
+
+// --- Task 8: --with enrichment, sync, sources -----------------------------
+
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { parseWith, UsageError } from '../src/cli.js';
+import { allCapabilities } from '../src/sources/index.js';
+import { writeCache } from '../src/cache.js';
+
+const tmpCacheDir = () => mkdtempSync(path.join(tmpdir(), 'tt-cli-cache-'));
+
+test('parseWith splits a comma-separated capability list', () => {
+  assert.deepEqual(parseWith('adp,injury'), ['adp', 'injury']);
+});
+
+test('parseWith trims whitespace and drops empty entries', () => {
+  assert.deepEqual(parseWith('adp , , injury '), ['adp', 'injury']);
+});
+
+test('parseWith returns an empty list when the flag is absent or bare', () => {
+  assert.deepEqual(parseWith(undefined), []);
+  assert.deepEqual(parseWith(true), []);
+});
+
+test('parseWith rejects a capability no source provides', () => {
+  assert.throws(() => parseWith('nonsense'), /nonsense/);
+});
+
+test('parseWith throws a UsageError, not a Yahoo-side error, for bad input', () => {
+  // A local typo in --with is the user's mistake, not Yahoo's -- it must not
+  // be reported (or exit-coded) as a Yahoo API failure.
+  assert.throws(() => parseWith('nonsense'), (e) => e instanceof UsageError);
+});
+
+test('every capability parseWith accepts is one a source actually provides', () => {
+  for (const cap of allCapabilities()) assert.deepEqual(parseWith(cap), [cap]);
+});
+
+test('sources lists registered sources with their capabilities', async () => {
+  const out = capture();
+  const code = await runCommand({ command: 'sources', args: [], flags: {} }, { out });
+  assert.equal(code, 0);
+  assert.match(out.text(), /sleeper/);
+  assert.match(out.text(), /ffc/);
+  assert.match(out.text(), /adp/);
+});
+
+test('an invalid --with exits with the usage error code, not the Yahoo error code', async () => {
+  const out = capture(); const err = capture();
+  const code = await runCommand(
+    { command: 'players', args: [], flags: { with: 'nonsense' } },
+    { client: fakeClient, out, err },
+  );
+  assert.equal(code, 1);
+  assert.match(err.text(), /nonsense/);
+  assert.doesNotMatch(err.text(), /Yahoo API error/);
+});
+
+// Fake fetch for `sync`: keyed by URL substring so both source modules'
+// fetchRaw implementations (which build different URLs) can share one stub.
+const fakeSyncFetch = async (url) => {
+  const u = String(url);
+  if (u.includes('sleeper')) {
+    return {
+      ok: true,
+      json: async () => ({
+        1: { player_id: '1', yahoo_id: '30977', full_name: 'Josh Allen',
+             position: 'QB', team: 'BUF', injury_status: 'Questionable' },
+        2: { player_id: '2', yahoo_id: null, full_name: 'No Yahoo Id' },
+      }),
+    };
+  }
+  if (u.includes('fantasyfootballcalculator')) {
+    return {
+      ok: true,
+      json: async () => ({ players: [{ name: 'Josh Allen', position: 'QB', team: 'BUF', adp: 3.2 }] }),
+    };
+  }
+  throw new Error(`fakeSyncFetch: unexpected url ${u}`);
+};
+
+test('sync fetches every source and reports a record count', async () => {
+  const dir = tmpCacheDir();
+  try {
+    const out = capture();
+    const code = await runCommand({ command: 'sync', args: [], flags: {} },
+      { out, cacheDir: dir, fetch: fakeSyncFetch });
+    assert.equal(code, 0);
+    // sleeper's second record has no yahoo_id and is dropped by normalize.
+    assert.match(out.text(), /sleeper: 1 records/);
+    assert.match(out.text(), /ffc: 1 records/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sync writes normalized records to the cache for later reads', async () => {
+  const dir = tmpCacheDir();
+  try {
+    await runCommand({ command: 'sync', args: [], flags: {} },
+      { out: capture(), cacheDir: dir, fetch: fakeSyncFetch });
+    const { readCache } = await import('../src/cache.js');
+    const sleeper = await readCache('sleeper', { dir, ttlHours: 24 });
+    assert.equal(sleeper.data.length, 1);
+    assert.equal(sleeper.data[0].yahooId, '30977');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sync skips a source that is already fresh in the cache', async () => {
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', [{ yahooId: '1' }], { dir });
+    await writeCache('ffc', [{ name: 'x' }], { dir });
+    const out = capture();
+    const code = await runCommand({ command: 'sync', args: [], flags: {} },
+      { out, cacheDir: dir, fetch: fakeSyncFetch });
+    assert.equal(code, 0);
+    assert.match(out.text(), /sleeper: fresh \(cached\)/);
+    assert.match(out.text(), /ffc: fresh \(cached\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sync --force refetches even when the cache is fresh', async () => {
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', [{ yahooId: '1' }], { dir });
+    await writeCache('ffc', [{ name: 'x' }], { dir });
+    const out = capture();
+    const code = await runCommand({ command: 'sync', args: [], flags: { force: true } },
+      { out, cacheDir: dir, fetch: fakeSyncFetch });
+    assert.equal(code, 0);
+    assert.match(out.text(), /sleeper: 1 records/);
+    assert.match(out.text(), /ffc: 1 records/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sync --source limits the sync to one named source', async () => {
+  const dir = tmpCacheDir();
+  try {
+    const out = capture();
+    const code = await runCommand({ command: 'sync', args: [], flags: { source: 'ffc' } },
+      { out, cacheDir: dir, fetch: fakeSyncFetch });
+    assert.equal(code, 0);
+    assert.match(out.text(), /ffc: 1 records/);
+    assert.doesNotMatch(out.text(), /sleeper/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const SLEEPER_RECORDS = [
+  { sleeperId: '1', yahooId: '30977', name: 'Josh Allen', position: 'QB',
+    team: 'BUF', injuryStatus: 'Questionable' },
+];
+const FFC_RECORDS = [
+  { name: 'Josh Allen', position: 'QB', team: 'BUF', adp: 3.2 },
+];
+
+test('players --with=adp,injury enriches matching rows and prints a match-rate footer', async () => {
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', SLEEPER_RECORDS, { dir });
+    await writeCache('ffc', FFC_RECORDS, { dir });
+    const out = capture();
+    const code = await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB', with: 'adp,injury' } },
+      { client: fakeClient, out, cacheDir: dir },
+    );
+    assert.equal(code, 0);
+    const text = out.text();
+    const allenLine = text.split('\n').find((l) => l.includes('Josh Allen'));
+    assert.match(allenLine, /3\.2/);
+    assert.match(allenLine, /Questionable/);
+    // 5 QBs in the fixture, only Josh Allen matches ADP.
+    assert.match(text, /adp: 1 matched, 0 ambiguous, 4 absent \(of 5\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('players --with does not print the footer under --json', async () => {
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', SLEEPER_RECORDS, { dir });
+    await writeCache('ffc', FFC_RECORDS, { dir });
+    const out = capture();
+    await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB', with: 'adp', json: true } },
+      { client: fakeClient, out, cacheDir: dir },
+    );
+    // Machine-readable output must stay pure JSON -- no trailing prose line.
+    assert.doesNotThrow(() => JSON.parse(out.text()));
+    assert.doesNotMatch(out.text(), /matched/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('players --with degrades to an unenriched table when the cache is empty', async () => {
+  const dir = tmpCacheDir(); // deliberately left empty
+  try {
+    const out = capture(); const err = capture();
+    const code = await runCommand(
+      { command: 'players', args: [], flags: { position: 'QB', with: 'adp,injury' } },
+      { client: fakeClient, out, err, cacheDir: dir },
+    );
+    assert.equal(code, 0, 'a cold cache must not fail a command that worked without --with');
+    assert.match(out.text(), /Josh Allen/);
+    assert.match(err.text(), /tt sync/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('players without --with is unaffected by enrichment machinery', async () => {
+  const out = capture();
+  const code = await runCommand(
+    { command: 'players', args: [], flags: { position: 'QB' } },
+    { client: fakeClient, out, cacheDir: tmpCacheDir() },
+  );
+  assert.equal(code, 0);
+  assert.doesNotMatch(out.text(), /ADP/);
+  assert.doesNotMatch(out.text(), /INJ/);
+});
+
+test('roster --with=adp,injury enriches roster rows', async () => {
+  // The team-roster fixture's players array is empty (a real captured
+  // response with no roster set yet), so this test supplies its own roster
+  // with one real player instead.
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', [
+      { sleeperId: '1', yahooId: '30977', name: 'Josh Allen', position: 'QB',
+        team: 'BUF', injuryStatus: 'Out' },
+    ], { dir });
+    await writeCache('ffc', [
+      { name: 'Josh Allen', position: 'QB', team: 'BUF', adp: 7.5 },
+    ], { dir });
+
+    const rosterClient = {
+      async get(resource) {
+        if (resource.endsWith('/roster')) {
+          return { team: { roster: { week: 1, players: [
+            { player_key: '470.p.30977', name: { full: 'Josh Allen' },
+              display_position: 'QB', editorial_team_abbr: 'Buf' },
+          ] } } };
+        }
+        throw new Error(`unexpected resource: ${resource}`);
+      },
+    };
+
+    const out = capture();
+    const code = await runCommand(
+      { command: 'roster', args: ['470.l.1433971.t.4'], flags: { with: 'adp,injury' } },
+      { client: rosterClient, out, cacheDir: dir },
+    );
+    assert.equal(code, 0);
+    const line = out.text().split('\n').find((l) => l.includes('Josh Allen'));
+    assert.match(line, /7\.5/);
+    assert.match(line, /Out/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -9,6 +9,8 @@ const interactive = isInteractive();
 // Commands that need no API client.
 if (parsed.command === 'help') process.exit(await runCommand(parsed, {}));
 if (parsed.command === 'login') process.exit((await login()) ? 0 : 1);
+if (parsed.command === 'sources') process.exit(await runCommand(parsed, {}));
+if (parsed.command === 'sync') process.exit(await runCommand(parsed, {}));
 
 const makeClient = async () => createClient({ cookieHeader: await loadCookieHeader() });
 

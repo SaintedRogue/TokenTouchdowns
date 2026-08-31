@@ -36,6 +36,19 @@ export function formatTable(rows, columns) {
 }
 
 import { SessionExpiredError, YahooApiError } from './client.js';
+import { SOURCES, allCapabilities } from './sources/index.js';
+import { readCache, writeCache } from './cache.js';
+import { buildCrosswalk, buildAdpIndex } from './identity.js';
+import { enrichPlayers } from './enrich.js';
+
+/**
+ * The user's input was invalid -- distinct from a Yahoo-side failure. A typo
+ * in `--with` is the user's mistake, not Yahoo's, and must not be reported
+ * (or exit-coded) as a Yahoo API error.
+ */
+export class UsageError extends Error {
+  constructor(message) { super(message); this.name = 'UsageError'; }
+}
 
 const USAGE = `tokentouchdowns — Yahoo fantasy football CLI
 
@@ -50,13 +63,19 @@ Commands:
   matchup [week]         Show your matchup for a week (default: current)
   transactions [league]  Recent adds, drops and trades
   players [league_key]   Browse the player pool
+  sync                   Refresh cached external data (ADP, injury, ...)
+  sources                List registered external data sources
   help                   Show this message
 
 Player filters:
   --position=QB  --status=A  --search=kelce  --count=25  --sort=OR
+  --with=adp,injury      Enrich rows with cached external data (run sync first)
 
 Transaction filters:
   --type=add,drop  --team=<team_key>  --count=25
+
+Sync flags:
+  --source=<name>  --force
 
 Omitted keys are resolved from your own leagues and team.`;
 
@@ -130,6 +149,50 @@ export function transactionRows(transactions) {
   return rows;
 }
 
+/** Parse `--with=adp,injury` into validated capability names. */
+export function parseWith(value) {
+  if (!value || value === true) return [];
+  const known = new Set(allCapabilities());
+  const caps = String(value).split(',').map((s) => s.trim()).filter(Boolean);
+  for (const c of caps) {
+    if (!known.has(c)) {
+      throw new UsageError(
+        `Unknown capability "${c}". Available: ${[...known].join(', ')}`);
+    }
+  }
+  return caps;
+}
+
+// A source's TTL lives on its own meta object; looking it up here instead of
+// hardcoding it at each call site means the two can never drift apart. A
+// lookup miss (unknown source name) yields undefined, which readCache's
+// isStale treats as non-finite -> stale, so it fails safe rather than
+// freezing the cache.
+const ttlFor = (name) => SOURCES.find((s) => s.meta.name === name)?.meta.ttlHours;
+
+/**
+ * Enrich Yahoo players with cached external data, additively: a cold or
+ * partial cache must never fail a command that would have worked without
+ * `--with`. Returns the (possibly unchanged) players plus enrichment stats,
+ * or null stats when no enrichment happened (no capabilities requested, or
+ * the cache was not ready).
+ */
+async function tryEnrich(players, caps, { cacheDir, err }) {
+  if (caps.length === 0) return { players, stats: null };
+  const sleeperCached = await readCache('sleeper', { dir: cacheDir, ttlHours: ttlFor('sleeper') });
+  const ffcCached = await readCache('ffc', { dir: cacheDir, ttlHours: ttlFor('ffc') });
+  if (!sleeperCached || !ffcCached) {
+    err.write('Enrichment cache is empty. Run: tt sync\n');
+    return { players, stats: null };
+  }
+  const { players: enriched, stats } = enrichPlayers(players, {
+    crosswalk: buildCrosswalk(sleeperCached.data),
+    adpIndex: buildAdpIndex(ffcCached.data),
+    capabilities: caps,
+  });
+  return { players: enriched, stats };
+}
+
 /** The team the logged-in user owns in a league. */
 async function myTeamKey(client, leagueKey) {
   const { league } = await client.get(`league/${leagueKey}/teams`);
@@ -154,7 +217,13 @@ async function resolveLeagueKey(client, given) {
 
 export async function runCommand(
   { command, args, flags },
-  { client, out = process.stdout, err = process.stderr, interactive = false } = {},
+  {
+    client, out = process.stdout, err = process.stderr, interactive = false,
+    // Injectable so tests can point the enrichment cache at a scratch
+    // directory and stub the network, without touching the real
+    // ~/.tokentouchdowns/cache or making live requests.
+    cacheDir = undefined, fetch: fetchImpl = globalThis.fetch,
+  } = {},
 ) {
   const emit = (rows, columns) => {
     out.write(flags?.json ? `${JSON.stringify(rows, null, 2)}\n` : `${formatTable(rows, columns)}\n`);
@@ -210,6 +279,9 @@ export async function runCommand(
       }
 
       case 'roster': {
+        // Parsed before any Yahoo call: a bad --with is a local mistake and
+        // should fail fast rather than after spending a network round trip.
+        const caps = parseWith(flags.with);
         let teamKey = args[0];
         if (!teamKey) {
           const leagueKey = await resolveLeagueKey(client, undefined);
@@ -218,39 +290,103 @@ export async function runCommand(
           if (!teamKey) throw new YahooApiError('Could not find your team in that league');
         }
         const { team } = await client.get(buildRosterResource(teamKey, flags));
+        const { players, stats } = await tryEnrich(team.roster?.players ?? [], caps, { cacheDir, err });
+
         if (!flags?.json) out.write(`Week ${team.roster?.week ?? '?'}\n`);
-        const rows = (team.roster?.players ?? []).map((p) => ({
+        const rows = players.map((p) => ({
           name: p.name?.full,
           pos: p.display_position,
           team: p.editorial_team_abbr,
           status: p.status ?? '',
+          adp: p.adp,
+          injury: p.injury,
         }));
-        emit(rows, [
+        const columns = [
           { key: 'name', label: 'PLAYER' },
           { key: 'pos', label: 'POS' },
           { key: 'team', label: 'TEAM' },
           { key: 'status', label: 'STATUS' },
-        ]);
+        ];
+        if (caps.includes('adp')) columns.push({ key: 'adp', label: 'ADP' });
+        if (caps.includes('injury')) columns.push({ key: 'injury', label: 'INJ' });
+        emit(rows, columns);
+        // Match-rate visibility per the spec: silent degradation (a source
+        // that stopped matching) must show up somewhere a human will see it.
+        // Never under --json -- it would corrupt machine-readable output.
+        if (stats && caps.includes('adp') && !flags?.json) {
+          out.write(`adp: ${stats.adp.matched} matched, ${stats.adp.ambiguous} ambiguous, ` +
+            `${stats.adp.absent} absent (of ${stats.total})\n`);
+        }
         return 0;
       }
 
       case 'players': {
+        const caps = parseWith(flags.with);
         const key = await resolveLeagueKey(client, args[0]);
         const { league } = await client.get(buildPlayersResource(key, flags));
-        const rows = (league.players ?? []).map((p) => ({
+        const { players, stats } = await tryEnrich(league.players ?? [], caps, { cacheDir, err });
+
+        const rows = players.map((p) => ({
           name: p.name?.full,
           pos: p.display_position,
           team: p.editorial_team_abbr,
           bye: p.bye_weeks?.week,
           status: p.status ?? '',
+          adp: p.adp,
+          injury: p.injury,
         }));
-        emit(rows, [
+        const columns = [
           { key: 'name', label: 'PLAYER' },
           { key: 'pos', label: 'POS' },
           { key: 'team', label: 'TEAM' },
           { key: 'bye', label: 'BYE' },
           { key: 'status', label: 'STATUS' },
+        ];
+        if (caps.includes('adp')) columns.push({ key: 'adp', label: 'ADP' });
+        if (caps.includes('injury')) columns.push({ key: 'injury', label: 'INJ' });
+        emit(rows, columns);
+        if (stats && caps.includes('adp') && !flags?.json) {
+          out.write(`adp: ${stats.adp.matched} matched, ${stats.adp.ambiguous} ambiguous, ` +
+            `${stats.adp.absent} absent (of ${stats.total})\n`);
+        }
+        return 0;
+      }
+
+      case 'sources': {
+        const rows = SOURCES.map((s) => ({
+          name: s.meta.name,
+          provides: s.meta.provides.join(','),
+          join: s.meta.joinKey,
+          ttl: `${s.meta.ttlHours}h`,
+          documented: s.meta.documented ? 'yes' : 'NO',
+        }));
+        emit(rows, [
+          { key: 'name', label: 'SOURCE' },
+          { key: 'provides', label: 'PROVIDES' },
+          { key: 'join', label: 'JOIN' },
+          { key: 'ttl', label: 'TTL' },
+          { key: 'documented', label: 'DOCUMENTED' },
         ]);
+        return 0;
+      }
+
+      case 'sync': {
+        // Record counts only -- sync has no Yahoo player list to compute a
+        // match rate against, and any denominator it invented here would be
+        // meaningless. Match-rate visibility belongs to players/roster's
+        // --with footer, which has real Yahoo rows to classify.
+        const only = flags.source;
+        for (const s of SOURCES) {
+          if (only && only !== true && s.meta.name !== only) continue;
+          const cached = await readCache(s.meta.name, { dir: cacheDir, ttlHours: ttlFor(s.meta.name) });
+          if (cached && !cached.stale && !flags.force) {
+            out.write(`${s.meta.name}: fresh (cached)\n`);
+            continue;
+          }
+          const records = s.normalize(await s.fetchRaw({ fetch: fetchImpl }));
+          await writeCache(s.meta.name, records, { dir: cacheDir });
+          out.write(`${s.meta.name}: ${records.length} records\n`);
+        }
         return 0;
       }
 
@@ -313,6 +449,12 @@ export async function runCommand(
           : 'Session expired or rejected by Yahoo.\nRun: tt login\n',
       );
       return 2;
+    }
+    if (e instanceof UsageError) {
+      // Exit code 1 (this CLI's existing usage-error code), not 3: a typo in
+      // --with is the user's mistake, not a Yahoo-side failure.
+      err.write(`${e.message}\n`);
+      return 1;
     }
     if (e instanceof YahooApiError) {
       err.write(`Yahoo API error: ${e.message}\n`);
