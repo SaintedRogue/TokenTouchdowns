@@ -19,6 +19,7 @@ node bin/tt.js roster       # your team resolved automatically
 node bin/tt.js matchup      # current week; `matchup 5` for a specific week
 node bin/tt.js players --position=RB --status=A --count=10
 node bin/tt.js players --search=kelce
+node bin/tt.js transactions --type=add,drop
 node bin/tt.js leagues --json
 ```
 
@@ -38,6 +39,9 @@ Jonathan Taylor   RB   Ind   13
 
 Player filters: `--position` `--status` `--search` `--sort` `--count` `--start`.
 Results are sorted by overall rank unless `--sort` says otherwise.
+
+Transaction filters: `--type=add,drop` `--team=<team_key>` `--count`.
+One row per player movement, so an add/drop reads as two lines.
 
 Exit codes: `0` ok · `1` usage error · `2` session expired · `3` Yahoo API error.
 On an expired session the CLI re-authenticates when interactive, and otherwise

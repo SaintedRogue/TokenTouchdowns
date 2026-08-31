@@ -1,0 +1,108 @@
+{
+  "_comment": "SYNTHETIC -- hand-built, NOT captured from Yahoo. This league was pre-draft with zero transactions, so no real populated response was obtainable. Structure mirrors the collection/attribute-array conventions verified against real teams/players/roster captures; field names follow Yahoo's documented transaction resource. Replace with a real capture after the 2026-09-09 draft.",
+  "fantasy_content": {
+    "xml:lang": "en-US",
+    "yahoo:uri": "/fantasy/v2/league/470.l.1433971/transactions",
+    "league": [
+      { "league_key": "470.l.1433971", "league_id": "1433971", "name": "Definitely Not Bots", "num_teams": 4 },
+      {
+        "transactions": {
+          "0": {
+            "transaction": [
+              [
+                { "transaction_key": "470.l.1433971.tr.2" },
+                { "transaction_id": "2" },
+                { "type": "add/drop" },
+                { "status": "successful" },
+                { "timestamp": "1757980800" }
+              ],
+              {
+                "players": {
+                  "0": {
+                    "player": [
+                      [
+                        { "player_key": "470.p.26686" },
+                        { "player_id": "26686" },
+                        { "name": { "full": "Travis Kelce", "first": "Travis", "last": "Kelce" } },
+                        { "display_position": "TE" },
+                        { "editorial_team_abbr": "KC" }
+                      ],
+                      {
+                        "transaction_data": {
+                          "type": "add",
+                          "source_type": "freeagents",
+                          "destination_type": "team",
+                          "destination_team_key": "470.l.1433971.t.4",
+                          "destination_team_name": "Token Maxxing Touchdowns"
+                        }
+                      }
+                    ]
+                  },
+                  "1": {
+                    "player": [
+                      [
+                        { "player_key": "470.p.30259" },
+                        { "player_id": "30259" },
+                        { "name": { "full": "Dallas Goedert", "first": "Dallas", "last": "Goedert" } },
+                        { "display_position": "TE" },
+                        { "editorial_team_abbr": "Phi" }
+                      ],
+                      {
+                        "transaction_data": {
+                          "type": "drop",
+                          "source_type": "team",
+                          "source_team_key": "470.l.1433971.t.4",
+                          "source_team_name": "Token Maxxing Touchdowns",
+                          "destination_type": "waivers"
+                        }
+                      }
+                    ]
+                  },
+                  "count": 2
+                }
+              }
+            ]
+          },
+          "1": {
+            "transaction": [
+              [
+                { "transaction_key": "470.l.1433971.tr.1" },
+                { "transaction_id": "1" },
+                { "type": "add" },
+                { "status": "successful" },
+                { "timestamp": "1757894400" }
+              ],
+              {
+                "players": {
+                  "0": {
+                    "player": [
+                      [
+                        { "player_key": "470.p.40000" },
+                        { "player_id": "40000" },
+                        { "name": { "full": "Jahmyr Gibbs", "first": "Jahmyr", "last": "Gibbs" } },
+                        { "display_position": "RB" },
+                        { "editorial_team_abbr": "Det" }
+                      ],
+                      {
+                        "transaction_data": {
+                          "type": "add",
+                          "source_type": "freeagents",
+                          "destination_type": "team",
+                          "destination_team_key": "470.l.1433971.t.1",
+                          "destination_team_name": "Any Given Model"
+                        }
+                      }
+                    ]
+                  },
+                  "count": 1
+                }
+              }
+            ]
+          },
+          "count": 2
+        }
+      }
+    ],
+    "time": "0ms"
+  }
+}

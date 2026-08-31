@@ -43,6 +43,7 @@ const TARGETS = {
   'league-players':   'league/470.l.1433971/players;start=0;count=3?format=json',
   'league-settings':  'league/470.l.1433971/settings?format=json',
   'team-matchups':    'team/470.l.1433971.t.4/matchups?format=json',
+  'league-transactions': 'league/470.l.1433971/transactions?format=json',
   'league-players-qb': 'league/470.l.1433971/players;status=A;position=QB;sort=OR;start=0;count=5?format=json',
 };
 

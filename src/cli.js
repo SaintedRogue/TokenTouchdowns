@@ -48,11 +48,15 @@ Commands:
   standings [league_key] Show league standings
   roster [team_key]      Show a team roster
   matchup [week]         Show your matchup for a week (default: current)
+  transactions [league]  Recent adds, drops and trades
   players [league_key]   Browse the player pool
   help                   Show this message
 
 Player filters:
   --position=QB  --status=A  --search=kelce  --count=25  --sort=OR
+
+Transaction filters:
+  --type=add,drop  --team=<team_key>  --count=25
 
 Omitted keys are resolved from your own leagues and team.`;
 
@@ -74,6 +78,46 @@ export function buildPlayersResource(leagueKey, flags = {}) {
     .map((f) => `${f}=${withDefaults[f]}`);
   parts.push(`start=${flags.start ?? 0}`, `count=${flags.count ?? 25}`);
   return `league/${leagueKey}/players;${parts.join(';')}`;
+}
+
+/** Yahoo epoch seconds -> YYYY-MM-DD. UTC so output does not vary by machine. */
+export function formatTimestamp(ts) {
+  const n = Number(ts);
+  if (!ts || !Number.isFinite(n)) return '-';
+  return new Date(n * 1000).toISOString().slice(0, 10);
+}
+
+/** Build a `transactions` resource path. Always paginated. */
+export function buildTransactionsResource(leagueKey, flags = {}) {
+  const parts = [];
+  if (flags.type && flags.type !== true) parts.push(`types=${flags.type}`);
+  if (flags.team && flags.team !== true) parts.push(`team_key=${flags.team}`);
+  parts.push(`count=${flags.count ?? 25}`);
+  return `league/${leagueKey}/transactions;${parts.join(';')}`;
+}
+
+/**
+ * One row per player movement: an add/drop transaction moves two players and
+ * should read as two lines, not one.
+ */
+export function transactionRows(transactions) {
+  const rows = [];
+  for (const t of transactions ?? []) {
+    const players = t.players ?? [];
+    for (const p of Array.isArray(players) ? players : [players]) {
+      // transaction_data is an object in every shape observed, but Yahoo
+      // sometimes wraps single children in arrays -- tolerate both.
+      const raw = p.transaction_data;
+      const d = (Array.isArray(raw) ? raw[0] : raw) ?? {};
+      rows.push({
+        date: formatTimestamp(t.timestamp),
+        type: t.type,
+        player: p.name?.full,
+        move: `${d.source_team_name ?? d.source_type ?? '?'} -> ${d.destination_team_name ?? d.destination_type ?? '?'}`,
+      });
+    }
+  }
+  return rows;
 }
 
 /** The team the logged-in user owns in a league. */
@@ -195,6 +239,18 @@ export async function runCommand(
           { key: 'team', label: 'TEAM' },
           { key: 'bye', label: 'BYE' },
           { key: 'status', label: 'STATUS' },
+        ]);
+        return 0;
+      }
+
+      case 'transactions': {
+        const key = await resolveLeagueKey(client, args[0]);
+        const { league } = await client.get(buildTransactionsResource(key, flags));
+        emit(transactionRows(league.transactions), [
+          { key: 'date', label: 'DATE' },
+          { key: 'type', label: 'TYPE' },
+          { key: 'player', label: 'PLAYER' },
+          { key: 'move', label: 'MOVE' },
         ]);
         return 0;
       }

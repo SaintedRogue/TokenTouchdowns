@@ -214,3 +214,63 @@ test('buildPlayersResource lets an explicit sort override the default', () => {
   assert.match(r, /;sort=AR/);
   assert.doesNotMatch(r, /;sort=OR/);
 });
+
+import { buildTransactionsResource, formatTimestamp } from '../src/cli.js';
+
+const synthetic = () => normalize(JSON.parse(readFileSync(
+  new URL('./fixtures/league-transactions-SYNTHETIC.json', import.meta.url), 'utf8')));
+
+test('formatTimestamp renders Yahoo epoch seconds as a UTC date', () => {
+  // UTC, not local: the same transaction must not render differently by machine.
+  assert.equal(formatTimestamp('1757980800'), '2025-09-16');
+});
+
+test('formatTimestamp renders a dash for a missing timestamp', () => {
+  assert.equal(formatTimestamp(undefined), '-');
+});
+
+test('buildTransactionsResource applies type and count filters', () => {
+  const r = buildTransactionsResource('470.l.1', { type: 'add,drop', count: '10' });
+  assert.ok(r.startsWith('league/470.l.1/transactions'), r);
+  assert.match(r, /;types=add,drop/);
+  assert.match(r, /;count=10/);
+});
+
+test('buildTransactionsResource requests no filters when none are given', () => {
+  assert.equal(buildTransactionsResource('470.l.1', {}), 'league/470.l.1/transactions;count=25');
+});
+
+test('transactions renders one row per player movement', async () => {
+  const out = capture();
+  const client = { async get() { return synthetic(); } };
+  const code = await runCommand({ command: 'transactions', args: ['470.l.1433971'], flags: {} },
+    { client, out });
+  assert.equal(code, 0);
+  const text = out.text();
+  // The add/drop transaction moves two players; both must appear.
+  assert.match(text, /Travis Kelce/);
+  assert.match(text, /Dallas Goedert/);
+  assert.match(text, /Jahmyr Gibbs/);
+  assert.match(text, /2025-09-16/);
+});
+
+test('transactions shows where each player came from and went to', async () => {
+  const out = capture();
+  const client = { async get() { return synthetic(); } };
+  await runCommand({ command: 'transactions', args: ['470.l.1433971'], flags: {} },
+    { client, out });
+  const kelce = out.text().split('\n').find((l) => l.includes('Travis Kelce'));
+  assert.match(kelce, /freeagents/);
+  assert.match(kelce, /Token Maxxing Touchdowns/);
+  const goedert = out.text().split('\n').find((l) => l.includes('Dallas Goedert'));
+  assert.match(goedert, /waivers/);
+});
+
+test('transactions reports (none) for a league with no transactions', async () => {
+  const out = capture();
+  const client = { async get() { return fx('league-transactions'); } };
+  const code = await runCommand({ command: 'transactions', args: ['470.l.1433971'], flags: {} },
+    { client, out });
+  assert.equal(code, 0);
+  assert.match(out.text(), /\(none\)/);
+});

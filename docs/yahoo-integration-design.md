@@ -200,6 +200,25 @@ write feature ships.
 
 ---
 
+### 9.3 Populated transaction shape — UNVERIFIED
+
+`tt transactions` renders correctly against a real **empty** response
+(`transactions: []`, this league is pre-draft) and against a hand-built
+fixture, `test/fixtures/league-transactions-SYNTHETIC.json`.
+
+No populated transaction response was obtainable: the account has exactly one
+league, in one season, with zero transactions. The synthetic fixture follows
+the collection/attribute-array conventions verified against real teams,
+players and roster captures, and Yahoo's documented field names
+(`transaction_key`, `transaction_id`, `type`, `status`, `timestamp`,
+`players[].transaction_data`) -- but it is an informed reconstruction, not
+evidence.
+
+Replace it with a real capture after the 2026-09-09 draft and re-run the
+tests before trusting the populated path. Specifically unconfirmed: whether
+`transaction_data` is an object or an array (the code tolerates both), and
+the exact `type` values for trades and commissioner actions.
+
 ## 10. Evidence
 
 Read path — 9/9 resources `HTTP 200` with well-formed `fantasy_content`, via
