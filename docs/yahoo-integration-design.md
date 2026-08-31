@@ -219,4 +219,5 @@ a cold start. Auth is cookie-only; no tokens in `localStorage`.
 
 Identity: `game_key=470` (NFL 2026) · `league_key=470.l.1433971`.
 
-Full discovery notes: `scratchpad/yahoo-spike/PHASE{1,2,3}-FINDINGS.md`.
+Full discovery notes: [`docs/discovery/`](discovery/) — phase 1 (session), phase 2
+(endpoint harvest), phase 3 (write path).
