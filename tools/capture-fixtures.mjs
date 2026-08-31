@@ -26,6 +26,9 @@ const SCRUB = [
   [/[\w.+-]+@[\w-]+\.[\w.]+/g, 'redacted@example.test'],
   [/([?&](?:i?key)=)[A-Za-z0-9]+/g, '$1REDACTEDINVITEKEY'],
   [/"(short_invitation_url|invitation_url)":\s*"[^"]*"/g, '"$1": ""'],
+  // Server-side response timing: pure churn that re-diffs every fixture on
+  // each capture. The normaliser discards it as metadata anyway.
+  [/"time":\s*"[\d.]+ms"/g, '"time": "0ms"'],
 ];
 const scrub = (s) => SCRUB.reduce((acc, [re, rep]) => acc.replace(re, rep), s);
 
@@ -39,6 +42,8 @@ const TARGETS = {
   'user-leagues':     'users;use_login=1/games;game_keys=nfl/leagues?format=json',
   'league-players':   'league/470.l.1433971/players;start=0;count=3?format=json',
   'league-settings':  'league/470.l.1433971/settings?format=json',
+  'team-matchups':    'team/470.l.1433971.t.4/matchups?format=json',
+  'league-players-qb': 'league/470.l.1433971/players;status=A;position=QB;sort=OR;start=0;count=5?format=json',
 };
 
 for (const [name, p] of Object.entries(TARGETS)) {

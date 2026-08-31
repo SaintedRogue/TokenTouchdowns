@@ -63,6 +63,8 @@ const fakeClient = {
     if (resource.endsWith('/teams')) return fx('league-teams');
     if (resource.endsWith('/standings')) return fx('league-standings');
     if (resource.endsWith('/roster')) return fx('team-roster');
+    if (resource.endsWith('/matchups')) return fx('team-matchups');
+    if (resource.includes('/players')) return fx('league-players-qb');
     throw new Error(`unexpected resource: ${resource}`);
   },
 };
@@ -139,4 +141,76 @@ test('formatTable leaves an empty string blank, reserving the dash for absent ke
   );
   const theirs = out.split('\n').find((l) => l.includes('theirs'));
   assert.doesNotMatch(theirs, /-/, 'blank marker should stay blank');
+});
+
+import { buildPlayersResource } from '../src/cli.js';
+
+test('buildPlayersResource emits matrix params Yahoo understands', () => {
+  const r = buildPlayersResource('470.l.1', { position: 'QB', status: 'A', count: '5' });
+  assert.ok(r.startsWith('league/470.l.1/players;'), r);
+  assert.match(r, /;position=QB/);
+  assert.match(r, /;status=A/);
+  assert.match(r, /;count=5/);
+});
+
+test('buildPlayersResource always paginates so a request cannot run away', () => {
+  const r = buildPlayersResource('470.l.1', {});
+  assert.match(r, /;start=0/);
+  assert.match(r, /;count=\d+/);
+});
+
+test('buildPlayersResource passes a search term through', () => {
+  assert.match(buildPlayersResource('470.l.1', { search: 'kelce' }), /;search=kelce/);
+});
+
+test('buildPlayersResource ignores flags that are not player filters', () => {
+  const r = buildPlayersResource('470.l.1', { json: true, position: 'WR' });
+  assert.doesNotMatch(r, /json/);
+  assert.match(r, /;position=WR/);
+});
+
+test('players lists available players with position and team', async () => {
+  const out = capture();
+  const code = await runCommand({ command: 'players', args: [], flags: { position: 'QB' } },
+    { client: fakeClient, out });
+  assert.equal(code, 0);
+  const text = out.text();
+  assert.match(text, /Josh Allen/);
+  assert.match(text, /QB/);
+});
+
+test('matchup shows the current week with both teams', async () => {
+  const out = capture();
+  const code = await runCommand({ command: 'matchup', args: [], flags: {} },
+    { client: fakeClient, out });
+  assert.equal(code, 0);
+  const text = out.text();
+  assert.match(text, /Token Maxxing Touchdowns/);
+  assert.match(text, /Week 1/);
+});
+
+test('matchup accepts an explicit week number', async () => {
+  const out = capture();
+  await runCommand({ command: 'matchup', args: ['3'], flags: {} }, { client: fakeClient, out });
+  assert.match(out.text(), /Week 3/);
+});
+
+test('matchup reports clearly when the requested week has no matchup', async () => {
+  const out = capture(); const err = capture();
+  const code = await runCommand({ command: 'matchup', args: ['99'], flags: {} },
+    { client: fakeClient, out, err });
+  assert.notEqual(code, 0);
+  assert.match(err.text(), /week 99/i);
+});
+
+test('buildPlayersResource sorts by overall rank by default', () => {
+  // Yahoo's unsorted order is arbitrary -- browsing a pool, you want the best
+  // available first, not a fullback ahead of Derrick Henry.
+  assert.match(buildPlayersResource('470.l.1', {}), /;sort=OR/);
+});
+
+test('buildPlayersResource lets an explicit sort override the default', () => {
+  const r = buildPlayersResource('470.l.1', { sort: 'AR' });
+  assert.match(r, /;sort=AR/);
+  assert.doesNotMatch(r, /;sort=OR/);
 });
