@@ -1,0 +1,19 @@
+{
+  "status": "Success",
+  "meta": { "type": "Non-PPR", "teams": 12, "rounds": 15, "total_drafts": 1884,
+            "start_date": "2026-08-24", "end_date": "2026-08-31" },
+  "players": [
+    { "player_id": 5672, "name": "Jahmyr Gibbs", "position": "RB", "team": "DET",
+      "adp": 1.4, "adp_formatted": "1.01", "times_drafted": 338,
+      "high": 1, "low": 3, "stdev": 0.6, "bye": 6 },
+    { "player_id": 1466, "name": "Travis Kelce", "position": "TE", "team": "KC",
+      "adp": 40.2, "adp_formatted": "4.04", "times_drafted": 210,
+      "high": 30, "low": 55, "stdev": 4.1, "bye": 5 },
+    { "player_id": 2222, "name": "Seattle Defense", "position": "DEF", "team": "SEA",
+      "adp": 120.5, "adp_formatted": "11.01", "times_drafted": 95,
+      "high": 100, "low": 140, "stdev": 8.2, "bye": 8 },
+    { "player_id": 3333, "name": "Brandon Aubrey", "position": "PK", "team": "DAL",
+      "adp": 135.8, "adp_formatted": "12.04", "times_drafted": 88,
+      "high": 120, "low": 150, "stdev": 6.4, "bye": 10 }
+  ]
+}
