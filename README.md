@@ -7,7 +7,29 @@ browser session rather than OAuth. A real browser is used once — to log in —
 never appears in the runtime data path. See
 [`docs/yahoo-integration-design.md`](docs/yahoo-integration-design.md).
 
-## Usage
+## CLI
+
+```sh
+npm install
+node bin/tt.js login        # one-time; opens a browser
+node bin/tt.js leagues
+node bin/tt.js teams        # league resolved from your leagues
+node bin/tt.js standings 470.l.1433971
+node bin/tt.js roster       # your team resolved automatically
+node bin/tt.js leagues --json
+```
+
+```
+   KEY                NAME
+   470.l.1433971.t.1  Any Given Model
+*  470.l.1433971.t.4  Token Maxxing Touchdowns
+```
+
+Exit codes: `0` ok · `1` usage error · `2` session expired · `3` Yahoo API error.
+On an expired session the CLI re-authenticates when interactive, and otherwise
+fails with `Run: tt login` — it never opens a browser in cron or a container.
+
+## Library usage
 
 ```js
 import { createClient } from './src/client.js';

@@ -45,3 +45,26 @@ test('isInteractive is false when explicitly suppressed', () => {
 test('isInteractive is true on a real desktop session', () => {
   assert.equal(isInteractive({ isTTY: true, env: { WAYLAND_DISPLAY: 'wayland-1' } }), true);
 });
+
+import { hasSessionCookies } from '../src/session.js';
+
+test('hasSessionCookies is false for a jar holding only ambient ad cookies', () => {
+  // Exactly the pre-login state: A1/A1S/A3 present, no real session.
+  assert.equal(hasSessionCookies([
+    { name: 'A1', domain: '.yahoo.com' },
+    { name: 'A3', domain: '.yahoo.com' },
+    { name: 'A1S', domain: '.yahoo.com' },
+  ]), false);
+});
+
+test('hasSessionCookies is true once T and Y are present', () => {
+  assert.equal(hasSessionCookies([
+    { name: 'A1', domain: '.yahoo.com' },
+    { name: 'T', domain: '.yahoo.com' },
+    { name: 'Y', domain: '.yahoo.com' },
+  ]), true);
+});
+
+test('hasSessionCookies ignores same-named cookies on non-yahoo domains', () => {
+  assert.equal(hasSessionCookies([{ name: 'T', domain: '.evil.example' }]), false);
+});

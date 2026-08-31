@@ -44,3 +44,43 @@ export async function loadCookieHeader({ profileDir = PROFILE_DIR } = {}) {
     await ctx.close();
   }
 }
+
+/** Does this jar prove a real Yahoo session? Ambient A1/A1S/A3 do not count. */
+export function hasSessionCookies(cookies) {
+  return cookies.some((c) => c.domain.includes('yahoo') && SESSION_COOKIES.includes(c.name));
+}
+
+const FANTASY_HOME = 'https://football.fantasysports.yahoo.com/';
+
+/**
+ * Interactive one-time login. Opens a real browser and waits for the human to
+ * complete Yahoo/Google SSO, then persists the session to the profile.
+ */
+export async function login({ profileDir = PROFILE_DIR, timeoutMs = 5 * 60 * 1000,
+                              log = console.log } = {}) {
+  const { chromium } = await import('playwright');
+  const ctx = await chromium.launchPersistentContext(profileDir, {
+    headless: false,
+    viewport: null,
+    // Google's sign-in blocks browsers advertising automation.
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: ['--disable-blink-features=AutomationControlled'],
+  });
+  try {
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    await page.goto(FANTASY_HOME, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    log('Sign in to Yahoo in the browser window...');
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (hasSessionCookies(await ctx.cookies())) {
+        log('Signed in. Session saved.');
+        return true;
+      }
+      await page.waitForTimeout(2000);
+    }
+    log('Timed out waiting for sign-in.');
+    return false;
+  } finally {
+    await ctx.close();
+  }
+}
