@@ -62,3 +62,37 @@ test('enrichPlayers returns players unchanged when no capabilities are requested
     crosswalk: CROSSWALK, adpIndex: ADP, capabilities: [] });
   assert.deepEqual(players, YAHOO);
 });
+
+test('enrichPlayers attaches no ADP when the match is ambiguous', () => {
+  // Two ADP rows identical in name, position AND team: the team tiebreaker
+  // cannot separate them, so the matcher must refuse to choose. A wrong ADP on
+  // a plausible player is worse than a missing one -- it gets drafted on.
+  const crosswalk = buildCrosswalk([
+    { yahooId: '55', name: 'Josh Allen', position: 'QB', team: 'BUF', injuryStatus: null },
+  ]);
+  const adpIndex = buildAdpIndex([
+    { name: 'Josh Allen', position: 'QB', team: 'BUF', adp: 30 },
+    { name: 'Josh Allen', position: 'QB', team: 'BUF', adp: 200 },
+  ]);
+  const players = [
+    { player_key: '470.p.55', name: { full: 'Josh Allen' }, display_position: 'QB' },
+  ];
+
+  const { players: out, stats } = enrichPlayers(players, {
+    crosswalk, adpIndex, capabilities: ['adp'] });
+
+  assert.equal(out[0].adp, undefined, 'must not guess between two candidates');
+  assert.equal(stats.adp.ambiguous, 1);
+  assert.equal(stats.adp.matched, 0);
+  assert.equal(stats.adp.matched + stats.adp.ambiguous + stats.adp.absent, stats.total);
+});
+
+test('enrichPlayers passes through a player with no player_key without throwing', () => {
+  const { players: out, stats } = enrichPlayers(
+    [{ name: { full: 'No Key Guy' }, display_position: 'WR' }],
+    { crosswalk: CROSSWALK, adpIndex: ADP, capabilities: ['adp', 'injury'] });
+  assert.equal(out[0].name.full, 'No Key Guy');
+  assert.equal(out[0].adp, undefined);
+  assert.equal(out[0].injury, undefined);
+  assert.equal(stats.total, 1);
+});
