@@ -9,10 +9,12 @@ reasoning; these tests exercise its observable behaviour.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from tt.league import load_config_from_dict
+from tt.mock import simulate_draft, strategy_adp, strategy_vor_survival
 from tt.projections import project_players
 from tt.studies.draft_board import (
     actual_lineup_score,
@@ -472,6 +474,99 @@ def test_zero_scoring_diagnostics_reports_a_row_per_strategy():
     # every single pick must score zero actual points, which is exactly what
     # a real "drafted a rookie/bust with no matching season" case looks like.
     assert (out["zero_scoring"] == out["picks"]).all()
+
+
+def test_zero_scoring_diagnostics_trials_aggregates_across_multiple_drafts():
+    # M-8 (fix-round-2-brief.md): the published bust-rate table used to be
+    # exactly ONE draft per strategy, printed next to a 200-trial results
+    # table with no indication of the sample-size gap. `trials` must sum
+    # `picks`/`zero_scoring` across that many independent drafts and report
+    # `trials` itself, while the DEFAULT (trials=1) stays exactly the old
+    # single-draft behaviour (see the `reports_a_row_per_strategy` test
+    # above, unchanged).
+    history = _big_history()
+    ffc = _big_ffc_from(history)
+    board = build_board(history, CONFIG_OBJ, season=2021, ffc=ffc, teams=10, seed=1)
+    actual = actual_points_by_player(history, CONFIG_OBJ, season=2021)
+    out = zero_scoring_diagnostics(
+        board, CONFIG_OBJ, teams=10, my_slot=3, seed=1, actual_points=actual,
+        rounds=4, trials=5,
+    )
+    assert (out["trials"] == 5).all()
+    assert (out["picks"] == 4 * 5).all()  # rounds=4 picks/draft x 5 drafts
+    # Same all-zero-actuals fixture as above -- every pick across every
+    # trial must still score zero.
+    assert (out["zero_scoring"] == out["picks"]).all()
+
+
+def _big_history_with_actuals():
+    """`_big_history()` (2020 training data) plus season 2021 stat rows for
+    HALF the players (even-indexed within each position; the rest are
+    entirely absent from 2021 -- a season-ending injury/bust), so
+    `actual_points_by_player(season=2021)` has real variance between
+    players -- unlike `_big_history()` alone, where actual points are
+    empty for EVERYONE and every roster scores identically (0), which
+    can't distinguish "the right trial-0 draft" from any other. Used only
+    by the seed-reproducibility mutation guard below."""
+    history = _big_history()
+    extra = []
+    positions = {"QB": 15, "RB": 30, "WR": 30, "TE": 15}
+    for position, count in positions.items():
+        for i in range(count):
+            if i % 2:
+                continue  # odd-indexed players: absent from 2021 entirely
+            pid = f"{position}{i:02d}"
+            for week in range(1, 18):
+                if position == "QB":
+                    extra.append(_week_row(pid, 2021, week, position,
+                                            attempts=30, passing_yards=260 - i * 3, passing_tds=2))
+                elif position == "RB":
+                    extra.append(_week_row(pid, 2021, week, position,
+                                            carries=15, rushing_yards=65 - i,
+                                            targets=2, receptions=1, receiving_yards=9))
+                elif position == "WR":
+                    extra.append(_week_row(pid, 2021, week, position,
+                                            targets=8, receptions=5, receiving_yards=75 - i))
+                else:
+                    extra.append(_week_row(pid, 2021, week, position,
+                                            targets=4, receptions=3, receiving_yards=38 - i * 0.5))
+    return pd.concat([history, pd.DataFrame(extra)], ignore_index=True)
+
+
+def test_zero_scoring_diagnostics_uses_compare_strategies_own_trial_zero_seed():
+    # MUTATION GUARD (mutant #9 in review-final.md): zero_scoring_
+    # diagnostics' entire documented contract is that it reproduces
+    # `compare_strategies`' own trial 0 for the SAME `seed` -- e.g. an
+    # `np.random.default_rng(seed + 12345)`-style mutant would silently
+    # describe a DIFFERENT, unrelated draft. Verified directly: reproduce
+    # trial 0's seed independently here (the exact formula the module
+    # docstring claims), draft with it, and compare the resulting
+    # zero-scoring counts against zero_scoring_diagnostics' own output.
+    # Needs `_big_history_with_actuals` (not the all-zero `_big_history`
+    # fixture the other tests use) so a WRONG seed's roster is actually
+    # likely to score a different zero-count, not just tautologically zero
+    # either way.
+    history = _big_history_with_actuals()
+    ffc = _big_ffc_from(history)
+    board = build_board(history, CONFIG_OBJ, season=2021, ffc=ffc, teams=10, seed=1)
+    actual = actual_points_by_player(history, CONFIG_OBJ, season=2021)
+    assert not actual.empty and actual.max() > 0.0  # sanity: real variance exists
+    seed = 777
+    strategies = strategies_for(CONFIG_OBJ, rounds=4)
+
+    diag = zero_scoring_diagnostics(
+        board, CONFIG_OBJ, teams=10, my_slot=3, seed=seed, actual_points=actual, rounds=4,
+    ).set_index("strategy")
+
+    trial0_seed = int(np.random.default_rng(seed).integers(0, 2**31 - 1, size=1)[0])
+    for name, strategy in strategies.items():
+        expected_roster = simulate_draft(
+            board, teams=10, rounds=4, my_slot=3, strategy=strategy,
+            seed=trial0_seed, opponent_strategy=strategy_adp,
+        )
+        expected_zero, expected_total = zero_scoring_rate(expected_roster, actual)
+        assert diag.loc[name, "zero_scoring"] == expected_zero
+        assert diag.loc[name, "picks"] == expected_total
 
 
 def test_run_backtest_cell_is_reproducible_given_the_same_board_and_seed():

@@ -448,18 +448,34 @@ def zero_scoring_diagnostics(
     seed: int,
     actual_points: pd.Series,
     rounds: int = DEFAULT_ROUNDS,
+    trials: int = 1,
 ) -> pd.DataFrame:
-    """One deterministic draft per strategy (`compare_strategies`' own first
-    trial seed for this `seed`, reproduced independently via the identical
-    `np.random.default_rng(seed).integers(...)` call it uses -- see `mock.
-    compare_strategies`' "COMMON RANDOM NUMBERS" docstring section), reporting
-    how many of that strategy's `my_slot` picks scored zero actual points.
+    """`trials` deterministic drafts per strategy, reporting how many of
+    that strategy's `my_slot` picks (summed across all `trials` drafts)
+    scored zero actual points.
 
-    A diagnostic, not a formal per-arm statistic (one draft, not `trials`
-    of them) -- exists purely to answer the brief's "state how many drafted
-    players scored zero per arm" requirement without re-simulating the
-    entire `trials`-sized run just to inspect individual rosters (`compare_
-    strategies` returns only aggregate scores, by design).
+    M-8 (fix-round-2-brief.md): this used to run exactly ONE draft per
+    strategy no matter what -- the published bust-rate table (2.2%/11.7%/
+    6.1%) turned out to be 4/180, 21/180, 11/180 picks from twelve single
+    drafts, printed beside a 200-TRIAL results table with no indication of
+    the sample-size gap. `trials` (default 1, so every existing caller and
+    test that only wants a quick single-draft look keeps working
+    unchanged) lets a caller aggregate over the SAME number of drafts
+    `run_backtest_cell`/`compare_strategies` used for that cell's scores --
+    the returned `picks`/`zero_scoring` are SUMS across all `trials`
+    drafts, and `trials` itself is returned alongside them, so a reader is
+    never left inferring the sample size a rate was computed from.
+
+    REPRODUCIBILITY. The per-trial seeds are `compare_strategies`' own
+    trial-seed sequence for this `seed` -- `np.random.default_rng(seed).
+    integers(0, 2**31 - 1, size=trials)` -- reproduced independently here
+    (verified: numpy's `Generator.integers` draws a single deterministic
+    stream regardless of the requested `size`, so this array's first
+    `trials` elements are IDENTICAL to `compare_strategies`' own for the
+    same `seed`, whatever `trials` `compare_strategies` itself was called
+    with). So trial `i` here is trial `i`'s exact drafted roster in the
+    real run, not a coincidence -- see `mock.compare_strategies`'
+    "COMMON RANDOM NUMBERS" docstring section.
 
     Takes the SAME pre-built `board` `run_backtest_cell` was given for this
     cell -- see module WARNING: rebuilding it here independently used to
@@ -467,18 +483,24 @@ def zero_scoring_diagnostics(
     than the one `run_backtest_cell` actually drafted against.
     """
     strategies = strategies_for(config, rounds)
-    trial_seed = int(np.random.default_rng(seed).integers(0, 2**31 - 1, size=1)[0])
+    trial_seeds = np.random.default_rng(seed).integers(0, 2**31 - 1, size=trials).tolist()
 
     rows = []
     for name, strategy in strategies.items():
-        roster = simulate_draft(
-            board, teams, rounds, my_slot, strategy, seed=trial_seed,
-            opponent_strategy=strategy_adp,
-        )
-        zero, total = zero_scoring_rate(roster, actual_points)
+        zero_total = 0
+        picks_total = 0
+        for trial_seed in trial_seeds:
+            roster = simulate_draft(
+                board, teams, rounds, my_slot, strategy, seed=trial_seed,
+                opponent_strategy=strategy_adp,
+            )
+            zero, total = zero_scoring_rate(roster, actual_points)
+            zero_total += zero
+            picks_total += total
         rows.append({
-            "strategy": name, "picks": total, "zero_scoring": zero,
-            "zero_rate": zero / total if total else float("nan"),
+            "strategy": name, "trials": trials, "picks": picks_total,
+            "zero_scoring": zero_total,
+            "zero_rate": zero_total / picks_total if picks_total else float("nan"),
         })
     return pd.DataFrame(rows)
 
