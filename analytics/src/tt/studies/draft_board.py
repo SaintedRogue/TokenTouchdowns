@@ -335,24 +335,27 @@ def strategies_for(config: LeagueConfig, rounds: int) -> dict[str, Strategy]:
 
 
 def run_backtest_cell(
-    history: pd.DataFrame,
+    board: pd.DataFrame,
     config: LeagueConfig,
     season: int,
-    ffc: pd.DataFrame,
     teams: int,
     my_slot: int,
     trials: int,
     seed: int,
+    actual_points: pd.Series,
     rounds: int = DEFAULT_ROUNDS,
 ) -> pd.DataFrame:
-    """One (season, teams) cell of the backtest: build that season's board
-    at that team count, score every strategy in `strategies_for` on ACTUAL
-    season-`season` points, and return `compare_strategies`' summary table
-    with `season`/`teams` columns prepended.
+    """One (season, teams) cell of the backtest: score every strategy in
+    `strategies_for` on ACTUAL season-`season` points (via `actual_points`),
+    on the ALREADY-BUILT `board` for that team count, and return `compare_
+    strategies`' summary table with `season`/`teams` columns prepended.
+
+    Takes a pre-built `board` (from `build_board`) rather than building one
+    itself -- see this module's WARNING below (and `run_backtest`'s
+    docstring) for why building the board exactly ONCE per (season, teams)
+    cell, in the caller, is load-bearing, not a style preference.
     """
-    board = build_board(history, config, season, ffc, teams)
-    actual = actual_points_by_player(history, config, season)
-    scorer = actual_lineup_score(actual, config)
+    scorer = actual_lineup_score(actual_points, config)
     strategies = strategies_for(config, rounds)
     result = compare_strategies(
         board, strategies, trials=trials, teams=teams, my_slot=my_slot,
@@ -364,13 +367,12 @@ def run_backtest_cell(
 
 
 def zero_scoring_diagnostics(
-    history: pd.DataFrame,
+    board: pd.DataFrame,
     config: LeagueConfig,
-    season: int,
-    ffc: pd.DataFrame,
     teams: int,
     my_slot: int,
     seed: int,
+    actual_points: pd.Series,
     rounds: int = DEFAULT_ROUNDS,
 ) -> pd.DataFrame:
     """One deterministic draft per strategy (`compare_strategies`' own first
@@ -384,9 +386,12 @@ def zero_scoring_diagnostics(
     players scored zero per arm" requirement without re-simulating the
     entire `trials`-sized run just to inspect individual rosters (`compare_
     strategies` returns only aggregate scores, by design).
+
+    Takes the SAME pre-built `board` `run_backtest_cell` was given for this
+    cell -- see module WARNING: rebuilding it here independently used to
+    silently hand this function a DIFFERENT random Monte-Carlo projection
+    than the one `run_backtest_cell` actually drafted against.
     """
-    board = build_board(history, config, season, ffc, teams)
-    actual = actual_points_by_player(history, config, season)
     strategies = strategies_for(config, rounds)
     trial_seed = int(np.random.default_rng(seed).integers(0, 2**31 - 1, size=1)[0])
 
@@ -396,7 +401,7 @@ def zero_scoring_diagnostics(
             board, teams, rounds, my_slot, strategy, seed=trial_seed,
             opponent_strategy=strategy_adp,
         )
-        zero, total = zero_scoring_rate(roster, actual)
+        zero, total = zero_scoring_rate(roster, actual_points)
         rows.append({
             "strategy": name, "picks": total, "zero_scoring": zero,
             "zero_rate": zero / total if total else float("nan"),
@@ -418,6 +423,22 @@ def run_backtest(
     """The full backtest: every (season, teams) cell in `seasons` x
     `team_counts`, concatenated into one table.
 
+    WARNING -- BUILD THE BOARD EXACTLY ONCE PER CELL. `project_players`
+    (via `build_board`/`build_projection_board`) draws a FRESH random Monte
+    Carlo sample whenever it is called with `seed=None` (see `projections.
+    _resolve_seed`). An earlier version of this module built the board
+    separately inside `run_backtest_cell` AND `zero_scoring_diagnostics`
+    for the "same" cell WITHOUT threading a fixed `seed` through -- two
+    calls, two different random projections, so the diagnostics could
+    silently describe a different board than the one actually scored (and
+    a caller re-running this function at all would get non-reproducible
+    absolute numbers even at a fixed `seed`, since that `seed` never
+    reached `project_players`). This function is the fix: it builds `board`
+    exactly ONCE per (season, teams) cell (`build_board(..., seed=seed)`,
+    an explicit, fixed seed) and passes that SAME object into both
+    `run_backtest_cell` and `zero_scoring_diagnostics` below -- see
+    `test_run_backtest_and_diagnostics_share_one_board_and_are_reproducible`.
+
     `my_slot_for_teams` (default `teams // 2`, a fixed, non-tuned "middle of
     the draft order" choice -- not favouring the earliest or latest pick,
     and not chosen by trying values until some strategy won) maps a team
@@ -436,9 +457,14 @@ def run_backtest(
     rows = []
     for season in seasons:
         ffc = ffc_by_season[season]
+        # Computed once per SEASON (not per cell): actual points don't
+        # depend on `teams` at all, and recomputing per team count would
+        # just repeat the same groupby/sum four times for nothing.
+        actual = actual_points_by_player(history, config, season)
         for teams in team_counts:
+            board = build_board(history, config, season, ffc, teams, seed=seed)
             rows.append(run_backtest_cell(
-                history, config, season, ffc, teams, slot_for(teams),
-                trials, seed, rounds=rounds,
+                board, config, season, teams, slot_for(teams),
+                trials, seed, actual, rounds=rounds,
             ))
     return pd.concat(rows, ignore_index=True)

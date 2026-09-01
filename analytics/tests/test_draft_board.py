@@ -22,6 +22,7 @@ from tt.studies.draft_board import (
     build_projection_board,
     load_ffc_crosswalk,
     parse_ffc_crosswalk,
+    run_backtest,
     run_backtest_cell,
     strategies_for,
     zero_scoring_diagnostics,
@@ -353,9 +354,11 @@ def _big_ffc_from(history):
 def test_run_backtest_cell_returns_one_row_per_strategy_with_season_and_teams():
     history = _big_history()
     ffc = _big_ffc_from(history)
+    board = build_board(history, CONFIG_OBJ, season=2021, ffc=ffc, teams=10, seed=1)
+    actual = actual_points_by_player(history, CONFIG_OBJ, season=2021)
     out = run_backtest_cell(
-        history, CONFIG_OBJ, season=2021, ffc=ffc, teams=10, my_slot=3,
-        trials=3, seed=1, rounds=4,
+        board, CONFIG_OBJ, season=2021, teams=10, my_slot=3,
+        trials=3, seed=1, actual_points=actual, rounds=4,
     )
     assert set(out["strategy"]) == {
         "adp", "vor", "vor_survival_unconditional", "vor_survival_conditional",
@@ -368,9 +371,10 @@ def test_run_backtest_cell_returns_one_row_per_strategy_with_season_and_teams():
 def test_zero_scoring_diagnostics_reports_a_row_per_strategy():
     history = _big_history()
     ffc = _big_ffc_from(history)
+    board = build_board(history, CONFIG_OBJ, season=2021, ffc=ffc, teams=10, seed=1)
+    actual = actual_points_by_player(history, CONFIG_OBJ, season=2021)
     out = zero_scoring_diagnostics(
-        history, CONFIG_OBJ, season=2021, ffc=ffc, teams=10, my_slot=3,
-        seed=1, rounds=4,
+        board, CONFIG_OBJ, teams=10, my_slot=3, seed=1, actual_points=actual, rounds=4,
     )
     assert set(out["strategy"]) == {
         "adp", "vor", "vor_survival_unconditional", "vor_survival_conditional",
@@ -380,3 +384,31 @@ def test_zero_scoring_diagnostics_reports_a_row_per_strategy():
     # every single pick must score zero actual points, which is exactly what
     # a real "drafted a rookie/bust with no matching season" case looks like.
     assert (out["zero_scoring"] == out["picks"]).all()
+
+
+def test_run_backtest_cell_is_reproducible_given_the_same_board_and_seed():
+    # Pins the bug this refactor fixed: building the board with a FIXED seed
+    # and reusing that exact board must make run_backtest_cell's numbers
+    # bit-for-bit reproducible across separate calls -- unlike the old
+    # "rebuild the board with seed=None inside run_backtest_cell" design,
+    # where every call silently drew a fresh random Monte Carlo projection.
+    history = _big_history()
+    ffc = _big_ffc_from(history)
+    board = build_board(history, CONFIG_OBJ, season=2021, ffc=ffc, teams=10, seed=1)
+    actual = actual_points_by_player(history, CONFIG_OBJ, season=2021)
+    first = run_backtest_cell(board, CONFIG_OBJ, 2021, 10, 3, 5, 1, actual, rounds=4)
+    second = run_backtest_cell(board, CONFIG_OBJ, 2021, 10, 3, 5, 1, actual, rounds=4)
+    pd.testing.assert_series_equal(first["mean_score"], second["mean_score"])
+
+
+def test_run_backtest_returns_every_season_and_team_count_cell():
+    history = _big_history()
+    ffc = _big_ffc_from(history)
+    out = run_backtest(
+        history, CONFIG_OBJ, seasons=(2021,), ffc_by_season={2021: ffc},
+        team_counts=(4, 10), trials=3, seed=1, rounds=4,
+    )
+    assert set(zip(out["season"], out["teams"])) == {(2021, 4), (2021, 10)}
+    assert set(out["strategy"]) == {
+        "adp", "vor", "vor_survival_unconditional", "vor_survival_conditional",
+    }

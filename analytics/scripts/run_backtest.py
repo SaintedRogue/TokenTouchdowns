@@ -7,6 +7,13 @@ Prereqs (run once, or whenever the crosswalk should refresh):
   1. `.venv/bin/python scripts/export_nflverse_roster.py`
   2. `node ../analytics/scripts/build_ffc_crosswalk.mjs` (from repo root)
 Both write into `analytics/data/`, which this script then reads.
+
+REPRODUCIBILITY: the board for each (season, teams) cell is built EXACTLY
+ONCE here (`build_board(..., seed=SEED)`) and handed to both `run_backtest_
+cell` and `zero_scoring_diagnostics` -- see `draft_board.run_backtest`'s own
+WARNING for why building it twice (the original version of this script,
+before this fix) silently gave the two functions two DIFFERENT random
+Monte Carlo projections for the "same" cell.
 """
 from __future__ import annotations
 
@@ -22,6 +29,8 @@ from tt.league import load_config  # noqa: E402
 from tt.studies.draft_board import (  # noqa: E402
     BACKTEST_SEASONS,
     TEAM_COUNTS,
+    actual_points_by_player,
+    build_board,
     load_ffc_crosswalk,
     run_backtest_cell,
     zero_scoring_diagnostics,
@@ -31,6 +40,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 TRIALS = 200
 SEED = 2026
 ROUNDS = 15
+DONE_MARKER = DATA_DIR / "backtest_DONE.marker"
 
 
 def load_history(seasons) -> pd.DataFrame:
@@ -43,6 +53,7 @@ def my_slot_for(teams: int) -> int:
 
 
 def main() -> None:
+    DONE_MARKER.unlink(missing_ok=True)
     t_start = time.time()
     config = load_config(DATA_DIR / "league.json")
     # Full available history (2015..2025): build_projection_board itself
@@ -64,12 +75,20 @@ def main() -> None:
     results = []
     zero_rows = []
     for season in BACKTEST_SEASONS:
+        # Actual points don't depend on `teams` -- computed once per season,
+        # reused across every team-count cell for that season.
+        actual = actual_points_by_player(history, config, season)
         for teams in TEAM_COUNTS:
             slot = my_slot_for(teams)
             cell_start = time.time()
+
+            # Built ONCE, fixed seed, shared by both calls below -- see
+            # module docstring's REPRODUCIBILITY note.
+            board = build_board(history, config, season, ffc_by_season[season], teams, seed=SEED)
+
             cell = run_backtest_cell(
-                history, config, season, ffc_by_season[season], teams, slot,
-                trials=TRIALS, seed=SEED, rounds=ROUNDS,
+                board, config, season, teams, slot,
+                trials=TRIALS, seed=SEED, actual_points=actual, rounds=ROUNDS,
             )
             results.append(cell)
             print(f"[{time.time()-t_start:6.1f}s] season={season} teams={teams} "
@@ -80,8 +99,7 @@ def main() -> None:
                       f"{row['ci95_high']:.2f}]", flush=True)
 
             zeros = zero_scoring_diagnostics(
-                history, config, season, ffc_by_season[season], teams, slot,
-                seed=SEED, rounds=ROUNDS,
+                board, config, teams, slot, seed=SEED, actual_points=actual, rounds=ROUNDS,
             )
             zeros.insert(0, "season", season)
             zeros.insert(1, "teams", teams)
@@ -92,6 +110,7 @@ def main() -> None:
             pd.concat(zero_rows, ignore_index=True).to_csv(DATA_DIR / "backtest_zero_scoring.csv", index=False)
 
     print(f"[{time.time()-t_start:6.1f}s] DONE", flush=True)
+    DONE_MARKER.write_text(f"done at {time.time()-t_start:.1f}s\n")
 
 
 if __name__ == "__main__":
