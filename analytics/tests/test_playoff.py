@@ -56,6 +56,11 @@ _ONE_WR_CONFIG = load_config_from_dict({
     "draftStatus": "predraft", "rosterSlots": {"WR": 1}, "scoring": [],
 })
 
+_ONE_RB_CONFIG = load_config_from_dict({
+    "leagueKey": "x", "name": "x", "numTeams": 10, "maxTeams": 10,
+    "draftStatus": "predraft", "rosterSlots": {"RB": 1}, "scoring": [],
+})
+
 # The real league's shape (see test_mock.py / test_lineup.py's own
 # _REAL_SHAPE_CONFIG): enough slots and flex to exercise the swap search
 # for real, not just a single-slot toy.
@@ -324,3 +329,43 @@ def test_playoff_lineup_never_starts_a_bench_only_player_twice_and_never_drops_t
     )
     assert len(result) == 2  # 1 starting slot + 1 bench player, always
     assert set(result["player_id"]) == {"steady", "boom_bust"}
+
+
+def test_a_displaced_starter_moves_to_the_bench_instead_of_staying_a_starter():
+    """A swap must REPLACE a starter, not add one.
+
+    The hill-climb builds each trial lineup by overwriting `starters[i]`
+    with the bench candidate, then pushes the displaced player onto the
+    bench list -- but the displaced dict still carried the `starter=True`
+    and `slot` it held while starting. Concatenating starters and bench
+    then produced a frame with MORE rows flagged `starter` than the league
+    has slots, i.e. an illegal lineup that `win_probability` (which selects
+    on `starter & ~empty`) would happily score as if you could field two
+    players in one slot.
+
+    Asserts the LEVEL -- exactly one starter for a one-slot league -- not
+    merely that a swap happened.
+    """
+    roster = pd.DataFrame({
+        "player_id": ["steady", "boom"],
+        "name": ["Steady RB", "Boom RB"],
+        "position": ["RB", "RB"],
+        "proj_points": [20.0, 19.0],
+        "sd": [3.0, 12.0],
+    })
+    # A far-ahead opponent: only the high-variance tail wins, so the
+    # optimiser is forced to swap and therefore to displace someone.
+    their = pd.DataFrame({
+        "player_id": ["opp"], "name": ["Opponent"], "position": ["RB"],
+        "proj_points": [60.0], "sd": [1.0],
+    })
+    out = playoff_lineup(roster, their, _ONE_RB_CONFIG, n=4000, seed=11)
+
+    live = out[out["starter"].fillna(False).astype(bool)]
+    live = live[~live["empty"].fillna(False).astype(bool)]
+    assert len(live) == 1, f"one RB slot must yield one starter, got {len(live)}"
+    assert live.iloc[0]["player_id"] == "boom"
+
+    displaced = out[out["player_id"] == "steady"].iloc[0]
+    assert bool(displaced["starter"]) is False
+    assert displaced["slot"] is None or pd.isna(displaced["slot"])

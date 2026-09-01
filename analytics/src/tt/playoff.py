@@ -315,7 +315,15 @@ def playoff_lineup(
                 starters = trial
                 bench.pop(j)
                 if not displaced.get("empty", False):
-                    bench.append(displaced)
+                    # Reset the displaced player to `lineup.py`'s bench
+                    # convention (slot=None, starter=False). Carrying its
+                    # old starter/slot flags onto the bench list made the
+                    # concatenated frame report MORE starters than the
+                    # league has slots -- an illegal lineup that
+                    # `win_probability` would score as though two players
+                    # could occupy one slot.
+                    bench.append({**displaced, "slot": None,
+                                  "starter": False, "empty": False})
                 improved = True
         if not improved:
             break
