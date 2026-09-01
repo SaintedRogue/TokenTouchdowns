@@ -194,6 +194,55 @@ export async function createDraftRoom({
     }
   }
 
+  // PASS 3 fallback for identity resolution -- the actual root cause writeup
+  // (this branch's draft-room-names-report.md): `draft_results` carries NO
+  // player name at all, only `player_key` (module docstring), so pass 2
+  // above can only ever fire when Sleeper's own yahoo_id join already holds
+  // *some* record for that player -- 150/210 real picks (71%) have none,
+  // including the #1 overall pick, and nothing short of asking Yahoo itself
+  // for the name closes that gap. Yahoo's own bulk `players;player_keys=`
+  // resource answers exactly that (verified live: 25/50/100 keys requested
+  // -> 25/50/100 returned, so the whole 210-pick draft resolves in <=3
+  // calls) -- fetched HERE, keyed by Yahoo player_key, and kept for the life
+  // of this room: a Yahoo player's identity never changes mid-draft, so a
+  // key already in this map is never looked up again (see
+  // `keysNeedingYahooNames`/`fetchYahooNames` below). This is enrichment
+  // data only, feeding the SAME tested buildAdpIndex/matchAdp matcher pass 2
+  // already uses -- no new matching logic.
+  const yahooNameCache = new Map(); // yahooKey -> {name, position, team}
+  const YAHOO_PLAYERS_CHUNK = 100; // Yahoo's own ceiling, verified live -- see above.
+
+  /**
+   * Fetch Yahoo's own name/position/team for `keys` (Yahoo player_keys not
+   * already in `yahooNameCache`), batched at `YAHOO_PLAYERS_CHUNK` per
+   * request, and cache every one that comes back. NEVER throws (design doc
+   * section 5's explicit worst case: a poller that rejects crashes the
+   * server mid-draft) -- a failing or rate-limited chunk is skipped, those
+   * keys simply stay out of the cache and are retried on a later poll;
+   * chunks that already succeeded are kept. Never re-fetches: a key is only
+   * ever passed in here once, by `keysNeedingYahooNames`.
+   */
+  async function fetchYahooNames(keys) {
+    for (let i = 0; i < keys.length; i += YAHOO_PLAYERS_CHUNK) {
+      const chunk = keys.slice(i, i + YAHOO_PLAYERS_CHUNK);
+      let body;
+      try {
+        body = await client.get(`players;player_keys=${chunk.join(',')}`);
+      } catch {
+        continue; // rate-limited/errored -- leave this chunk unresolved, retry next poll
+      }
+      for (const p of body?.players ?? []) {
+        const key = p?.player_key;
+        if (!key) continue;
+        yahooNameCache.set(key, {
+          name: p.name?.full ?? null,
+          position: p.display_position ?? null,
+          team: p.editorial_team_abbr ?? null,
+        });
+      }
+    }
+  }
+
   let draftState = createState(boardRecords.map((r) => r.player_id));
 
   let lastPollAt = null; // ms epoch of the last poll that produced USABLE data
@@ -290,30 +339,33 @@ export async function createDraftRoom({
   }
 
   /**
-   * Resolve one Yahoo player_key to the engine's player_id -- TWO PASSES,
+   * Resolve one Yahoo player_key to the engine's player_id -- THREE PASSES,
    * reusing src/cli.js's `resolveRosterIdentity` technique exactly rather
-   * than reimplementing it (design doc 4.2; see this branch's crosswalk
-   * report for the measured before/after):
+   * than reimplementing it (design doc 4.2; see this branch's reports for
+   * the measured before/after at each step):
    *
    *   PASS 1: Sleeper's own gsis_id, via the existing tested crosswalk
    *     (buildCrosswalk + lookupByYahooKey, src/identity.js).
-   *   PASS 2 (fallback): when Sleeper carries a record for this yahoo id but
-   *     no gsis_id -- a REAL, measured gap that clusters on exactly the
+   *   PASS 2: when Sleeper carries a record for this yahoo id but no
+   *     gsis_id -- a REAL, measured gap that clusters on exactly the
    *     players who go early, see resolveRosterIdentity's own docstring --
    *     the SAME tested buildAdpIndex/matchAdp matcher (src/identity.js),
    *     applied to that Sleeper record's OWN name/position/team against
    *     nflverse's roster export.
-   *
-   * UNLIKE resolveRosterIdentity, `draft_results` carries no Yahoo player
-   * name at all -- only `player_key` (see module docstring) -- so pass 2's
-   * query can only ever be the Sleeper crosswalk record's OWN name, never
-   * Yahoo's own. A yahoo id entirely absent from the Sleeper crosswalk (not
-   * merely missing gsis_id) has nothing to query nflverse with and stays
-   * unresolved -- see `identityStats` below for how that residue is
-   * surfaced rather than hidden.
+   *   PASS 3 (the actual root cause fix -- draft-room-names-report.md):
+   *     `draft_results` carries no Yahoo player name at all, so passes 1-2
+   *     never even fire for the 71% of a real draft with no Sleeper record
+   *     for that yahoo id at all (not merely a missing gsis_id). Yahoo's OWN
+   *     name/position/team for exactly those keys -- fetched in bulk via
+   *     `players;player_keys=` and cached in `yahooNameCache` (see
+   *     `fetchYahooNames`/`keysNeedingYahooNames` above) -- is fed into the
+   *     SAME matchAdp/nflverseIndex matcher pass 2 already uses. A key not
+   *     yet in the cache (not fetched yet, or the fetch failed/rate-limited)
+   *     simply has nothing to try here and stays unresolved for this poll --
+   *     there is no fourth pass.
    *
    * Never guesses (buildAdpIndex/matchAdp's own defining property): returns
-   * null, never a best guess, when neither pass resolves.
+   * null, never a best guess, when no pass resolves.
    */
   function resolveYahooKey(playerKey) {
     const xw = lookupByYahooKey(crosswalk, playerKey);
@@ -322,7 +374,37 @@ export async function createDraftRoom({
       const fallback = matchAdp(nflverseIndex, { name: xw.name, position: xw.position, team: xw.team });
       if (fallback?.playerId) return fallback.playerId;
     }
+    const yahooRecord = yahooNameCache.get(playerKey);
+    if (yahooRecord) {
+      const fallback = matchAdp(nflverseIndex, yahooRecord);
+      if (fallback?.playerId) return fallback.playerId;
+    }
     return null;
+  }
+
+  /**
+   * Which of `picks`' Yahoo player_keys are worth asking Yahoo's own
+   * `players;player_keys=` resource about: made picks whose key
+   *   (a) isn't already in `yahooNameCache` (never re-fetch a resolved key
+   *       -- a player's identity doesn't change mid-draft), AND
+   *   (b) doesn't already resolve via passes 1-2 (asking Yahoo for a name
+   *       the Sleeper crosswalk already gave us for free would waste a
+   *       poll's worth of quota on nothing).
+   * Deduped, order-preserving. `picks` is Yahoo's own FULL made-picks list
+   * every poll, not a delta (see module docstring/`resolveAndApply`), so
+   * this scan -- cheap Map/Set lookups only, no network -- is what keeps the
+   * actual fetch scoped to only the picks that are NEW since the last poll.
+   */
+  function keysNeedingYahooNames(picks) {
+    const seen = new Set();
+    const keys = [];
+    for (const p of picks) {
+      const key = p?.playerKey;
+      if (!key || seen.has(key) || yahooNameCache.has(key)) continue;
+      seen.add(key);
+      if (resolveYahooKey(key) == null) keys.push(key);
+    }
+    return keys;
   }
 
   /** Fold Yahoo `draft_results` picks into state, translating each Yahoo
@@ -384,6 +466,15 @@ export async function createDraftRoom({
       }
 
       const changed = picks.length > 0;
+      if (changed) {
+        // Pass 3 (see resolveYahooKey): ask Yahoo for the names of whatever
+        // made picks aren't already resolved or cached, batched, capped at
+        // YAHOO_PLAYERS_CHUNK per request -- see fetchYahooNames's own
+        // docstring for why this can never throw or block the rest of the
+        // poll even when it fails outright.
+        const keysToFetch = keysNeedingYahooNames(picks);
+        if (keysToFetch.length > 0) await fetchYahooNames(keysToFetch);
+      }
       resolveAndApply(picks, pending);
       pollBanner = null;
       lastPollOk = true;

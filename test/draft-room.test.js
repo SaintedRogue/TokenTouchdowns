@@ -11,6 +11,13 @@ import { normalize } from '../src/normalize.js';
 const fixture = async (n) =>
   normalize(JSON.parse(await readFile(new URL(`./fixtures/${n}.json`, import.meta.url), 'utf8')));
 
+// For fixtures that are already plain JSON (not a Yahoo fantasy_content
+// envelope) -- e.g. the real nflverse/Yahoo-names slices below -- so they
+// must NOT go through normalize() (it expects an object, not an array, and
+// would otherwise silently mangle a flat name/position/team map).
+const jsonFixture = async (n) =>
+  JSON.parse(await readFile(new URL(`./fixtures/${n}.json`, import.meta.url), 'utf8'));
+
 // --- fixtures ----------------------------------------------------------------
 //
 // A small SYNTHETIC 6-player board -- big enough to exercise position
@@ -469,6 +476,259 @@ test('the real captured LATE-draft payload: the two-pass crosswalk (Sleeper gsis
 
     assert.equal(board.find((r) => r.playerId === '00-0034857').taken, true, 'Josh Allen resolved via gsisId (pass 1)');
     assert.equal(board.find((r) => r.playerId === '00-0036223').taken, true, 'Jonathan Taylor resolved via the nflverse name fallback (pass 2) -- gsisId alone leaves this player on the board, wrongly, on draft day');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// --- THE ACTUAL ROOT CAUSE FIX: `draft_results` carries no player name at --
+// --- all, only `player_key` -- so passes 1-2 above can only ever fire when
+// --- Sleeper's own yahoo_id join already holds a record for that player,
+// --- true for only 60/210 (28.6%) of a real draft (draft-room-crosswalk-
+// --- report.md). PASS 3 asks Yahoo itself, via the bulk
+// --- `players;player_keys=` resource (verified live against a real session:
+// --- 25/50/100 keys requested -> 25/50/100 returned), batched at <=100 per
+// --- request, and feeds Yahoo's own name/position/team into the SAME tested
+// --- matchAdp/nflverseIndex matcher pass 2 already uses -- no new matching
+// --- logic anywhere in this fix.
+//
+// Every piece of data driving this test is REAL, not synthetic: the full
+// 210-pick draft_results capture (test/fixtures/league-draftresults-full.json,
+// same real Yahoo mock draft as the LATE-payload test above, this time
+// complete); the crosswalk is deliberately EMPTY, so passes 1-2 contribute
+// NOTHING here and pass 3 is measured in isolation; the Yahoo names
+// (test/fixtures/yahoo-players-full.json) were fetched live, moments before
+// writing this test, from the real Yahoo session for all 210 real
+// player_keys in this capture via this exact `players;player_keys=`
+// resource; and the nflverse rows (test/fixtures/nflverse-players-full.json)
+// are the exact subset of the real, checked-out analytics/data/
+// nflverse_players.json that those 210 real names resolve against.
+test("the real captured FULL 210-pick payload: batched Yahoo players;player_keys= (pass 3) resolves the picks an empty crosswalk cannot -- team defenses and kickers are the only residue, both excluded from the board by the analytics engine's own design (PROJECTABLE_POSITIONS is QB/RB/WR/TE only)", async () => {
+  const { league } = await fixture('league-draftresults-full');
+  const nflverseRecords = await jsonFixture('nflverse-players-full');
+  const yahooNames = await jsonFixture('yahoo-players-full');
+
+  // Every board row this test needs is exactly the 166 real players pass 3
+  // resolves to -- proj/adp/vor are placeholders (this test is about
+  // identity resolution, not ranking); see fakeAnalytics's own docstring for
+  // why board-building logic itself is never reimplemented here.
+  const boardPlayers = nflverseRecords.map((r, i) => ({
+    player_id: r.playerId, name: r.name, position: r.position,
+    proj_points: 100, adp: i + 1, stdev: 1, vor: 200 - i, tier: 1,
+  }));
+
+  const client = {
+    calls: [],
+    async get(resource) {
+      this.calls.push(resource);
+      if (resource.startsWith('league/470.l.1433972/teams')) {
+        return {
+          league: {
+            teams: Array.from({ length: 14 }, (_, i) => ({
+              team_key: `470.l.1433972.t.${i + 1}`,
+              name: `Team ${i + 1}`,
+              is_owned_by_current_login: i + 1 === 5 ? 1 : 0,
+            })),
+          },
+        };
+      }
+      if (resource.startsWith('league/470.l.1433972/draftresults')) {
+        return { league: { draft_results: league.draft_results } };
+      }
+      if (resource.startsWith('players;player_keys=')) {
+        const keys = resource.slice('players;player_keys='.length).split(',');
+        assert.ok(keys.length <= 100, `pass 3 must never request more than 100 keys at once, got ${keys.length}`);
+        const players = keys
+          .filter((k) => yahooNames[k])
+          .map((k) => ({
+            player_key: k,
+            name: { full: yahooNames[k].name },
+            display_position: yahooNames[k].position,
+            editorial_team_abbr: yahooNames[k].team,
+          }));
+        return { players };
+      }
+      throw new Error(`unscripted resource: ${resource}`);
+    },
+  };
+  const analytics = fakeAnalytics({ boardPlayers });
+  const room = await createDraftRoom({
+    teams: 14, slot: 5, rounds: 15, league: '470.l.1433972',
+    client, analytics, leagueConfig: LEAGUE_CONFIG, crosswalk: new Map(),
+  });
+  await room.poll();
+  const { status, board } = room.getViewModel();
+
+  const playersCalls = client.calls.filter((r) => r.startsWith('players;player_keys='));
+  assert.equal(playersCalls.length, 3, 'all 210 new keys batched into ceil(210/100) = 3 requests, never one per pick');
+
+  // LEVEL assertions (the whole point of this task): every one of the 210
+  // real made picks must still count, resolved or not --
+  assert.equal(status.picksMade, 210, 'every made pick still counts, resolved or not (arithmetic never degrades)');
+  assert.equal(status.identity.total, 210);
+  // -- and pass 3, entirely on its own (no Sleeper crosswalk at all), takes
+  // resolution from 0 to 166/210 (79.0%): every real, currently-projectable
+  // (QB/RB/WR/TE) player in this draft. The residue (44) is NOT rounded
+  // away: 15 team defenses (never name-matched by buildAdpIndex's own
+  // design) + 15 kickers + 14 real players with no history yet in the
+  // nflverse export (rookies) -- all 30 DEF/K are additionally excluded from
+  // the board itself by the Python engine's PROJECTABLE_POSITIONS, so no
+  // identity fix, however complete, could ever mark them taken.
+  assert.equal(status.identity.matched, 166, '210 - 15 DEF - 15 K - 14 not-yet-in-nflverse rookies');
+  assert.equal(status.identity.unresolved, 44);
+
+  assert.equal(board.find((r) => r.playerId === '00-0039139').taken, true, 'pick 1, Jahmyr Gibbs, resolved via pass 3 (Yahoo name -> nflverse match)');
+  assert.equal(board.find((r) => r.playerId === '00-0034857').taken, true, 'pick 2, Josh Allen, resolved via pass 3');
+  assert.ok(board.every((r) => r.taken), 'every one of the 166 board rows in this test is a real resolved pick -- none is left wrongly available');
+});
+
+// --- MECHANISM: caching, batching, and failure tolerance --------------------
+
+test('a pick already resolved via Yahoo names is never re-fetched on a later poll (cached for the life of the room)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tt-draft-room-yahoo-names-cache-'));
+  try {
+    const nflverseRosterPath = path.join(dir, 'nflverse_players.json');
+    await writeFile(nflverseRosterPath, JSON.stringify([
+      { playerId: 'GIBBS', name: 'Jahmyr Gibbs', position: 'RB', team: 'DET' },
+    ]));
+    const client = fakeClient({
+      'league/470.l.1/teams': TEAMS_RESPONSE,
+      'league/470.l.1/draftresults': [
+        { league: { draft_results: [{ pick: 1, team_key: '470.l.1.t.1', player_key: '470.p.40059' }] } },
+        { league: { draft_results: [{ pick: 1, team_key: '470.l.1.t.1', player_key: '470.p.40059' }] } },
+      ],
+      'players;player_keys=470.p.40059': {
+        players: [{ player_key: '470.p.40059', name: { full: 'Jahmyr Gibbs' }, display_position: 'RB', editorial_team_abbr: 'DET' }],
+      },
+    });
+    const boardPlayers = [...BOARD_PLAYERS,
+      { player_id: 'GIBBS', name: 'Jahmyr Gibbs', position: 'RB', proj_points: 300, adp: 1, stdev: 1, vor: 60, tier: 1 }];
+    const analytics = fakeAnalytics({ boardPlayers });
+    const room = await createDraftRoom({
+      teams: 4, slot: 2, rounds: 6, league: '470.l.1', client, analytics,
+      leagueConfig: LEAGUE_CONFIG, crosswalk: new Map(), nflverseRosterPath,
+    });
+
+    await room.poll();
+    assert.equal(client.calls.filter((r) => r.startsWith('players;player_keys=')).length, 1);
+    assert.equal(room.getViewModel().status.identity.matched, 1);
+
+    await room.poll(); // same pick, still made, on the very next poll
+    assert.equal(client.calls.filter((r) => r.startsWith('players;player_keys=')).length, 1,
+      'the second poll must not re-fetch an already-cached key -- a player\'s identity never changes mid-draft');
+    assert.equal(room.getViewModel().status.identity.matched, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an incremental draft only ever fetches the keys that are NEW since the last poll, never re-requesting an already-seen one', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tt-draft-room-yahoo-names-incremental-'));
+  try {
+    const nflverseRosterPath = path.join(dir, 'nflverse_players.json');
+    await writeFile(nflverseRosterPath, JSON.stringify([
+      { playerId: 'X1', name: 'Player One', position: 'RB', team: 'AAA' },
+      { playerId: 'X2', name: 'Player Two', position: 'WR', team: 'BBB' },
+    ]));
+    const namesByKey = {
+      '470.p.1': { name: 'Player One', position: 'RB', team: 'AAA' },
+      '470.p.2': { name: 'Player Two', position: 'WR', team: 'BBB' },
+    };
+    let pollCount = 0;
+    const client = {
+      calls: [],
+      async get(resource) {
+        this.calls.push(resource);
+        if (resource.startsWith('league/470.l.1/teams')) return TEAMS_RESPONSE;
+        if (resource.startsWith('league/470.l.1/draftresults')) {
+          pollCount += 1;
+          const picks = pollCount === 1
+            ? [{ pick: 1, team_key: '470.l.1.t.1', player_key: '470.p.1' }]
+            : [{ pick: 1, team_key: '470.l.1.t.1', player_key: '470.p.1' },
+                { pick: 2, team_key: '470.l.1.t.2', player_key: '470.p.2' }];
+          return { league: { draft_results: picks } };
+        }
+        if (resource.startsWith('players;player_keys=')) {
+          const keys = resource.slice('players;player_keys='.length).split(',');
+          return {
+            players: keys.filter((k) => namesByKey[k]).map((k) => ({
+              player_key: k, name: { full: namesByKey[k].name },
+              display_position: namesByKey[k].position, editorial_team_abbr: namesByKey[k].team,
+            })),
+          };
+        }
+        throw new Error(`unscripted resource: ${resource}`);
+      },
+    };
+    const boardPlayers = [...BOARD_PLAYERS,
+      { player_id: 'X1', name: 'Player One', position: 'RB', proj_points: 100, adp: 1, stdev: 1, vor: 10, tier: 1 },
+      { player_id: 'X2', name: 'Player Two', position: 'WR', proj_points: 90, adp: 2, stdev: 1, vor: 8, tier: 1 }];
+    const analytics = fakeAnalytics({ boardPlayers });
+    const room = await createDraftRoom({
+      teams: 4, slot: 2, rounds: 6, league: '470.l.1', client, analytics,
+      leagueConfig: LEAGUE_CONFIG, crosswalk: new Map(), nflverseRosterPath,
+    });
+
+    await room.poll();
+    assert.deepEqual(client.calls.filter((r) => r.startsWith('players;player_keys=')), ['players;player_keys=470.p.1']);
+
+    await room.poll();
+    const allPlayersCalls = client.calls.filter((r) => r.startsWith('players;player_keys='));
+    assert.deepEqual(allPlayersCalls, ['players;player_keys=470.p.1', 'players;player_keys=470.p.2'],
+      'only the NEW key (470.p.2) is fetched on the second poll -- 470.p.1 stays cached, never re-requested');
+    assert.equal(room.getViewModel().status.identity.matched, 2);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failing or rate-limited players;player_keys= fetch never throws -- the poll keeps the last good state, those picks stay unresolved, and arithmetic is unaffected; a later poll retries and can still recover', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tt-draft-room-yahoo-names-failure-'));
+  try {
+    const nflverseRosterPath = path.join(dir, 'nflverse_players.json');
+    await writeFile(nflverseRosterPath, JSON.stringify([
+      { playerId: 'X1', name: 'Player One', position: 'RB', team: 'AAA' },
+      { playerId: 'X2', name: 'Player Two', position: 'WR', team: 'BBB' },
+    ]));
+    const client = fakeClient({
+      'league/470.l.1/teams': TEAMS_RESPONSE,
+      'league/470.l.1/draftresults': {
+        league: {
+          draft_results: [{ pick: 1, team_key: '470.l.1.t.1', player_key: '470.p.1' },
+                            { pick: 2, team_key: '470.l.1.t.2', player_key: '470.p.2' }],
+        },
+      },
+      // First poll's fetch is rate-limited outright; the second succeeds.
+      'players;player_keys=': [
+        new YahooApiError('rate limited', 999),
+        {
+          players: [
+            { player_key: '470.p.1', name: { full: 'Player One' }, display_position: 'RB', editorial_team_abbr: 'AAA' },
+            { player_key: '470.p.2', name: { full: 'Player Two' }, display_position: 'WR', editorial_team_abbr: 'BBB' },
+          ],
+        },
+      ],
+    });
+    const boardPlayers = [...BOARD_PLAYERS,
+      { player_id: 'X1', name: 'Player One', position: 'RB', proj_points: 100, adp: 1, stdev: 1, vor: 10, tier: 1 },
+      { player_id: 'X2', name: 'Player Two', position: 'WR', proj_points: 90, adp: 2, stdev: 1, vor: 8, tier: 1 }];
+    const analytics = fakeAnalytics({ boardPlayers });
+    const room = await createDraftRoom({
+      teams: 4, slot: 2, rounds: 6, league: '470.l.1', client, analytics,
+      leagueConfig: LEAGUE_CONFIG, crosswalk: new Map(), nflverseRosterPath,
+    });
+
+    await assert.doesNotReject(() => room.poll(), 'a rate-limited name fetch must never reject the poll itself');
+    let view = room.getViewModel();
+    assert.equal(view.status.picksMade, 2, 'both picks still counted even though the name fetch failed outright');
+    assert.equal(view.status.lastPollOk, true, 'Yahoo draft data itself came back fine -- only the optional name enrichment failed');
+    assert.equal(view.status.banner, null, 'no banner: an enrichment-only failure is not the loud, blocking kind design doc section 5 reserves for a broken draftresults poll');
+    assert.equal(view.status.identity.matched, 0, 'nothing could resolve -- crosswalk empty, and the one fetch that could have supplied names failed');
+
+    await room.poll(); // same two picks, still not cached -- retried, and this time it succeeds
+    view = room.getViewModel();
+    assert.equal(view.status.picksMade, 2);
+    assert.equal(view.status.identity.matched, 2, 'a later poll retries an unresolved key and recovers once Yahoo answers');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
