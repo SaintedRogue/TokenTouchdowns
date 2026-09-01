@@ -56,19 +56,43 @@ regressed to a prior, never used as a predictor.
 
 ### 2.2 Defence-vs-position split-half reliability (wk 1-9 vs 10-18, 32 teams)
 
+Single-season measurement, 2025 only:
+
 | Position faced | r |
 |---|---|
 | QB | 0.167 |
 | WR | 0.142 |
-| RB | **-0.053** |
-| TE | **-0.088** |
+| RB | -0.053 |
+| TE | -0.088 |
+
+**Eleven-season replication (2015-2025)**, see §9.1 (resolved), shows this
+single season does not generalise:
+
+| Position | mean r, 2015-2025 | seasons negative |
+|---|---|---|
+| QB | 0.103 | 3 / 11 |
+| RB | **0.216** | 2 / 11 |
+| TE | 0.123 | 4 / 11 |
+| WR | 0.105 | 2 / 11 |
+
+RB has the *highest* mean reliability of the four positions across eleven
+seasons — the opposite of what the 2025 snapshot suggested. 2025 itself
+reproduces (RB -0.030, TE -0.066), but 2025 is an outlier year, not the
+general pattern: correlations flip sign across seasons for every position
+(QB negative in 3 of 11 years, TE in 4, RB and WR in 2 each).
 
 Points allowed by position largely measures **which offences a team happened to
-play**, not defensive quality. Opponent adjustment therefore earns a small,
-heavily-regressed term for QB and WR only, and is excluded for RB and TE.
+play**, not defensive quality — and this holds for all four positions, not just
+RB/TE. The replication strengthens the architectural conclusion: every
+position's mean r sits in roughly the 0.10-0.22 band, well under the ~0.35
+threshold for nominal significance at n=32 team-halves, with signs flipping
+year to year. No opponent-adjustment subsystem is justified for any position.
 
-CAVEAT: single season, 32 teams per split. Direction matches published work, but
-replication across 2015-2025 is the backtest harness's first task (see §9.1).
+The positional split drawn from the single-season finding — adjust QB/WR,
+exclude RB/TE — is **removed**. It had no empirical basis beyond one season
+and does not survive replication. Any opponent term that is built must be
+uniformly small and heavily regressed across all four positions, or omitted
+entirely.
 
 ### 2.3 Usage metric stability (WR/TE, lag-1)
 
@@ -106,7 +130,8 @@ Feature tiers, per §2:
 - **Modelled:** carries, targets, target_share, air_yards_share, wopr, snap share
 - **Regressed:** yards per opportunity (shrunk to positional + player prior)
 - **Rate x opportunity:** TDs per opportunity, heavily shrunk
-- **Small regressed term:** opponent adjustment, QB/WR only
+- **Small regressed term:** opponent adjustment, uniformly small and heavily
+  regressed across all positions if built at all (§2.2)
 
 ### 4.3 `backtest`
 Walk-forward validation with strict temporal splits. Built BEFORE any model.
@@ -121,6 +146,36 @@ Metrics: MAE and RMSE on half-PPR points; Spearman rank correlation; and
 time?). A model that improves MAE while mis-calibrating is worse for lineup
 decisions than one that does the reverse.
 
+**Measured baseline results** (2024-2025 regular season, QB/RB/WR/TE,
+`start_week=5`, half-PPR points):
+
+```
+FULL POOL (n=10,241)
+  last_3   MAE 4.266   RMSE 6.140   Spearman 0.653
+  last_8   MAE 4.080   RMSE 5.827   Spearman 0.673
+
+STARTER-RELEVANT, weeks where the player scored >= 5 (n=4,454)
+  last_3   MAE 5.290   RMSE 6.954   Spearman 0.348
+  last_8   MAE 5.062   RMSE 6.593   Spearman 0.372
+```
+
+`last_8` beats `last_3` on every metric in both pools, so it is the baseline a
+model must clear.
+
+The two pools diverge for a specific, measured reason: 25.1% of player-weeks
+score under 1 point, and 17.6% score exactly zero. Most of the full pool is
+bench players whose near-zero trailing average trivially predicts their
+near-zero output — "predict ~0, get ~0" is a free win that pulls MAE down and
+inflates Spearman without reflecting any real skill at ordering players who
+are actually in play. Restricting to weeks the player scored >= 5 strips that
+out, and Spearman roughly halves (0.673 -> 0.372).
+
+Future models are judged on **both** pools. The full-pool numbers are the
+literal bar; the starter-relevant Spearman of 0.372 is the meaningful one,
+because judging on the full pool alone would understate real progress and
+could cause a genuinely good model to be rejected for failing to also nail
+bench players nobody would start.
+
 ### 4.4 `models`
 ```
 volume model       -> E[carries], E[targets]      GBM / hierarchical
@@ -132,6 +187,23 @@ Monte Carlo compose -> distribution of half-PPR points
 ```
 Simulation rather than multiplying means gives the distribution the playoff
 optimiser requires, and propagates efficiency's randomness into honest width.
+
+Yards are sampled **per opportunity from a Gamma distribution**, not once per
+week from a Normal. A single week-level Normal draw makes variance scale with
+opportunities squared, so a 25-carry workhorse would come out looking *more*
+volatile than a 5-carry backup — backwards, and misleading for the playoff
+optimiser — and it clipped roughly 2.3% of draws at zero, an artificial point
+mass no real week produces. Summing i.i.d. per-opportunity Gamma draws instead
+keeps the mean at the shrunk yards-per-opportunity prior and makes spread
+scale with volume rather than volume squared. Verified empirically against the
+closed form:
+
+```
+CV_total = sqrt((cv^2 + 1) / volume)
+```
+
+where `cv` is the per-opportunity coefficient of variation and `volume` is
+opportunity count.
 
 ### 4.5 `decide`
 | Scenario | Objective | Algorithm |
@@ -171,7 +243,7 @@ is also the one the league forces.
 | Overfitting to one season | high | brittle | walk-forward across 2015-2025 |
 | nflverse schema drift | medium | ingest breaks | pin asset names; fail loudly |
 | Model never beats ADP | medium | wasted effort | baselines are the gate; report honestly |
-| Building DvP as if it worked | medium | confident noise | §2.2 caps it at QB/WR, heavily regressed |
+| Building DvP as if it worked | medium | confident noise | §2.2: uniformly weak across all positions, so any term is heavily regressed or omitted |
 
 ## 8. Out of scope
 
@@ -182,9 +254,21 @@ is also the one the league forces.
 
 ## 9. Open questions
 
-### 9.1 DvP finding needs multi-season replication
-§2.2 rests on 2025 alone. The harness's first job is replicating it across
-2015-2025. If the negative correlations do not hold, revisit the opponent term.
+### 9.1 DvP finding needs multi-season replication — RESOLVED
+§2.2 originally rested on 2025 alone, which showed RB and TE negative and
+QB/WR weakly positive; that was generalised into a positional rule (adjust
+QB/WR, exclude RB/TE). The eleven-season replication (2015-2025) caught the
+over-generalisation: RB in fact has the highest mean reliability of the four
+positions across those seasons, and every position's correlation flips sign
+from year to year, including in years where the sign matched 2025. The 2025
+finding was a real measurement, but it was one outlier year mistaken for a
+stable positional pattern.
+
+§2.2 has been corrected accordingly: the positional rule is removed, and the
+finding that survives is that defence-vs-position is weak and unstable
+*everywhere*, all four positions well under the significance threshold at
+n=32 — which is a stronger case against building an opponent-adjustment
+subsystem than the original single-season read, not a weaker one.
 
 ### 9.2 Vegas lines not yet sourced
 Implied team total is widely the strongest single short-term predictor and is not
