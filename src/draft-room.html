@@ -150,6 +150,7 @@
     <div id="clock" class="clock">—</div>
     <div class="next-pick">Your next pick: <b id="nextPick">—</b></div>
     <div class="spacer"></div>
+    <div id="identity" class="updated" title="How much of the board is trustworthy: picks Yahoo has confirmed that actually matched a board row and got struck off. A gap here means a drafted player may still show as available.">identity: —</div>
     <div id="updated" class="updated">not yet polled</div>
     <button id="undoBtn" title="Revert the last manual mark">Undo last mark</button>
   </div>
@@ -283,6 +284,23 @@
     u.classList.toggle('stale', secs > 10 || !status.lastPollOk);
   }
 
+  // How much of the board is trustworthy right now (see this branch's fix
+  // for why this exists): a silent identity-resolution gap is exactly what
+  // let a drafted player sit on the board marked available, invisibly, on a
+  // real draft day. This makes that number impossible to miss instead.
+  function renderIdentity(status) {
+    var e = document.getElementById('identity');
+    var id = status.identity;
+    if (!id || id.total === 0) {
+      e.textContent = 'identity: n/a (predraft)';
+      e.classList.remove('stale');
+      return;
+    }
+    var pctText = id.rate === null ? '-' : Math.round(id.rate * 100) + '%';
+    e.textContent = 'identity: ' + id.matched + '/' + id.total + ' matched (' + pctText + ')';
+    e.classList.toggle('stale', id.rate !== null && id.rate < 0.5);
+  }
+
   function renderRecs(recs) {
     var wrap = document.getElementById('recs');
     wrap.innerHTML = '';
@@ -396,6 +414,7 @@
     renderClock(state.status);
     renderBanner(state.status.banner);
     renderUpdated(state.status);
+    renderIdentity(state.status);
     renderRecs(state.recommendations);
     renderBoard(state.board);
     renderRoster(state.roster);

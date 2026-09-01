@@ -47,10 +47,12 @@ import {
   markTaken as markTakenState, undo as undoState,
 } from './draft-state.js';
 import { SessionExpiredError, YahooApiError } from './client.js';
-import { buildCrosswalk, lookupByYahooKey } from './identity.js';
+import { buildCrosswalk, lookupByYahooKey, buildAdpIndex, matchAdp } from './identity.js';
 import { recordsOf } from './sources/index.js';
 import { readCache } from './cache.js';
-import { myTeamKey as fetchMyTeamKey, resolveLeagueKey as fetchLeagueKey } from './cli.js';
+import {
+  myTeamKey as fetchMyTeamKey, resolveLeagueKey as fetchLeagueKey, DEFAULT_NFLVERSE_ROSTER_PATH,
+} from './cli.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /** src/draft-room-recompute.py -- see that file's own docstring for why it
@@ -134,6 +136,8 @@ export async function createDraftRoom({
   cacheDir = undefined,
   leagueConfig: leagueConfigOverride = undefined,
   crosswalk: crosswalkOverride = undefined,
+  nflverseIndex: nflverseIndexOverride = undefined,
+  nflverseRosterPath = DEFAULT_NFLVERSE_ROSTER_PATH,
   myTeamKey: myTeamKeyOverride = undefined,
   now = () => Date.now(),
   recommendCount = DEFAULT_RECOMMEND_N,
@@ -168,6 +172,26 @@ export async function createDraftRoom({
     // should never block the whole feature.
     const cached = await readCache('sleeper', { dir: cacheDir, ttlHours: undefined });
     crosswalk = buildCrosswalk(cached ? recordsOf(cached.data) : []);
+  }
+
+  // PASS 2 fallback for identity resolution (design doc 4.2; measured defect
+  // writeup: Sleeper's gsis_id alone resolved ~22% of a real 210-pick draft).
+  // IDENTICAL technique to src/cli.js's `resolveRosterIdentity` -- the SAME
+  // tested buildAdpIndex/matchAdp matcher (src/identity.js), applied to
+  // nflverse's own roster export -- loaded ONCE here, at startup, alongside
+  // the board, never per poll (see module docstring's performance split).
+  // Missing/corrupt file (export_nflverse_roster.py hasn't been run yet)
+  // degrades to "no fallback available", exactly loadNflverseIndex's own
+  // tolerance in src/cli.js: an optional identity enrichment must never
+  // block the whole feature.
+  let nflverseIndex = nflverseIndexOverride;
+  if (!nflverseIndex) {
+    try {
+      const records = JSON.parse(await readFile(nflverseRosterPath, 'utf8'));
+      nflverseIndex = buildAdpIndex(records);
+    } catch {
+      nflverseIndex = buildAdpIndex([]);
+    }
   }
 
   let draftState = createState(boardRecords.map((r) => r.player_id));
@@ -265,16 +289,52 @@ export async function createDraftRoom({
     }
   }
 
+  /**
+   * Resolve one Yahoo player_key to the engine's player_id -- TWO PASSES,
+   * reusing src/cli.js's `resolveRosterIdentity` technique exactly rather
+   * than reimplementing it (design doc 4.2; see this branch's crosswalk
+   * report for the measured before/after):
+   *
+   *   PASS 1: Sleeper's own gsis_id, via the existing tested crosswalk
+   *     (buildCrosswalk + lookupByYahooKey, src/identity.js).
+   *   PASS 2 (fallback): when Sleeper carries a record for this yahoo id but
+   *     no gsis_id -- a REAL, measured gap that clusters on exactly the
+   *     players who go early, see resolveRosterIdentity's own docstring --
+   *     the SAME tested buildAdpIndex/matchAdp matcher (src/identity.js),
+   *     applied to that Sleeper record's OWN name/position/team against
+   *     nflverse's roster export.
+   *
+   * UNLIKE resolveRosterIdentity, `draft_results` carries no Yahoo player
+   * name at all -- only `player_key` (see module docstring) -- so pass 2's
+   * query can only ever be the Sleeper crosswalk record's OWN name, never
+   * Yahoo's own. A yahoo id entirely absent from the Sleeper crosswalk (not
+   * merely missing gsis_id) has nothing to query nflverse with and stays
+   * unresolved -- see `identityStats` below for how that residue is
+   * surfaced rather than hidden.
+   *
+   * Never guesses (buildAdpIndex/matchAdp's own defining property): returns
+   * null, never a best guess, when neither pass resolves.
+   */
+  function resolveYahooKey(playerKey) {
+    const xw = lookupByYahooKey(crosswalk, playerKey);
+    if (xw?.gsisId) return xw.gsisId;
+    if (xw) {
+      const fallback = matchAdp(nflverseIndex, { name: xw.name, position: xw.position, team: xw.team });
+      if (fallback?.playerId) return fallback.playerId;
+    }
+    return null;
+  }
+
   /** Fold Yahoo `draft_results` picks into state, translating each Yahoo
-   * player_key to the engine's player_id via the crosswalk (design doc
+   * player_key to the engine's player_id via `resolveYahooKey` (design doc
    * section 4.2). An unresolved key is passed through unchanged: it still
    * advances the pick count and `currentPick` (applyPicks records it in
    * `drafted` regardless), it just can never match a board row -- an
    * identity gap degrades the recommendation, never the pool. */
   function resolveAndApply(picks, pending) {
     const resolved = picks.map((p) => {
-      const xw = lookupByYahooKey(crosswalk, p.playerKey);
-      return xw?.gsisId ? { ...p, playerKey: xw.gsisId } : p;
+      const engineId = resolveYahooKey(p.playerKey);
+      return engineId ? { ...p, playerKey: engineId } : p;
     });
     // `pending` entries have no player_key, so there's nothing to resolve
     // through the crosswalk -- they're only ever team_key/pick/round.
@@ -341,6 +401,32 @@ export async function createDraftRoom({
       return { level: 'warn', message: `Recommendations could not be refreshed: ${recomputeErrorMessage}` };
     }
     return null;
+  }
+
+  /**
+   * How much of the visible board is actually trustworthy: of every pick
+   * Yahoo has confirmed (`draftState.drafted`), how many resolved to a real
+   * board row (`boardByPlayerId`) rather than being left on the board,
+   * wrongly, by an identity gap. This is deliberately the SAME test
+   * `buildBoardView`'s own `taken` flag uses (`draftState.available.has`,
+   * which is exactly `boardByPlayerId.has` for a resolved id) -- the number
+   * shown here and the board's own taken/available split can never disagree.
+   *
+   * This is the fix for the defect this branch exists to close: a silent
+   * resolution gap is what made 78% of a real draft's picks stay marked
+   * AVAILABLE invisible in the first place (see this branch's crosswalk
+   * report). `rate` is null, not 0, before any pick has been made -- there
+   * is nothing to report a rate over yet, and 0% would misleadingly read as
+   * "the crosswalk is broken" during predraft.
+   */
+  function identityStats() {
+    const total = draftState.drafted.size;
+    if (total === 0) return { matched: 0, unresolved: 0, total: 0, rate: null };
+    let matched = 0;
+    for (const entry of draftState.drafted.values()) {
+      if (boardByPlayerId.has(entry.playerId)) matched += 1;
+    }
+    return { matched, unresolved: total - matched, total, rate: matched / total };
   }
 
   function buildTakenByMap() {
@@ -424,6 +510,7 @@ export async function createDraftRoom({
       lastPollOk,
       staleSeconds: lastPollAt === null ? 0 : Math.max(0, Math.floor((now() - lastPollAt) / 1000)),
       banner: currentBanner(),
+      identity: identityStats(),
     };
   }
 

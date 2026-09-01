@@ -152,6 +152,10 @@ test('GET /api/state view model matches the documented contract for a predraft l
   assert.equal(view.status.banner, null);
   assert.equal(typeof view.status.lastPollOk, 'boolean');
   assert.equal(typeof view.status.staleSeconds, 'number');
+  // How much of the board is trustworthy (this branch's fix): predraft,
+  // nothing has been drafted yet, so there is nothing to report a rate over
+  // -- null, not 0 (0% would misleadingly read as "the crosswalk is broken").
+  assert.deepEqual(view.status.identity, { matched: 0, unresolved: 0, total: 0, rate: null });
 
   assert.ok(Array.isArray(view.recommendations));
   assert.ok(Array.isArray(view.board));
@@ -383,6 +387,93 @@ test('an unresolvable yahoo player key still advances the pick count without cor
   assert.ok(view.board.every((r) => r.taken === false));
 });
 
+// --- MEASURED DEFECT: Sleeper gsis_id alone resolves only ~22% of a real ---
+// --- draft (see this branch's report) -- src/cli.js's resolveRosterIdentity
+// --- already fixed the identical problem for `tt lineup`/`tt playoff` with a
+// --- two-pass resolution (Sleeper gsis_id, then a name+position+team match
+// --- against nflverse via the tested buildAdpIndex/matchAdp, src/identity.js
+// --- -- see that function's own docstring). This proves draft-room reuses
+// --- the SAME matcher, through the room's real poll -> resolveAndApply path,
+// --- against the REAL captured draft_results shape (test/fixtures/
+// --- league-draftresults-late.json, 131 real picks from a real Yahoo mock
+// --- draft) -- not a synthetic stand-in.
+//
+// UNLIKE `tt lineup`'s roster resource, `draft_results` carries no player
+// name at all -- only `player_key` -- so pass 2's query can only ever be the
+// Sleeper crosswalk record's OWN name/position/team, never Yahoo's. Picks 2
+// and 4 of this real draft (Josh Allen / Jonathan Taylor) are wired with a
+// crosswalk mirroring their REAL Sleeper data one-for-one: Josh Allen carries
+// a real gsis_id (resolves via pass 1); Jonathan Taylor is Sleeper's own
+// documented gap -- present, but gsis_id: null (resolves via pass 2 only).
+// Every other one of the 131 real yahoo ids is deliberately left out of the
+// crosswalk, mirroring the real, measured situation for most of this draft.
+test('the real captured LATE-draft payload: the two-pass crosswalk (Sleeper gsisId, then nflverse name fallback) resolves picks gsisId alone cannot, and every pick still counts whether it resolves or not', async () => {
+  const { league } = await fixture('league-draftresults-late');
+  const dir = await mkdtemp(path.join(tmpdir(), 'tt-draft-room-nflverse-'));
+  try {
+    const nflverseRosterPath = path.join(dir, 'nflverse_players.json');
+    await writeFile(nflverseRosterPath, JSON.stringify([
+      { playerId: '00-0036223', name: 'Jonathan Taylor', position: 'RB', team: 'IND' },
+    ]));
+
+    // '30977' and '32711' are pick 2 and pick 4's REAL yahoo player ids in
+    // this capture (verified directly against test/fixtures/
+    // league-draftresults-late.json).
+    const crosswalk = new Map([
+      ['30977', { gsisId: '00-0034857', name: 'Josh Allen', position: 'QB', team: 'BUF' }],
+      ['32711', { gsisId: null, name: 'Jonathan Taylor', position: 'RB', team: 'IND' }],
+    ]);
+
+    const boardPlayers = [
+      ...BOARD_PLAYERS,
+      { player_id: '00-0034857', name: 'Josh Allen', position: 'QB', proj_points: 280, adp: 3, stdev: 1, vor: 30, tier: 1 },
+      { player_id: '00-0036223', name: 'Jonathan Taylor', position: 'RB', proj_points: 260, adp: 4, stdev: 1, vor: 40, tier: 1 },
+    ];
+
+    const client = {
+      calls: [],
+      async get(resource) {
+        this.calls.push(resource);
+        if (resource.startsWith('league/470.l.1433972/teams')) {
+          return {
+            league: {
+              teams: Array.from({ length: 14 }, (_, i) => ({
+                team_key: `470.l.1433972.t.${i + 1}`,
+                name: `Team ${i + 1}`,
+                is_owned_by_current_login: i + 1 === 5 ? 1 : 0,
+              })),
+            },
+          };
+        }
+        if (resource.startsWith('league/470.l.1433972/draftresults')) {
+          return { league: { draft_results: league.draft_results } };
+        }
+        throw new Error(`unscripted resource: ${resource}`);
+      },
+    };
+    const analytics = fakeAnalytics({ boardPlayers });
+    const room = await createDraftRoom({
+      teams: 14, slot: 5, rounds: 15, league: '470.l.1433972',
+      client, analytics, leagueConfig: LEAGUE_CONFIG, crosswalk, nflverseRosterPath,
+    });
+    await room.poll();
+    const { status, board } = room.getViewModel();
+
+    // LEVEL assertions (the whole point of this defect): every one of the
+    // 131 real made picks must still count, resolved or not --
+    assert.equal(status.picksMade, 131, 'every made pick still counts, resolved or not (arithmetic never degrades)');
+    // -- but exactly 2 of them (Josh Allen via gsisId, Jonathan Taylor via
+    // the nflverse fallback) are trustworthy enough to strike off the board.
+    assert.equal(status.identity.total, 131);
+    assert.equal(status.identity.matched, 2, 'gsisId pass (Josh Allen) + nflverse fallback pass (Jonathan Taylor)');
+
+    assert.equal(board.find((r) => r.playerId === '00-0034857').taken, true, 'Josh Allen resolved via gsisId (pass 1)');
+    assert.equal(board.find((r) => r.playerId === '00-0036223').taken, true, 'Jonathan Taylor resolved via the nflverse name fallback (pass 2) -- gsisId alone leaves this player on the board, wrongly, on draft day');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // --- roster/status shape -----------------------------------------------------
 
 test('roster view lists every configured slot, filled or empty, plus a bench', async () => {
@@ -544,12 +635,20 @@ test('startDraftRoomServer binds to 127.0.0.1 only and serves GET /, /api/state,
     const html = await fetch(started.url);
     assert.equal(html.status, 200);
     assert.match(html.headers.get('content-type'), /html/);
-    assert.match(await html.text(), /<title>/);
+    const htmlText = await html.text();
+    assert.match(htmlText, /<title>/);
+    // The page must actually render the resolution-rate number this branch
+    // adds (design intent: "a silent 78% miss is what made this defect
+    // invisible; a visible number makes it self-reporting") -- not just
+    // carry it unused in the JSON.
+    assert.match(htmlText, /id="identity"/);
+    assert.match(htmlText, /renderIdentity/);
 
     const state = await fetch(new URL('/api/state', started.url));
     assert.equal(state.status, 200);
     const body = await state.json();
     assert.ok(body.status && body.board && body.roster);
+    assert.ok(body.status.identity, '/api/state surfaces the identity-resolution rate under status');
 
     const missing = await fetch(new URL('/nope', started.url));
     assert.equal(missing.status, 404);
