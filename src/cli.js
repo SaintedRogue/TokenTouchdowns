@@ -77,6 +77,7 @@ Commands:
   mock                   Simulate and compare draft strategies
   lineup                 Optimal lineup for this week
   playoff                Variance-aware lineup vs. an opponent
+  season                 Championship odds via season simulation
   help                   Show this message
 
 Draft engine flags (analytics/data/league.json + nflverse parquet required):
@@ -86,6 +87,13 @@ Draft engine flags (analytics/data/league.json + nflverse parquet required):
   mock [--trials N] [--teams N] [--strategy adp,vor,vor_survival] [--rounds N]
   lineup [--week N]
   playoff [--week N] [--opponent team_key_or_name]
+  season  [--n N] [--week N]
+          By default, fetches every team's live roster + real schedule and
+          simulates the season -- fails clearly if the league is predraft
+          (nothing to simulate yet). For a demonstration before the draft:
+            --mock-draft          simulate a draft, then simulate the season
+            --rosters=PATH        supply your own hypothetical rosters
+                                   (JSON: {"rosters": {team: [...]}, "schedule": [...]})
 
 Player filters:
   --position=QB  --status=A  --search=kelce  --count=25  --sort=OR
@@ -561,6 +569,16 @@ export function leagueConfig(league) {
     draftStatus: league.draft_status,
     rosterSlots: slots,
     scoring,
+    // Playoff structure -- read here, never hardcoded, so `tt season` can
+    // forward THIS league's real numbers to the analytics engine instead of
+    // assuming any particular week/field size (the league can grow from 4
+    // teams up to `maxTeams`). `end_week` lives on `league` itself;
+    // everything else is under `league.settings` -- see the live-verified
+    // shape in test/fixtures/league-settings.json.
+    playoffStartWeek: Number(s.playoff_start_week),
+    endWeek: Number(league.end_week),
+    numPlayoffTeams: Number(s.num_playoff_teams),
+    usesPlayoffReseeding: Number(s.uses_playoff_reseeding) === 1,
   };
 }
 
@@ -1056,6 +1074,183 @@ export async function runCommand(
         writeIdentityFooter(out, mine, flags);
         writeUnprojectedFooter(out, payload.unprojected_players, flags,
           'No projection available (e.g. K/DEF are not modelled)');
+        return 0;
+      }
+
+      case 'season': {
+        const mockDraft = flags['mock-draft'] === true;
+        const rostersFlag = flags.rosters;
+        if (mockDraft && rostersFlag !== undefined) {
+          throw new UsageError('--mock-draft and --rosters are mutually exclusive -- pass one or the other');
+        }
+
+        let stdinPayload = {};
+        let teamNames = {};
+        let sourceNote = null;
+        let extraFlags = {};
+        let identities = null;
+
+        if (mockDraft) {
+          sourceNote =
+            'SOURCE: a SIMULATED DRAFT (mock.simulate_draft against this league\'s own player ' +
+            'pool), not your live league -- run `tt season` again once your real draft is ' +
+            'complete for an answer that means something.';
+          extraFlags = { mockDraft: true, teams: intFlag(flags, 'teams') };
+        } else if (rostersFlag !== undefined) {
+          if (rostersFlag === true) {
+            throw new UsageError('--rosters needs a file path, e.g. --rosters=my-rosters.json');
+          }
+          let raw;
+          try {
+            raw = await readFile(rostersFlag, 'utf8');
+          } catch (e) {
+            throw new UsageError(`Could not read --rosters file "${rostersFlag}": ${e.message}`);
+          }
+          let parsed;
+          try {
+            parsed = JSON.parse(raw);
+          } catch (e) {
+            throw new UsageError(`--rosters file "${rostersFlag}" is not valid JSON: ${e.message}`);
+          }
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+              || !parsed.rosters || typeof parsed.rosters !== 'object') {
+            throw new UsageError(
+              `--rosters file "${rostersFlag}" must be a JSON object shaped ` +
+              '{"rosters": {"<team>": [{"player_id":...,"name":...,"position":...}, ...]}, ' +
+              '"schedule": [{"week":1,"home_team":...,"away_team":...}, ...] (optional)}',
+            );
+          }
+          stdinPayload = { rosters: parsed.rosters, schedule: parsed.schedule };
+          teamNames = Object.fromEntries(Object.keys(parsed.rosters).map((k) => [k, k]));
+          sourceNote =
+            `SOURCE: rosters supplied from ${rostersFlag} -- not your live league unless you ` +
+            'built this file from one.';
+        } else {
+          const leagueKey = await resolveLeagueKey(client, flags.league);
+          const { league: settingsLeague } = await client.get(`league/${leagueKey}/settings`);
+          const league = leagueConfig(settingsLeague);
+          if (league.draftStatus === 'predraft') {
+            throw new UsageError(
+              'This league is predraft -- every roster is empty, so there is nothing to ' +
+              'simulate.\nRun `tt season` again once your draft is complete, or exercise this ' +
+              'command right now with:\n' +
+              '  tt season --mock-draft          (a simulated draft against this league\'s own player pool)\n' +
+              '  tt season --rosters=PATH         (your own hand-built hypothetical rosters)',
+            );
+          }
+          extraFlags = {
+            playoffStartWeek: league.playoffStartWeek,
+            endWeek: league.endWeek,
+            playoffTeams: league.numPlayoffTeams,
+            reseed: league.usesPlayoffReseeding ? 1 : 0,
+          };
+
+          const { league: teamsLeague } = await client.get(`league/${leagueKey}/teams`);
+          const teams = teamsLeague.teams ?? [];
+          teamNames = Object.fromEntries(teams.map((t) => [t.team_key, t.name]));
+
+          // Yahoo rejects a combined `teams;out=roster` request for a league
+          // ("Invalid subresource roster requested") -- one call per team is
+          // the only way in. Considerately few for this league (4); noted
+          // here since it scales with num_teams up to max_teams (10).
+          if (!flags?.json) {
+            out.write(`Fetching ${teams.length} team rosters individually ` +
+              '(Yahoo has no combined roster resource for a league)...\n');
+          }
+          const rosters = {};
+          identities = {};
+          let anyPlayers = false;
+          for (const t of teams) {
+            const { team } = await client.get(buildRosterResource(t.team_key, {}));
+            const players = team.roster?.players ?? [];
+            if (players.length > 0) anyPlayers = true;
+            const identity = await resolveRosterIdentity(players, { cacheDir, err, nflverseRosterPath });
+            identities[t.team_key] = identity;
+            rosters[t.team_key] = identity.roster;
+          }
+          if (!anyPlayers) {
+            throw new UsageError(
+              'Every roster in this league is empty -- there is nothing to simulate.\n' +
+              'Try:\n  tt season --mock-draft\n  tt season --rosters=PATH',
+            );
+          }
+
+          if (!flags?.json) {
+            out.write(`Fetching ${league.playoffStartWeek - 1} weeks of regular-season schedule...\n`);
+          }
+          const schedule = [];
+          for (let week = 1; week < league.playoffStartWeek; week += 1) {
+            // eslint-disable-next-line no-await-in-loop -- Yahoo has no bulk
+            // scoreboard resource; each week is its own request.
+            const { league: sb } = await client.get(`league/${leagueKey}/scoreboard;week=${week}`);
+            for (const m of sb.scoreboard?.matchups ?? []) {
+              const [home, away] = m.teams ?? [];
+              if (home?.team_key && away?.team_key) {
+                schedule.push({ week, home_team: home.team_key, away_team: away.team_key });
+              }
+            }
+          }
+          stdinPayload = { rosters, schedule };
+        }
+
+        const payload = await analytics.run('season', {
+          flags: { n: intFlag(flags, 'n'), week: intFlag(flags, 'week'), ...extraFlags },
+          stdin: stdinPayload,
+        });
+
+        if (flags?.json) {
+          out.write(`${JSON.stringify(payload, null, 2)}\n`);
+          return 0;
+        }
+
+        const sePct = typeof payload.monte_carlo_se === 'number'
+          ? `±${(payload.monte_carlo_se * 100).toFixed(2)}%` : '±?';
+        out.write(
+          `Season ${payload.season} championship odds -- SIMULATION ` +
+          `(n=${payload.n}, worst-case standard error ${sePct})\n`,
+        );
+        out.write(
+          `Regular season weeks 1-${payload.playoff_start_week - 1}, playoffs weeks ` +
+          `${payload.playoff_start_week}-${payload.end_week} (top ${payload.playoff_teams}` +
+          `${payload.reseed ? ', reseeded each round' : ''})\n`,
+        );
+        if (sourceNote) out.write(`${sourceNote}\n`);
+
+        const rows = (payload.teams ?? []).map((t) => ({
+          team: teamNames[t.team] ?? t.team,
+          title: pct(t.championship_prob),
+          final: pct(t.p_final),
+          wins: round2(t.expected_wins),
+          seed: round2(t.mean_seed),
+          seed1: pct(t.p_seed_1),
+          ptswk: round2(t.exp_points_per_week),
+          sdwk: round2(t.sd_per_week),
+          empty: t.empty_slots,
+        }));
+        out.write(`${formatTable(rows, [
+          { key: 'team', label: 'TEAM' }, { key: 'title', label: 'TITLE%' },
+          { key: 'final', label: 'FINAL%' }, { key: 'wins', label: 'EXP W' },
+          { key: 'seed', label: 'MEAN SEED' }, { key: 'seed1', label: 'P(SEED1)' },
+          { key: 'ptswk', label: 'PTS/WK' }, { key: 'sdwk', label: 'SD/WK' },
+          { key: 'empty', label: 'EMPTY' },
+        ])}\n`);
+
+        if (identities) {
+          for (const [teamKey, identity] of Object.entries(identities)) {
+            const label = teamNames[teamKey] ?? teamKey;
+            out.write(`${label}: ${identity.matched} matched, ${identity.unresolved.length} ` +
+              `unresolved (of ${identity.total})\n`);
+            if (identity.unresolved.length > 0) {
+              out.write(`  Unresolved: ${identity.unresolved.join(', ')}\n`);
+            }
+          }
+        }
+        for (const [teamKey, names] of Object.entries(payload.unprojected_players ?? {})) {
+          if (!names || names.length === 0) continue;
+          const label = teamNames[teamKey] ?? teamKey;
+          out.write(`${label}: no projection available for ${names.join(', ')} ` +
+            '(e.g. K/DEF are not modelled)\n');
+        }
         return 0;
       }
 

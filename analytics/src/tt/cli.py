@@ -86,21 +86,38 @@ from .mock import (
     Strategy,
     _pick_number,  # noqa: F401 -- deliberately reused, not re-derived; see module docstring
     compare_strategies,
+    simulate_draft,
     strategy_adp,
     strategy_vor,
     strategy_vor_survival,
 )
 from .playoff import DEFAULT_N as PLAYOFF_DEFAULT_N, playoff_lineup
 from .projections import project_players
+from .season import DEFAULT_N as SEASON_DEFAULT_N, round_robin_schedule, simulate_season
 from .studies.draft_board import attach_adp
 from .survival import add_survival
 from .vor import add_vor
+from .weekly import project_week
 
 DEFAULT_MC_N = 5000
 DEFAULT_TRIALS = 50
 DEFAULT_BOARD_COUNT = 50
 DEFAULT_PICK_N = 5
 STRATEGY_NAMES = ("adp", "vor", "vor_survival")
+
+# `tt season`'s CLI-level fallback for --playoff-start-week/--end-week when
+# neither is given -- THIS PROJECT'S OWN live league settings (verified
+# 2026-09-01: playoff_start_week 16, end_week 17), used ONLY as a
+# convenience default for the --mock-draft / --rosters=PATH DEMONSTRATION
+# path (see cmd_season). This is CLI ergonomics, not analytics: the same
+# category as DEFAULT_PICK_N above or cmd_mock's `seed = ... else 2026`,
+# never read by season.py itself (which hardcodes nothing -- see that
+# module's own docstring). A LIVE run against real Yahoo rosters ALWAYS
+# gets these from src/cli.js's fresh settings fetch and passes them
+# explicitly, which overrides this default outright; this constant is only
+# ever reached when nobody supplied a real number to override it with.
+_DEMO_PLAYOFF_START_WEEK = 16
+_DEMO_END_WEEK = 17
 
 
 class CliError(Exception):
@@ -300,6 +317,29 @@ def _roster_df(roster: list[dict], proj_by_id: pd.DataFrame) -> tuple[pd.DataFra
     return pd.DataFrame(rows), unprojected
 
 
+def _season_roster_df(roster: list[dict], weekly_ids: set) -> tuple[pd.DataFrame, list[str]]:
+    """Build the bare `(player_id, name, position)` frame `season.
+    simulate_season` joins against a league-wide `weekly.project_week`
+    board -- unlike `_roster_df` above, this does NOT pre-compute
+    `proj_points`/`sd` itself (season.py's own `_joined_roster` does that
+    join, choosing the marginal/conditional view in exactly one place; see
+    that module's docstring). Same never-drop discipline as `_roster_df`:
+    a roster entry Node could not resolve (`player_id: None`) or one this
+    engine has no weekly projection for (not in `weekly_ids` -- a K/DEF, or
+    simply absent from history) still gets a row, and is named in the
+    returned `unprojected` list rather than silently vanishing from the
+    simulated roster.
+    """
+    rows: list[dict] = []
+    unprojected: list[str] = []
+    for p in roster:
+        pid = p.get("player_id")
+        rows.append({"player_id": pid, "name": p.get("name"), "position": p.get("position")})
+        if pid is None or pid not in weekly_ids:
+            unprojected.append(p.get("name") or pid or "(unknown player)")
+    return pd.DataFrame(rows, columns=["player_id", "name", "position"]), unprojected
+
+
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
@@ -493,12 +533,135 @@ def cmd_playoff(args: argparse.Namespace, stdin_payload: dict) -> dict:
     }
 
 
+def cmd_season(args: argparse.Namespace, stdin_payload: dict) -> dict:
+    """Championship odds for the whole league via `season.simulate_season`.
+
+    ROSTERS come from one of three mutually exclusive sources:
+      - stdin `{"rosters": {team_key: [roster entries...]}}` -- the live
+        path, one entry per Yahoo team, resolved to nflverse `player_id`
+        by src/cli.js exactly as `lineup`/`playoff` already do.
+      - `--mock-draft` -- a DEMONSTRATION: `mock.simulate_draft` runs one
+        simulated snake draft against this league's own projected player
+        pool (`_build_board`, reused from `cmd_board`) and its `--teams`
+        (or the league's own `num_teams`) resulting rosters, labelled
+        "Mock Team N", are simulated instead. Never confusable with a real
+        answer -- the response's `"source"` is `"mock_draft"`, and
+        src/cli.js prints an explicit banner.
+      - stdin rosters supplied from a `--rosters=PATH` file (src/cli.js's
+        job to read and forward as the same `{"rosters": ...}` shape) --
+        this function does not know the difference between that and a
+        live Node fetch; both arrive the same way on stdin.
+
+    EVERY ROSTER EMPTY (the predraft case this league is actually in right
+    now) is a `CliError`, never a table of zeros that could be mistaken for
+    a real answer -- see the module docstring's general "never invent a
+    default" discipline and the task brief's explicit predraft requirement.
+
+    SCHEDULE: stdin `"schedule"` (Node's real `league/{key}/scoreboard`
+    fetch, one entry per matchup) when given; `season.round_robin_schedule`
+    over `playoff_start_week - 1` weeks otherwise -- the exact fallback
+    `season.py`'s own module docstring names for when Yahoo has none.
+
+    PLAYOFF SETTINGS (`--playoff-start-week`/`--end-week`/`--playoff-teams`/
+    `--reseed`) are never assumed by `season.py` itself (see that module's
+    docstring) and are forwarded here from whatever the caller passed --
+    live Yahoo settings on a real run, or the `_DEMO_*` fallback documented
+    above when nobody supplied real ones (only reachable via `--mock-draft`
+    /`--rosters` in practice, since src/cli.js's live path always passes
+    the real numbers explicitly).
+    """
+    if args.mock_draft and stdin_payload.get("rosters"):
+        raise CliError(
+            "--mock-draft and stdin rosters are mutually exclusive -- pass one or the other "
+            "(a live/--rosters roster payload, or --mock-draft to simulate one)."
+        )
+
+    config = _load_league(Path(args.config))
+    data_dir = Path(args.data_dir)
+    history = _load_history(data_dir)
+    season = args.season or _default_season(history)
+    reseed = True if args.reseed is None else bool(args.reseed)
+
+    adp_source = None
+    if args.mock_draft:
+        ffc, adp_source = _load_adp(data_dir, args.adp)
+        teams = args.teams or config.num_teams
+        board = _build_board(history, config, teams, season, ffc, n=args.mc_n, seed=args.seed)
+        rounds = args.rounds or DEFAULT_ROUNDS
+        draft_seed = args.seed if args.seed is not None else 2026
+        picks = simulate_draft(
+            board, teams=teams, rounds=rounds, my_slot=0,
+            strategy=strategy_vor_survival(config, rounds=rounds),
+            seed=draft_seed, return_all=True,
+        )
+        rosters_payload = {
+            f"Mock Team {int(slot) + 1}": group.to_dict("records")
+            for slot, group in picks.groupby("slot")
+        }
+        source = "mock_draft"
+    else:
+        rosters_payload = stdin_payload.get("rosters") or {}
+        source = "live"
+
+    if not rosters_payload or all(not roster for roster in rosters_payload.values()):
+        raise CliError(
+            "No rosters to simulate -- every roster is empty. This is expected before a draft "
+            "has happened (a predraft league): there is nothing to simulate yet. Run `tt season` "
+            "again once your real draft is complete, or exercise this command right now with "
+            "--mock-draft (a simulated draft against this league's own player pool) or "
+            "--rosters=PATH (your own hand-built hypothetical rosters)."
+        )
+
+    weekly_board = project_week(
+        history, config, seasons=_train_seasons(history, season),
+        n=args.mc_n, seed=args.seed,
+        as_of_season=season if args.week is not None else None,
+        as_of_week=args.week,
+    )
+    weekly_ids = set(weekly_board["player_id"])
+
+    rosters: dict[str, pd.DataFrame] = {}
+    unprojected_by_team: dict[str, list[str]] = {}
+    for team, roster in rosters_payload.items():
+        df, unprojected = _season_roster_df(roster, weekly_ids)
+        rosters[team] = df
+        unprojected_by_team[team] = unprojected
+
+    schedule_payload = stdin_payload.get("schedule")
+    if schedule_payload:
+        schedule = pd.DataFrame(schedule_payload)
+    else:
+        schedule = round_robin_schedule(list(rosters), weeks=args.playoff_start_week - 1)
+
+    result = simulate_season(
+        rosters, schedule, config, weekly=weekly_board,
+        playoff_start_week=args.playoff_start_week, end_week=args.end_week,
+        playoff_teams=args.playoff_teams, reseed=reseed, n=args.n, seed=args.seed,
+    )
+    return {
+        "season": season,
+        "week": args.week,
+        "source": source,
+        "adp_source": adp_source,
+        "n": result.attrs["n"],
+        "monte_carlo_se": result.attrs["monte_carlo_se"],
+        "playoff_start_week": result.attrs["playoff_start_week"],
+        "end_week": result.attrs["end_week"],
+        "playoff_teams": result.attrs["playoff_teams"],
+        "reseed": result.attrs["reseed"],
+        "regular_season_weeks": result.attrs["regular_season_weeks"],
+        "teams": _records(result),
+        "unprojected_players": unprojected_by_team,
+    }
+
+
 COMMANDS = {
     "board": cmd_board,
     "pick": cmd_pick,
     "mock": cmd_mock,
     "lineup": cmd_lineup,
     "playoff": cmd_playoff,
+    "season": cmd_season,
 }
 
 
@@ -554,6 +717,22 @@ def build_parser() -> argparse.ArgumentParser:
     _add_data_flags(playoff)
     playoff.add_argument("--week", type=int, default=None)
     playoff.add_argument("--sim-n", type=int, default=PLAYOFF_DEFAULT_N, dest="sim_n")
+
+    season = sub.add_parser("season", help="Championship odds via season simulation")
+    _add_data_flags(season)
+    season.add_argument("--n", type=int, default=SEASON_DEFAULT_N,
+                         help="Season simulation count (season.simulate_season's own n)")
+    season.add_argument("--week", type=int, default=None,
+                         help="As-of week for a leakage-safe in-season projection")
+    season.add_argument("--playoff-start-week", type=int, default=_DEMO_PLAYOFF_START_WEEK,
+                         dest="playoff_start_week")
+    season.add_argument("--end-week", type=int, default=_DEMO_END_WEEK, dest="end_week")
+    season.add_argument("--playoff-teams", type=int, default=None, dest="playoff_teams")
+    season.add_argument("--reseed", type=int, choices=[0, 1], default=None)
+    season.add_argument("--teams", type=int, default=None, help="team count for --mock-draft")
+    season.add_argument("--rounds", type=int, default=None, help="draft rounds for --mock-draft")
+    season.add_argument("--mock-draft", action="store_true", dest="mock_draft",
+                         help="DEMONSTRATION ONLY: simulate a draft instead of using live rosters")
 
     return parser
 

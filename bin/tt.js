@@ -17,6 +17,13 @@ if (parsed.command === 'sources') process.exit(await runCommand(parsed, {}));
 if (parsed.command === 'sync') process.exit(await runCommand(parsed, {}));
 if (parsed.command === 'mock') process.exit(await runCommand(parsed, {}));
 if (parsed.command === 'draft') process.exit(await runCommand(parsed, {}));
+// `season --mock-draft`/`--rosters=PATH` are the same offline-analytics case
+// as `mock`/`draft` above -- src/cli.js's `season` case never touches
+// `client` on either path, so no Yahoo session is needed for a demo run.
+if (parsed.command === 'season'
+    && (parsed.flags['mock-draft'] === true || parsed.flags.rosters !== undefined)) {
+  process.exit(await runCommand(parsed, {}));
+}
 
 const makeClient = async () => createClient({ cookieHeader: await loadCookieHeader() });
 

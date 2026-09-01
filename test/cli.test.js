@@ -943,6 +943,18 @@ test('leagueConfig scoring entries never share a statId', () => {
   assert.equal(ids.length, new Set(ids).size);
 });
 
+test('leagueConfig derives playoff settings from the live league settings', () => {
+  // `tt season` needs these read from Yahoo, never hardcoded (see
+  // analytics/src/tt/season.py's own docstring) -- this is where that
+  // reading happens, reusing the exact same tested settings fetch
+  // `league export` already relies on.
+  const cfg = leagueConfig(leagueFixture());
+  assert.equal(cfg.playoffStartWeek, 16);
+  assert.equal(cfg.endWeek, 17);
+  assert.equal(cfg.numPlayoffTeams, 4);
+  assert.equal(cfg.usesPlayoffReseeding, true);
+});
+
 test('league export writes JSON a downstream tool can read', async () => {
   const out = capture();
   const client = { async get() {
@@ -1469,4 +1481,229 @@ test('playoff reports clearly when --opponent matches no one in the matchup', as
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- season: championship odds ---------------------------------------------
+
+/** `league/{key}/settings`, `/teams`, per-team `/roster`, and per-week
+ * `/scoreboard;week=N` -- everything `tt season`'s live path fetches.
+ * `draftStatus` overrides the fixture's own `predraft` so tests can exercise
+ * both the real (predraft) short-circuit and the full live flow. */
+function seasonClient({ draftStatus, rostersByTeam = {} } = {}) {
+  return {
+    async get(resource) {
+      if (resource.includes('users;use_login=1')) return fx('user-leagues');
+      if (resource.endsWith('/settings')) {
+        const base = fx('league-settings');
+        return draftStatus === undefined
+          ? base
+          : { league: { ...base.league, draft_status: draftStatus } };
+      }
+      if (resource.endsWith('/teams')) return fx('league-teams');
+      if (resource.includes('/roster')) {
+        const teamKey = resource.split('/')[1];
+        return { team: { roster: { week: 1, players: rostersByTeam[teamKey] ?? [] } } };
+      }
+      if (resource.includes('/scoreboard;week=')) {
+        // The same two matchups every week -- enough to prove the schedule
+        // is fetched and forwarded; the real per-week pairing is Yahoo's
+        // concern, not this CLI layer's.
+        return { league: { scoreboard: { matchups: [
+          { teams: [{ team_key: '470.l.1433971.t.1' }, { team_key: '470.l.1433971.t.3' }] },
+          { teams: [{ team_key: '470.l.1433971.t.2' }, { team_key: '470.l.1433971.t.4' }] },
+        ] } } };
+      }
+      throw new Error(`unexpected resource: ${resource}`);
+    },
+  };
+}
+
+const SEASON_SLEEPER = [
+  { sleeperId: '1', yahooId: '30977', gsisId: '00-0034857', name: 'Josh Allen', position: 'QB', team: 'BUF' },
+  { sleeperId: '2', yahooId: '30123', gsisId: '00-0036000', name: 'Rookie Guy', position: 'RB', team: 'SF' },
+  { sleeperId: '3', yahooId: '30200', gsisId: '00-0040000', name: 'Third Player', position: 'WR', team: 'KC' },
+  { sleeperId: '4', yahooId: '30300', gsisId: '00-0050000', name: 'Fourth Player', position: 'TE', team: 'DAL' },
+];
+
+const SEASON_ROSTERS_BY_TEAM = {
+  '470.l.1433971.t.1': [{ player_key: '470.p.30977', name: { full: 'Josh Allen' }, display_position: 'QB' }],
+  '470.l.1433971.t.2': [{ player_key: '470.p.30123', name: { full: 'Rookie Guy' }, display_position: 'RB' }],
+  '470.l.1433971.t.3': [{ player_key: '470.p.30200', name: { full: 'Third Player' }, display_position: 'WR' }],
+  '470.l.1433971.t.4': [{ player_key: '470.p.30300', name: { full: 'Fourth Player' }, display_position: 'TE' }],
+};
+
+const SEASON_RESPONSE = {
+  season: 2026, week: null, source: 'live', adp_source: null,
+  n: 10000, monte_carlo_se: 0.005,
+  playoff_start_week: 16, end_week: 17, playoff_teams: 4, reseed: true,
+  regular_season_weeks: 15,
+  teams: [
+    { team: '470.l.1433971.t.1', championship_prob: 0.4, p_final: 0.6, expected_wins: 9.2, mean_points_for: 1500.0, mean_seed: 1.5, p_seed_1: 0.5, p_playoffs: 1.0, exp_points_per_week: 100.0, sd_per_week: 20.0, empty_slots: 2 },
+    { team: '470.l.1433971.t.3', championship_prob: 0.3, p_final: 0.5, expected_wins: 8.0, mean_points_for: 1400.0, mean_seed: 2.0, p_seed_1: 0.3, p_playoffs: 1.0, exp_points_per_week: 90.0, sd_per_week: 18.0, empty_slots: 2 },
+    { team: '470.l.1433971.t.2', championship_prob: 0.2, p_final: 0.4, expected_wins: 7.0, mean_points_for: 1300.0, mean_seed: 2.5, p_seed_1: 0.15, p_playoffs: 1.0, exp_points_per_week: 85.0, sd_per_week: 17.0, empty_slots: 2 },
+    { team: '470.l.1433971.t.4', championship_prob: 0.1, p_final: 0.3, expected_wins: 6.0, mean_points_for: 1200.0, mean_seed: 3.0, p_seed_1: 0.05, p_playoffs: 1.0, exp_points_per_week: 80.0, sd_per_week: 16.0, empty_slots: 2 },
+  ],
+  unprojected_players: {
+    '470.l.1433971.t.1': [], '470.l.1433971.t.2': [], '470.l.1433971.t.3': [], '470.l.1433971.t.4': [],
+  },
+};
+
+test('season reports a clear error for a predraft league and never calls the analytics engine', async () => {
+  const out = capture(); const err = capture();
+  const analytics = fakeAnalytics({ season: SEASON_RESPONSE });
+  const code = await runCommand(
+    { command: 'season', args: [], flags: {} },
+    { client: seasonClient({ draftStatus: 'predraft' }), out, err, analytics },
+  );
+  assert.notEqual(code, 0);
+  assert.equal(out.text(), '');
+  assert.match(err.text(), /predraft/i);
+  assert.match(err.text(), /--mock-draft/);
+  assert.match(err.text(), /--rosters/);
+  assert.equal(analytics.calls.length, 0);
+});
+
+test('season fetches every roster and the real schedule for a live league, then ranks by title odds', async () => {
+  const dir = tmpCacheDir();
+  try {
+    await writeCache('sleeper', SEASON_SLEEPER, { dir });
+    const out = capture();
+    const analytics = fakeAnalytics({ season: SEASON_RESPONSE });
+    const code = await runCommand(
+      { command: 'season', args: [], flags: {} },
+      {
+        client: seasonClient({ draftStatus: 'active', rostersByTeam: SEASON_ROSTERS_BY_TEAM }),
+        out, cacheDir: dir, analytics,
+      },
+    );
+    assert.equal(code, 0, out.text());
+    const text = out.text();
+    assert.match(text, /SIMULATION/i);
+    assert.match(text, /10000|10,000/);
+    assert.match(text, /Any Given Model/); // t.1, highest title odds
+    assert.match(text, /40%/);
+    assert.match(text, /Token Maxxing Touchdowns/); // t.4
+
+    assert.equal(analytics.calls.length, 1);
+    const call = analytics.calls[0];
+    assert.equal(call.subcommand, 'season');
+    assert.equal(call.flags.playoffStartWeek, 16);
+    assert.equal(call.flags.endWeek, 17);
+    assert.equal(call.flags.playoffTeams, 4);
+    assert.equal(call.flags.reseed, 1);
+
+    const rosterKeys = Object.keys(call.stdin.rosters).sort();
+    assert.deepEqual(rosterKeys, [
+      '470.l.1433971.t.1', '470.l.1433971.t.2', '470.l.1433971.t.3', '470.l.1433971.t.4',
+    ]);
+    assert.deepEqual(call.stdin.rosters['470.l.1433971.t.1'],
+      [{ player_id: '00-0034857', name: 'Josh Allen', position: 'QB' }]);
+    // 15 weeks (1..playoff_start_week-1) x 2 matchups/week from the fake schedule.
+    assert.equal(call.stdin.schedule.length, 30);
+    assert.deepEqual(call.stdin.schedule[0],
+      { week: 1, home_team: '470.l.1433971.t.1', away_team: '470.l.1433971.t.3' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('season --mock-draft never calls Yahoo and clearly labels the result as simulated', async () => {
+  const angryClient = { async get() { throw new Error('season --mock-draft must not call Yahoo'); } };
+  const out = capture();
+  const mockResponse = {
+    ...SEASON_RESPONSE,
+    source: 'mock_draft',
+    teams: [
+      { ...SEASON_RESPONSE.teams[0], team: 'Mock Team 1' },
+      { ...SEASON_RESPONSE.teams[1], team: 'Mock Team 2' },
+      { ...SEASON_RESPONSE.teams[2], team: 'Mock Team 3' },
+      { ...SEASON_RESPONSE.teams[3], team: 'Mock Team 4' },
+    ],
+    unprojected_players: { 'Mock Team 1': [], 'Mock Team 2': [], 'Mock Team 3': [], 'Mock Team 4': [] },
+  };
+  const analytics = fakeAnalytics({ season: mockResponse });
+  const code = await runCommand(
+    { command: 'season', args: [], flags: { 'mock-draft': true, teams: '4' } },
+    { client: angryClient, out, analytics },
+  );
+  assert.equal(code, 0, out.text());
+  const text = out.text();
+  assert.match(text, /SIMULATED DRAFT/i);
+  assert.match(text, /not your live league/i);
+  assert.match(text, /Mock Team 1/);
+  assert.equal(analytics.calls[0].flags.mockDraft, true);
+  assert.equal(analytics.calls[0].flags.teams, 4);
+  assert.deepEqual(analytics.calls[0].stdin, {});
+});
+
+test('season --rosters=PATH reads local rosters and skips Yahoo entirely', async () => {
+  const dir = tmpCacheDir();
+  const angryClient = { async get() { throw new Error('season --rosters must not call Yahoo'); } };
+  try {
+    const rostersPath = path.join(dir, 'my-rosters.json');
+    const fileContents = {
+      rosters: {
+        'team-a': [{ player_id: 'rb1', name: 'RB One', position: 'RB' }],
+        'team-b': [{ player_id: 'rb2', name: 'RB Two', position: 'RB' }],
+      },
+      schedule: [{ week: 1, home_team: 'team-a', away_team: 'team-b' }],
+    };
+    await fsWriteFile(rostersPath, JSON.stringify(fileContents));
+    const out = capture();
+    const fileResponse = {
+      ...SEASON_RESPONSE,
+      teams: [
+        { ...SEASON_RESPONSE.teams[0], team: 'team-a' },
+        { ...SEASON_RESPONSE.teams[1], team: 'team-b' },
+      ].slice(0, 2),
+      unprojected_players: { 'team-a': [], 'team-b': [] },
+    };
+    const analytics = fakeAnalytics({ season: fileResponse });
+    const code = await runCommand(
+      { command: 'season', args: [], flags: { rosters: rostersPath } },
+      { client: angryClient, out, analytics },
+    );
+    assert.equal(code, 0, out.text());
+    assert.match(out.text(), new RegExp(rostersPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(out.text(), /not your live league/i);
+    assert.deepEqual(analytics.calls[0].stdin, fileContents);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('season --mock-draft and --rosters are mutually exclusive', async () => {
+  const out = capture(); const err = capture();
+  const code = await runCommand(
+    { command: 'season', args: [], flags: { 'mock-draft': true, rosters: 'x.json' } },
+    { client: fakeClient, out, err, analytics: fakeAnalytics({ season: SEASON_RESPONSE }) },
+  );
+  assert.notEqual(code, 0);
+  assert.match(err.text(), /mutually exclusive/i);
+});
+
+test('season surfaces a clean AnalyticsError rather than a stack trace', async () => {
+  const out = capture(); const err = capture();
+  const analytics = fakeAnalytics({
+    season: new AnalyticsError('No nflverse parquet files found in data (expected stats_player_week_<season>.parquet).'),
+  });
+  const code = await runCommand(
+    { command: 'season', args: [], flags: { 'mock-draft': true } },
+    { client: fakeClient, out, err, analytics },
+  );
+  assert.notEqual(code, 0);
+  assert.match(err.text(), /nflverse parquet/);
+});
+
+test('season --json dumps the raw analytics payload', async () => {
+  const out = capture();
+  const analytics = fakeAnalytics({ season: SEASON_RESPONSE });
+  const code = await runCommand(
+    { command: 'season', args: [], flags: { 'mock-draft': true, json: true } },
+    { client: fakeClient, out, analytics },
+  );
+  assert.equal(code, 0);
+  const parsed = JSON.parse(out.text());
+  assert.equal(parsed.teams.length, 4);
+  assert.equal(parsed.n, 10000);
 });

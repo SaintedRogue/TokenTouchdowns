@@ -413,6 +413,133 @@ def test_playoff_requires_an_opponent_roster(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# season
+# ---------------------------------------------------------------------------
+
+_SEASON_ROSTER = [
+    {"player_id": "rb1", "name": "RB One", "position": "RB"},
+    {"player_id": "rb2", "name": "RB Two", "position": "RB"},
+    {"player_id": "wr1", "name": "WR One", "position": "WR"},
+    {"player_id": "wr2", "name": "WR Two", "position": "WR"},
+    {"player_id": "qb1", "name": "QB One", "position": "QB"},
+    {"player_id": "te1", "name": "TE One", "position": "TE"},
+]
+
+
+def _four_identical_rosters() -> dict:
+    # Deliberately identical across all four teams: this section pins WIRING
+    # (right inputs in, championship_prob shaped output out), not the
+    # underlying math -- that is test_season.py's job. Identical rosters
+    # only need be *plausible*, not distinct.
+    return {team: [dict(p) for p in _SEASON_ROSTER] for team in ("A", "B", "C", "D")}
+
+
+def test_season_fails_clearly_when_every_roster_is_empty(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run(
+        ["season", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=50", "--seed=1"],
+        stdin_obj={"rosters": {"A": [], "B": [], "C": [], "D": []}},
+    )
+    assert code != 0
+    assert out == ""
+    assert "predraft" in err.lower() or "empty" in err.lower()
+    assert "mock-draft" in err
+    assert "rosters" in err
+
+
+def test_season_simulates_and_ranks_teams_by_championship_probability(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run(
+        ["season", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=200", "--seed=1"],
+        stdin_obj={"rosters": _four_identical_rosters()},
+    )
+    assert code == 0, err
+    assert out.count("\n") == 1  # exactly one JSON document, nothing stray
+    payload = json.loads(out)
+    assert payload["n"] == 200
+    assert "monte_carlo_se" in payload
+    # Demo defaults apply since --playoff-start-week/--end-week were not given.
+    assert payload["playoff_start_week"] == 16
+    assert payload["end_week"] == 17
+    assert payload["reseed"] is True
+    teams = payload["teams"]
+    assert len(teams) == 4
+    probs = [t["championship_prob"] for t in teams]
+    assert probs == sorted(probs, reverse=True)
+    assert sum(probs) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_season_falls_back_to_round_robin_schedule_when_none_supplied(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run(
+        ["season", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=50", "--seed=1"],
+        stdin_obj={"rosters": _four_identical_rosters()},
+    )
+    assert code == 0, err
+    payload = json.loads(out)
+    # Demo default playoff_start_week is 16 -> 15 regular-season weeks.
+    assert payload["regular_season_weeks"] == 15
+
+
+def test_season_reports_unprojected_players_instead_of_dropping_them(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    rosters = _four_identical_rosters()
+    rosters["A"].append({"player_id": None, "name": "Mystery Player", "position": "WR"})
+    code, out, err = _run(
+        ["season", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=50", "--seed=1"],
+        stdin_obj={"rosters": rosters},
+    )
+    assert code == 0, err
+    payload = json.loads(out)
+    assert "Mystery Player" in payload["unprojected_players"]["A"]
+
+
+def test_season_mock_draft_runs_without_any_stdin_rosters(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    _write_adp(data_dir)
+    code, out, err = _run([
+        "season", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=50", "--seed=1", "--teams=4", "--rounds=1", "--mock-draft",
+    ], stdin_obj={})
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["source"] == "mock_draft"
+    assert len(payload["teams"]) == 4
+
+
+def test_season_mock_draft_and_stdin_rosters_are_mutually_exclusive(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "season", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=50", "--seed=1", "--mock-draft",
+    ], stdin_obj={"rosters": _four_identical_rosters()})
+    assert code != 0
+    assert "mock-draft" in err.lower() and "mutually exclusive" in err.lower()
+
+
+def test_season_honors_playoff_teams_and_reseed_flags_from_the_cli(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "season", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=200", "--seed=1",
+        "--playoff-start-week=3", "--end-week=4", "--playoff-teams=2", "--reseed=0",
+    ], stdin_obj={"rosters": _four_identical_rosters()})
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["playoff_start_week"] == 3
+    assert payload["end_week"] == 4
+    assert payload["playoff_teams"] == 2
+    assert payload["reseed"] is False
+
+
+# ---------------------------------------------------------------------------
 # stdin / general robustness
 # ---------------------------------------------------------------------------
 
