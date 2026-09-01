@@ -391,6 +391,29 @@ def _positional_priors(subset: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).set_index("position")
 
 
+def _resolve_names(history: pd.DataFrame) -> pd.Series:
+    """Per-player display name for the board, indexed by player_id.
+
+    A draft board keyed on nflverse ids like `00-0030506` is unreadable at a
+    live draft with 60 seconds per pick -- this is the whole reason this
+    function exists. Prefers `player_display_name`; falls back, per row, to
+    `player_name` where the display name is missing; and falls back further
+    to the player_id itself when `history` carries NEITHER column at all
+    (true of every fixture in this module's own test suite, and possibly of
+    a caller with a slimmer history frame) -- the least-wrong default (same
+    principle as `season_volume`'s own `_combine` fallback), not a missing
+    column or a NaN that would break a board's display.
+    """
+    name = history.get("player_display_name")
+    if name is None:
+        name = pd.Series(pd.NA, index=history.index, dtype="object")
+    player_name = history.get("player_name")
+    if player_name is not None:
+        name = name.fillna(player_name)
+    name = name.fillna(history["player_id"])
+    return history.assign(_name=name).groupby("player_id")["_name"].first()
+
+
 def _stable_seed(player_id: str, offset: int) -> int:
     """Deterministic per-player-per-stream seed component.
 
@@ -427,10 +450,14 @@ def project_players(
 ) -> pd.DataFrame:
     """Full season projection per player: volume x shrunk rate, composed.
 
-    Columns: player_id, position, proj_points, p10, p50, p90, sd, proj_games.
-    Only `PROJECTABLE_POSITIONS` (QB/RB/WR/TE) appear in the output -- see
-    that constant's comment for why kickers and team defenses are
-    deliberately excluded rather than mismodelled.
+    Columns: player_id, name, position, proj_points, p10, p50, p90, sd,
+    proj_games. `name` is carried through from `history`'s
+    `player_display_name` (falling back to `player_name`, then to the
+    player_id itself -- see `_resolve_names`) purely for board readability;
+    it plays no role in any projection. Only `PROJECTABLE_POSITIONS`
+    (QB/RB/WR/TE) appear in the output -- see that constant's comment for
+    why kickers and team defenses are deliberately excluded rather than
+    mismodelled.
 
     `games` defaults to None, meaning: use each player's own projected games
     (`season_volume`'s `proj_games` -- see its docstring for why this exists
@@ -447,6 +474,7 @@ def project_players(
 
     history = _with_required_columns(history)
     history = history[history["position"].isin(PROJECTABLE_POSITIONS)]
+    names = _resolve_names(history)
     volume = season_volume(history, seasons)
 
     subset = history[history["season"].isin(seasons)]
@@ -454,6 +482,11 @@ def project_players(
     totals = subset.groupby("player_id")[list(_TOTAL_COLUMNS)].sum().reset_index()
 
     merged = volume.merge(totals, on="player_id", how="left").fillna(0.0)
+    # Attached after fillna(0.0) above -- `names` is indexed by exactly the
+    # player_ids `volume` (and therefore `merged`) already contains, since
+    # both are derived from this same position-filtered `history`, so there
+    # is nothing here for that fillna to coerce to 0.0 in the first place.
+    merged["name"] = merged["player_id"].map(names)
     base_seed = _resolve_seed(seed)
 
     rows = []
@@ -558,6 +591,7 @@ def project_players(
         summary = summarise(points)
         rows.append({
             "player_id": player_id,
+            "name": row["name"],
             "position": position,
             "proj_points": summary["mean"],
             "p10": summary["p10"],
@@ -569,5 +603,5 @@ def project_players(
 
     return pd.DataFrame(
         rows,
-        columns=["player_id", "position", "proj_points", "p10", "p50", "p90", "sd", "proj_games"],
+        columns=["player_id", "name", "position", "proj_points", "p10", "p50", "p90", "sd", "proj_games"],
     )

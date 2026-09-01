@@ -317,3 +317,54 @@ def test_projectable_positions_names_the_excluded_positions_deliberately():
     assert PROJECTABLE_POSITIONS == {"QB", "RB", "WR", "TE"}
     assert "K" not in PROJECTABLE_POSITIONS
     assert "DEF" not in PROJECTABLE_POSITIONS
+
+
+def history_with_display_name():
+    """The real nflverse history carries player_display_name -- a board keyed
+    on nflverse ids like 00-0030506 is unreadable at a live draft with 60
+    seconds per pick (see module docstring)."""
+    h = history()
+    h["player_display_name"] = h["player_id"].map({"A": "Aaron Aback", "B": "Bobby Byrne"})
+    return h
+
+
+def test_project_players_carries_player_display_name_through_as_name():
+    out = project_players(history_with_display_name(), CONFIG_OBJ, seasons=(2024, 2025))
+    names = out.set_index("player_id")["name"]
+    assert names["A"] == "Aaron Aback"
+    assert names["B"] == "Bobby Byrne"
+
+
+def history_with_player_name_only():
+    """Some nflverse sources carry only the shorter player_name, not
+    player_display_name -- the fallback this history fixture exercises."""
+    h = history()
+    h["player_name"] = h["player_id"].map({"A": "A.Aback", "B": "B.Byrne"})
+    return h
+
+
+def test_project_players_falls_back_to_player_name_when_display_name_is_absent():
+    out = project_players(history_with_player_name_only(), CONFIG_OBJ, seasons=(2024, 2025))
+    names = out.set_index("player_id")["name"]
+    assert names["A"] == "A.Aback"
+    assert names["B"] == "B.Byrne"
+
+
+def test_project_players_prefers_display_name_over_player_name_when_both_present():
+    h = history()
+    h["player_display_name"] = h["player_id"].map({"A": "Aaron Aback", "B": "Bobby Byrne"})
+    h["player_name"] = h["player_id"].map({"A": "A.Aback", "B": "B.Byrne"})
+    out = project_players(h, CONFIG_OBJ, seasons=(2024, 2025))
+    names = out.set_index("player_id")["name"]
+    assert names["A"] == "Aaron Aback"
+    assert names["B"] == "Bobby Byrne"
+
+
+def test_project_players_falls_back_to_player_id_when_no_name_column_exists():
+    # Every other fixture in this file carries no name column at all -- the
+    # least-wrong fallback is the player_id itself, not a missing column or
+    # a NaN that would break a board's display.
+    out = project_players(history(), CONFIG_OBJ, seasons=(2024, 2025))
+    names = out.set_index("player_id")["name"]
+    assert names["A"] == "A"
+    assert names["B"] == "B"
