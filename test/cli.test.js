@@ -1001,7 +1001,7 @@ test('pct renders a probability as a whole-number percentage', () => {
 });
 
 import { writeFile as fsWriteFile } from 'node:fs/promises';
-import { AnalyticsError } from '../src/analytics.js';
+import { AnalyticsError, DEFAULT_ANALYTICS_DIR } from '../src/analytics.js';
 
 /** A fake analytics client: `.run` returns a scripted response per
  * subcommand and records every call so tests can assert on the flags/stdin
@@ -2223,4 +2223,86 @@ test('trade --find --json dumps the raw analytics payload', async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- draft-room --------------------------------------------------------------
+//
+// The heavy lifting (state contract, manual override, malformed/failing
+// polls, HTTP routing, 127.0.0.1 binding) is all covered directly against
+// src/draft-room.js in test/draft-room.test.js, with no real socket needed
+// for most of it. These tests cover cli.js's OWN glue instead: flag
+// validation, and that `runCommand` actually wires client/analytics/flags
+// through to a real (ephemeral-port) server and shuts it down cleanly.
+
+test('draft-room requires --teams', async () => {
+  const out = capture();
+  const err = capture();
+  const code = await runCommand(
+    { command: 'draft-room', args: [], flags: { slot: '2' } },
+    { client: fakeClient, out, err },
+  );
+  assert.equal(code, 1);
+  assert.match(err.text(), /--teams is required/);
+});
+
+test('draft-room requires --slot', async () => {
+  const out = capture();
+  const err = capture();
+  const code = await runCommand(
+    { command: 'draft-room', args: [], flags: { teams: '4' } },
+    { client: fakeClient, out, err },
+  );
+  assert.equal(code, 1);
+  assert.match(err.text(), /--slot is required/);
+});
+
+test('draft-room starts a real server on an ephemeral port, prints its URL, and shuts down cleanly', async () => {
+  const out = capture();
+  const roomClient = {
+    async get(resource) {
+      if (resource === 'league/470.l.1/teams') {
+        return {
+          league: {
+            teams: [
+              { team_key: '470.l.1.t.1', is_owned_by_current_login: 0 },
+              { team_key: '470.l.1.t.2', is_owned_by_current_login: 1 },
+            ],
+          },
+        };
+      }
+      if (resource === 'league/470.l.1/draftresults') {
+        return { league: { draft_results: [] } };
+      }
+      throw new Error(`unscripted resource: ${resource}`);
+    },
+  };
+  const roomAnalytics = {
+    cwd: DEFAULT_ANALYTICS_DIR, // so it reads this repo's real analytics/data/league.json
+    async run(subcommand) {
+      assert.equal(subcommand, 'board');
+      return {
+        season: 2026, teams: 4, slot: 2, players: [
+          { player_id: 'p1', name: 'Player One', position: 'RB', proj_points: 100, adp: 1, stdev: 1, vor: 10, tier: 1 },
+        ],
+      };
+    },
+    async runScript() {
+      return { board: [], recommendations: [] };
+    },
+  };
+
+  let resolveShutdown;
+  const shutdownSignal = new Promise((resolve) => { resolveShutdown = resolve; });
+  resolveShutdown(); // resolved immediately -- the command should return right away
+
+  const code = await runCommand(
+    { command: 'draft-room', args: [], flags: { teams: '4', slot: '2', port: '0', league: '470.l.1' } },
+    // cacheDir points somewhere with no sleeper.json -- the crosswalk
+    // degrades to empty (see draft-room.test.js), keeping this test
+    // hermetic instead of depending on this machine's real cache state.
+    { client: roomClient, analytics: roomAnalytics, out, shutdownSignal, cacheDir: '/nonexistent-for-test' },
+  );
+  assert.equal(code, 0, out.text());
+  assert.match(out.text(), /Draft room ready: http:\/\/127\.0\.0\.1:\d+\//);
+  assert.match(out.text(), /teams=4 slot=2/);
 });

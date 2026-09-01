@@ -51,15 +51,22 @@ function toKebab(key) {
 /** Flags object -> argv tail. `true` renders as a bare flag (argparse
  * `store_true`); `false`/`undefined`/`null` are omitted entirely rather
  * than rendered as the string "false" (which argparse would just treat as
- * a truthy string value for a non-boolean flag). */
-export function buildArgs(subcommand, flags = {}) {
-  const args = ['-m', 'tt.cli', subcommand];
+ * a truthy string value for a non-boolean flag). Shared by `buildArgs`
+ * (a `tt.cli` subcommand) and `runScript` (a standalone script path) --
+ * both need the identical camelCase -> `--kebab-case` conversion, just
+ * with a different fixed prefix in front of it. */
+function flagArgs(flags = {}) {
+  const args = [];
   for (const [key, value] of Object.entries(flags)) {
     if (value === undefined || value === null || value === false) continue;
     const flagName = toKebab(key);
     args.push(value === true ? `--${flagName}` : `--${flagName}=${value}`);
   }
   return args;
+}
+
+export function buildArgs(subcommand, flags = {}) {
+  return ['-m', 'tt.cli', subcommand, ...flagArgs(flags)];
 }
 
 /**
@@ -73,11 +80,12 @@ export function createAnalyticsClient({
   cwd = DEFAULT_ANALYTICS_DIR,
 } = {}) {
   /**
-   * Run one `tt.cli` subcommand. `flags` becomes CLI arguments (see
-   * `buildArgs`); `stdin` is JSON-encoded and written to the child's
-   * stdin, then the stream is closed (`tt.cli` blocks reading stdin until
-   * EOF -- see that module's own docstring). Resolves with the parsed
-   * JSON result on a clean exit, rejects with `AnalyticsError` otherwise.
+   * Spawn `pythonBin args...`, write `stdin` as JSON to its stdin, and
+   * resolve with the parsed JSON on stdout on a clean exit -- the shared
+   * mechanics behind both `run` (a `tt.cli` subcommand) and `runScript` (an
+   * arbitrary standalone script path, e.g. src/draft-room-recompute.py).
+   * Both callers get IDENTICAL error handling (a missing venv, a non-zero
+   * exit, non-JSON stdout) for free; only how `args` is built differs.
    *
    * `stderr` (optional): a writable sink (`{ write(str) }`, e.g. `src/
    * cli.js`'s own injected `err`) that receives every stderr chunk LIVE,
@@ -90,9 +98,7 @@ export function createAnalyticsClient({
    * passes this, since a SUCCESSFUL run previously had no path from the
    * accumulated buffer to anywhere a user could see it.
    */
-  async function run(subcommand, { flags = {}, stdin = {}, stderr: stderrSink = undefined } = {}) {
-    const args = buildArgs(subcommand, flags);
-
+  async function execPython(args, { stdin = {}, stderr: stderrSink = undefined } = {}, label = args.join(' ')) {
     let child;
     try {
       child = spawnImpl(pythonBin, args, { cwd });
@@ -146,7 +152,7 @@ export function createAnalyticsClient({
 
     if (exitCode !== 0) {
       throw new AnalyticsError(
-        `Analytics engine (tt.cli ${subcommand}) exited with code ${exitCode}` +
+        `Analytics engine (${label}) exited with code ${exitCode}` +
         (stderr.trim() ? `:\n${stderr.trim()}` : ''),
       );
     }
@@ -155,12 +161,43 @@ export function createAnalyticsClient({
       return JSON.parse(stdout);
     } catch {
       throw new AnalyticsError(
-        `Analytics engine (tt.cli ${subcommand}) did not return valid JSON.` +
+        `Analytics engine (${label}) did not return valid JSON.` +
         (stderr.trim() ? ` stderr:\n${stderr.trim()}` : '') +
         (stdout.trim() ? ` stdout:\n${stdout.trim().slice(0, 500)}` : ' (empty stdout)'),
       );
     }
   }
 
-  return { run, pythonBin, cwd };
+  /**
+   * Run one `tt.cli` subcommand. `flags` becomes CLI arguments (see
+   * `buildArgs`); `stdin` is JSON-encoded and written to the child's
+   * stdin, then the stream is closed (`tt.cli` blocks reading stdin until
+   * EOF -- see that module's own docstring). Resolves with the parsed
+   * JSON result on a clean exit, rejects with `AnalyticsError` otherwise.
+   */
+  async function run(subcommand, { flags = {}, stdin = {}, stderr } = {}) {
+    return execPython(buildArgs(subcommand, flags), { stdin, stderr }, `tt.cli ${subcommand}`);
+  }
+
+  /**
+   * Run a standalone Python script by absolute path -- NOT a `tt.cli`
+   * subcommand -- with the SAME stdin-JSON-in / stdout-JSON-out contract
+   * and the SAME error handling as `run`. Exists for
+   * src/draft-room-recompute.py: a script that lives outside analytics/
+   * (this feature's branch keeps that directory untouched) but still
+   * imports the installed `tt` package directly, so it can recompute
+   * survival/recommendations against an ALREADY-BUILT board without
+   * re-running `tt.cli board`/`pick`'s own expensive Monte Carlo step --
+   * see that script's module docstring and docs/draft-room-design.md
+   * section 3 for why that split exists at all.
+   *
+   * `flags` (rare -- draft-room-recompute.py takes everything via stdin)
+   * goes through the identical kebab-case `buildArgs` conversion as `run`,
+   * just without the `-m tt.cli <subcommand>` prefix.
+   */
+  async function runScript(scriptPath, { flags = {}, stdin = {}, stderr } = {}) {
+    return execPython([scriptPath, ...flagArgs(flags)], { stdin, stderr }, scriptPath);
+  }
+
+  return { run, runScript, pythonBin, cwd };
 }

@@ -178,3 +178,72 @@ test('default pythonBin and cwd point at analytics/.venv relative to the repo', 
   assert.match(client.pythonBin, /analytics[/\\]\.venv[/\\]bin[/\\]python$/);
   assert.match(client.cwd, /analytics$/);
 });
+
+// --- runScript: a standalone script path, not a `tt.cli` subcommand --------
+//
+// src/draft-room.js's per-poll recompute spawns src/draft-room-recompute.py
+// directly (see that script's own docstring for why it lives outside
+// `tt.cli` at all) -- `runScript` is the same spawn/stdin/stdout-JSON
+// machinery as `run`, just without the `-m tt.cli <subcommand>` prefix.
+
+test('runScript spawns the given script path directly, with no -m tt.cli prefix', async () => {
+  const spawn = scriptedSpawn({ stdout: '{"board":[]}\n' });
+  const client = createAnalyticsClient({ spawn, pythonBin: '/fake/python', cwd: '/fake/analytics' });
+  const result = await client.runScript('/repo/src/draft-room-recompute.py', {
+    stdin: { pick: 1 },
+  });
+  assert.deepEqual(result, { board: [] });
+  assert.equal(spawn.calls.length, 1);
+  const { command, args, options } = spawn.calls[0];
+  assert.equal(command, '/fake/python');
+  assert.deepEqual(args, ['/repo/src/draft-room-recompute.py']);
+  assert.equal(options.cwd, '/fake/analytics');
+});
+
+test('runScript feeds the stdin payload as JSON, same as run', async () => {
+  const spawn = scriptedSpawn({ stdout: '{}\n' });
+  const client = createAnalyticsClient({ spawn, pythonBin: '/fake/python', cwd: '/x' });
+  await client.runScript('/repo/script.py', { stdin: { pick: 3, roster: [{ player_id: 'a' }] } });
+  const { child } = spawn.calls[0];
+  assert.deepEqual(child.stdinWrites.map((w) => JSON.parse(w)), [{ pick: 3, roster: [{ player_id: 'a' }] }]);
+  assert.equal(child.stdinEnded, true);
+});
+
+test('runScript converts flags to kebab-case, same as run, with no subcommand in front', async () => {
+  const spawn = scriptedSpawn({ stdout: '{}\n' });
+  const client = createAnalyticsClient({ spawn, pythonBin: '/fake/python', cwd: '/x' });
+  await client.runScript('/repo/script.py', { flags: { dryRun: true, teams: 4 } });
+  assert.deepEqual(spawn.calls[0].args, ['/repo/script.py', '--dry-run', '--teams=4']);
+});
+
+test('runScript throws AnalyticsError on a non-zero exit, carrying stderr, same as run', async () => {
+  const spawn = scriptedSpawn({ code: 1, stdout: '{}\n', stderr: 'ValueError: boom\n' });
+  const client = createAnalyticsClient({ spawn, pythonBin: '/fake/python', cwd: '/x' });
+  await assert.rejects(() => client.runScript('/repo/script.py'), (e) => {
+    assert.ok(e instanceof AnalyticsError);
+    assert.match(e.message, /exited with code 1/);
+    assert.match(e.message, /ValueError: boom/);
+    return true;
+  });
+});
+
+test('runScript throws AnalyticsError when stdout is not JSON', async () => {
+  const spawn = scriptedSpawn({ code: 0, stdout: 'not json' });
+  const client = createAnalyticsClient({ spawn, pythonBin: '/fake/python', cwd: '/x' });
+  await assert.rejects(() => client.runScript('/repo/script.py'), (e) => {
+    assert.ok(e instanceof AnalyticsError);
+    assert.match(e.message, /valid JSON/i);
+    return true;
+  });
+});
+
+test('runScript throws a helpful AnalyticsError when the python binary cannot be spawned at all', async () => {
+  const err = Object.assign(new Error('spawn /fake/python ENOENT'), { code: 'ENOENT' });
+  const spawn = scriptedSpawn({ spawnError: err });
+  const client = createAnalyticsClient({ spawn, pythonBin: '/fake/python', cwd: '/x' });
+  await assert.rejects(() => client.runScript('/repo/script.py'), (e) => {
+    assert.ok(e instanceof AnalyticsError);
+    assert.match(e.message, /venv/i);
+    return true;
+  });
+});
