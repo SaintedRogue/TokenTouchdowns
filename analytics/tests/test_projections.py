@@ -156,3 +156,76 @@ def test_project_players_gives_a_running_qb_more_than_a_pocket_passer():
     out = project_players(qb_history(), CONFIG_OBJ, seasons=(2024, 2025))
     proj = out.set_index("player_id")
     assert proj.loc["RUNNER", "proj_points"] > proj.loc["POCKET", "proj_points"]
+
+
+def easton_stick_shape_history():
+    """Mirrors the real shape that motivated expected-games projection: a QB
+    depth chart with one full-time STARTER, a few typical short-appearance
+    BACKUPs (so the positional games prior reflects a realistic depth chart,
+    not just full-time players), and OLD -- a player whose ENTIRE sample is a
+    single old 5-game stretch with nothing since. Every player shares the
+    IDENTICAL per-game passing/rushing rate (`RATE`), so any points gap
+    between STARTER and OLD traces to games projection alone, not volume or
+    efficiency.
+    """
+    RATE = dict(attempts=30, passing_yards=220, passing_tds=1.5, passing_interceptions=0.6,
+                carries=3, rushing_yards=10, rushing_tds=0.0,
+                targets=0, receptions=0, receiving_yards=0, receiving_tds=0.0)
+    rows = []
+    for season in (2024, 2025):
+        for week in range(1, 18):
+            rows.append({"player_id": "STARTER", "season": season, "week": week, "position": "QB", **RATE})
+    for player_id, season, n_games in [("BACKUP1", 2025, 2), ("BACKUP2", 2024, 3), ("BACKUP3", 2025, 1)]:
+        for week in range(1, n_games + 1):
+            rows.append({"player_id": player_id, "season": season, "week": week, "position": "QB", **RATE})
+    for week in range(1, 6):
+        rows.append({"player_id": "OLD", "season": 2023, "week": week, "position": "QB", **RATE})
+    return pd.DataFrame(rows)
+
+
+def test_season_volume_projects_more_games_for_a_recent_starter_than_an_old_short_stint():
+    # Ordering only, per the fix brief -- not exact values.
+    out = season_volume(easton_stick_shape_history(), seasons=(2023, 2024, 2025))
+    proj_games = out.set_index("player_id")["proj_games"]
+    assert proj_games["STARTER"] > proj_games["OLD"]
+
+
+def test_easton_stick_regression_old_sample_player_gets_a_small_fraction_of_the_points():
+    # THE Easton Stick regression guard: a career backup whose entire sample
+    # is one old 5-game stretch, with an IDENTICAL per-game rate to a current
+    # full-time starter, must not project anywhere near a full season's
+    # worth of points -- previously `games=17` was assumed for everyone, so
+    # this player's hot 5-game stretch alone produced a starter-sized season
+    # projection. Games projection must now do the work rates alone cannot.
+    out = project_players(
+        easton_stick_shape_history(), CONFIG_OBJ, seasons=(2023, 2024, 2025), seed=1,
+    )
+    proj = out.set_index("player_id")
+    assert proj.loc["OLD", "proj_points"] < 0.6 * proj.loc["STARTER", "proj_points"]
+
+
+def test_project_players_explicit_games_overrides_the_projection():
+    # Pins the pre-existing override behaviour: an explicit `games=` still
+    # applies flatly to every player, exactly as it did before proj_games
+    # existed, regardless of their own individual history.
+    out = project_players(history(), CONFIG_OBJ, seasons=(2024, 2025), games=5)
+    assert (out["proj_games"] == 5.0).all()
+
+
+def overplayed_history():
+    """A player logged with MORE weeks than a real regular season has (a
+    data quirk, or postseason weeks slipping through) -- proj_games must
+    still cap at the real season length regardless of what the raw data or
+    shrinkage arithmetic would otherwise produce."""
+    rows = []
+    for week in range(1, 21):
+        rows.append({"player_id": "D", "season": 2025, "week": week,
+                     "position": "WR", "carries": 0, "targets": 5,
+                     "receptions": 3, "rushing_yards": 0, "receiving_yards": 40,
+                     "rushing_tds": 0.0, "receiving_tds": 0.1})
+    return pd.DataFrame(rows)
+
+
+def test_proj_games_never_exceeds_the_real_season_length():
+    out = season_volume(overplayed_history(), seasons=(2025,))
+    assert out.set_index("player_id").loc["D", "proj_games"] <= 17.0

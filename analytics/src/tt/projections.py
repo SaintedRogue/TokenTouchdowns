@@ -51,6 +51,19 @@ small sample) -- a negative Gamma scale parameter is meaningless and
 knowledge of which shrunk rates are "yards per opportunity" (and therefore
 must be clamped at zero) lives here, not in `models/compose.py`, which stays
 a generic simulator with no opinion on what its inputs represent.
+
+EXPECTED GAMES ARE PROJECTED, NEVER ASSUMED. A full season (`games=17`) was
+previously a constant applied to every player -- which let a career backup
+with a single old 5-game stretch and nothing since (a real case this surfaced
+on real data) project a FULL season off that one hot stretch's per-game rate.
+`season_volume` now projects `proj_games` per player the same way it projects
+volume: recency-weighted, then shrunk toward a positional prior via
+`features.shrunk_rate`, with the player's own recency-weighted season-count
+standing in for "how much evidence do we have". This fixes the whole class of
+problem at once (the career backup, the injury-prone starter, the rookie with
+no history, the barely-used committee back), not just the one name that
+happened to surface it -- a filter on "no recent games" would only have
+caught that one case and silently mis-ranked the rest.
 """
 from __future__ import annotations
 
@@ -86,6 +99,24 @@ CATCH_RATE_STRENGTH = 200.0
 PASS_EFF_STRENGTH = 1000.0
 PASS_TD_STRENGTH = 600.0
 PASS_INT_STRENGTH = 600.0
+
+# Expected games played per season: NOT a rate over opportunities like the
+# constants above, but the same shrinkage mechanics apply directly if it's
+# framed as one -- "games per season", shrunk toward a positional prior, with
+# each player's own recency-weighted total season-count standing in for the
+# denominator (see season_volume's `_combine`). A single unit here is worth
+# one full season of recency weight (season weights run 1, 3, 9, ... under
+# the default scheme), so GAMES_STRENGTH=4.0 means roughly "trust a lone
+# recent season a bit, but a lone OLD season (weight 1) gets pulled hard
+# toward the prior." Kept deliberately small relative to the
+# opportunity-count strengths above because the quantity it's shrinking is
+# itself small (single digits to 17), not hundreds of carries.
+GAMES_STRENGTH = 4.0
+
+# The real NFL regular-season length. proj_games can never legitimately
+# exceed this -- it caps both a shrunk estimate that lands above it (rare)
+# and any data quirk (extra logged weeks) in the input.
+SEASON_LENGTH = 17.0
 
 # Every stat column this module reads. A `history` frame that doesn't track a
 # stream at all (e.g. a skill-position-only fixture with no passing columns)
@@ -138,7 +169,8 @@ def season_volume(
     seasons: Iterable[int],
     recency_weights: dict[int, float] | None = None,
 ) -> pd.DataFrame:
-    """Per-player expected per-game carries, targets and pass attempts.
+    """Per-player expected per-game carries, targets, pass attempts, and
+    expected 2026 games played (`proj_games`).
 
     Season-level selection (which seasons feed the projection), not a
     within-season as-of point, so this filters directly rather than routing
@@ -152,6 +184,15 @@ def season_volume(
     raw weeks) -- so a player who missed half of a good season doesn't have
     that season's rate diluted by its own missed games before the recency
     weight is even applied.
+
+    `proj_games` exists because `games` was previously a caller-supplied
+    CONSTANT (assumed 17 for everyone) in `project_players` -- which let a
+    career backup with a single old 5-game stretch and nothing since (the
+    real case that motivated this) project a full season off that one hot
+    stretch's per-game rate. Expected games is itself a prediction: shrunk
+    the same way as every other functionally-uncertain quantity in this
+    module, toward a positional prior, with the player's own recency-weighted
+    season-count standing in as the "how much evidence do we have" term.
     """
     seasons = tuple(seasons)
     if recency_weights is None:
@@ -159,7 +200,8 @@ def season_volume(
 
     columns = [
         "player_id", "position",
-        "carries_per_game", "targets_per_game", "attempts_per_game", "games",
+        "carries_per_game", "targets_per_game", "attempts_per_game",
+        "games", "proj_games",
     ]
     history = _with_required_columns(history)
     subset = history[history["season"].isin(seasons)]
@@ -181,12 +223,26 @@ def season_volume(
         .reset_index()
     )
 
+    # Positional prior for expected games: an UNWEIGHTED average of games
+    # played, across EVERY player-season at the position -- not just
+    # full-time starters. This is deliberate: a real position's full stat
+    # sheet is dominated by short-stint backups, injury replacements and
+    # midseason call-ups, so this average comes out naturally modest. That is
+    # what lets a low-evidence player regress toward "we don't expect this
+    # person to play much", per the fix brief, rather than toward a
+    # flattering league-average-STARTER number a starters-only prior would
+    # give.
+    games_prior = per_season.groupby("position")["games"].mean()
+
     def _combine(group: pd.DataFrame) -> pd.Series:
         total_weight = group["weight"].sum()
+        position = group.sort_values("season")["position"].iloc[-1]
         if total_weight > 0:
             carries = float((group["carries"] * group["weight"]).sum() / total_weight)
             targets = float((group["targets"] * group["weight"]).sum() / total_weight)
             attempts = float((group["attempts"] * group["weight"]).sum() / total_weight)
+            weighted_games = float((group["games"] * group["weight"]).sum())
+            games_evidence = float(total_weight)
         else:
             # No season this player appears in carries positive recency
             # weight (e.g. only seasons outside an explicit recency_weights
@@ -195,12 +251,20 @@ def season_volume(
             carries = float(group["carries"].mean())
             targets = float(group["targets"].mean())
             attempts = float(group["attempts"].mean())
+            weighted_games = float(group["games"].sum())
+            games_evidence = float(len(group))
+
+        prior_games = float(games_prior.get(position, group["games"].mean()))
+        proj_games = shrunk_rate(weighted_games, games_evidence, prior_games, GAMES_STRENGTH)
+        proj_games = min(max(proj_games, 0.0), SEASON_LENGTH)
+
         return pd.Series({
-            "position": group.sort_values("season")["position"].iloc[-1],
+            "position": position,
             "carries_per_game": carries,
             "targets_per_game": targets,
             "attempts_per_game": attempts,
             "games": int(group["games"].sum()),
+            "proj_games": proj_games,
         })
 
     out = per_season.groupby("player_id").apply(_combine, include_groups=False).reset_index()
@@ -268,13 +332,22 @@ def project_players(
     history: pd.DataFrame,
     config: LeagueConfig,
     seasons: Iterable[int],
-    games: int = 17,
+    games: int | None = None,
     n: int = 5000,
     seed: int | None = None,
 ) -> pd.DataFrame:
     """Full season projection per player: volume x shrunk rate, composed.
 
-    Columns: player_id, position, proj_points, p10, p50, p90, sd.
+    Columns: player_id, position, proj_points, p10, p50, p90, sd, proj_games.
+
+    `games` defaults to None, meaning: use each player's own projected games
+    (`season_volume`'s `proj_games` -- see its docstring for why this exists
+    at all). Passed explicitly, `games` overrides the projection with a flat
+    value for every player, exactly as this parameter behaved before expected
+    games existed -- callers that want "assume everyone plays N games" (e.g.
+    a fixed-games backtest, or the existing games=1/games=17 tests) still get
+    exactly that, uncapped, since an explicit value is a deliberate caller
+    choice, not a prediction this module needs to defend.
     """
     seasons = tuple(seasons)
     weights = scoring_weights(config)
@@ -309,16 +382,24 @@ def project_players(
         pass_td = shrunk_rate(row["passing_tds"], row["attempts"], prior["pass_td_rate"], PASS_TD_STRENGTH)
         pass_int = shrunk_rate(row["passing_interceptions"], row["attempts"], prior["pass_int_rate"], PASS_INT_STRENGTH)
 
-        # A single simulate_components call at volume = per_game * games is
-        # distributionally identical to summing `games` independent weekly
-        # draws at the per-game volume (Poisson opportunities and, given
-        # matching opportunities, Gamma yards and Binomial touchdowns are
-        # all closed under summing independent draws at a fixed rate) -- so
-        # this is the exact season total, not an approximation, without a
+        # `games` explicit overrides the per-player projection for every
+        # player (existing games=1/games=17-style callers); otherwise each
+        # player uses their OWN season_volume-projected games -- see
+        # project_players' and season_volume's docstrings for why a flat
+        # constant here was the actual defect behind a 5-career-game backup
+        # projecting a full season.
+        player_games = float(games) if games is not None else float(row["proj_games"])
+
+        # A single simulate_components call at volume = per_game * player_games
+        # is distributionally identical to summing that many independent
+        # weekly draws at the per-game volume (Poisson opportunities and,
+        # given matching opportunities, Gamma yards and Binomial touchdowns
+        # are all closed under summing independent draws at a fixed rate) --
+        # so this is the exact season total, not an approximation, without a
         # per-week loop.
-        rush_volume = row["carries_per_game"] * games
-        rec_volume = row["targets_per_game"] * games
-        pass_volume = row["attempts_per_game"] * games
+        rush_volume = row["carries_per_game"] * player_games
+        rec_volume = row["targets_per_game"] * player_games
+        pass_volume = row["attempts_per_game"] * player_games
 
         player_id = row["player_id"]
         rush_seed = base_seed + _stable_seed(player_id, 0)
@@ -365,6 +446,10 @@ def project_players(
             "p50": summary["p50"],
             "p90": summary["p90"],
             "sd": summary["sd"],
+            "proj_games": player_games,
         })
 
-    return pd.DataFrame(rows, columns=["player_id", "position", "proj_points", "p10", "p50", "p90", "sd"])
+    return pd.DataFrame(
+        rows,
+        columns=["player_id", "position", "proj_points", "p10", "p50", "p90", "sd", "proj_games"],
+    )
