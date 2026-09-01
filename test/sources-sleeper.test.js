@@ -67,3 +67,29 @@ test('normalize keeps a player whose yahoo_id is 0 rather than treating it as ab
   assert.equal(out.length, 1);
   assert.equal(out[0].yahooId, '0');
 });
+
+test('normalize trims whitespace off gsisId so the nflverse join cannot miss silently', () => {
+  // Sleeper's live feed really does this: 855 of 3,875 records carrying a
+  // gsis_id ship it with a LEADING SPACE (" 00-0023177"). nflverse player_ids
+  // have none, so every one of those records fails an exact-match join --
+  // silently, because a missed join looks identical to a player who simply is
+  // not in the crosswalk. It cost the draft room 10 of 210 real drafted picks.
+  //
+  // Exactly the failure this function's own docstring already describes for
+  // yahooId ("a type mismatch makes every join miss silently"), so the fix is
+  // the same shape: normalise at the boundary, once, where the data enters.
+  const out = normalize({
+    '1': { player_id: '1', yahoo_id: 111, gsis_id: ' 00-0023177',
+           full_name: 'Leading Space', position: 'RB', team: 'DET' },
+    '2': { player_id: '2', yahoo_id: 222, gsis_id: '00-0033280  ',
+           full_name: 'Trailing Space', position: 'WR', team: 'CIN' },
+    '3': { player_id: '3', yahoo_id: 333, gsis_id: '   ',
+           full_name: 'Only Whitespace', position: 'QB', team: 'BUF' },
+  });
+  const by = (n) => out.find((p) => p.name === n);
+  assert.equal(by('Leading Space').gsisId, '00-0023177');
+  assert.equal(by('Trailing Space').gsisId, '00-0033280');
+  // A whitespace-only id carries no identity; it must become null rather than
+  // an empty string that would join against nothing while looking present.
+  assert.equal(by('Only Whitespace').gsisId, null);
+});
