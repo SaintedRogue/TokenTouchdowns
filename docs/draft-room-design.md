@@ -45,31 +45,51 @@ tt draft-room
                 POST /api/undo      revert the last manual mark
 ```
 
-### 4.1 Snake order
+### 4.1 Pick order — read it, do not compute it
 
-The highest-risk pure logic in the app, and the cheapest to get wrong. For `teams` teams and
-slot `K` (1-based), the picks belonging to K are, per round `r` (0-based):
+**Superseded by a live capture on 2026-09-01.** A Yahoo mock draft was run specifically to
+capture the real payload, and it showed that `draft_results` publishes **every pick slot for the
+whole draft, from before the first pick** — 210 entries for a 14-team, 15-round draft. Each slot
+carries its owning `team_key`, so the entire draft order is known up front:
 
-  - r even: `r*teams + K`
-  - r odd:  `r*teams + (teams - K + 1)`
+    round 1: p1:t1   p2:t2  ... p14:t14
+    round 2: p15:t14 p16:t13 ... p28:t1
 
-For teams=4, K=2 that is 2, 7, 10, 15, 18, ... Current pick is `len(draft_results) + 1`; my next
-pick is the smallest of my picks that is >= the current pick.
+So the app READS the order rather than modelling it. That is authoritative, and it survives
+custom orders, third-round reversal, and any league setting this project does not model.
 
-### 4.2 Draft results parsing — the one unverified surface
+  - `currentPick` = the lowest pending pick number
+  - `onTheClock`  = that slot's `team_key`
+  - `myNextPick`  = the lowest pending slot whose `team_key` is mine
 
-`league/{key}/draftresults` returns `draft_results`, confirmed reachable, but the account has no
-completed draft, so **the shape of an entry is unverified until draft day**. That is the single
-largest risk in this build.
+`myPicks`/`nextPick` (the snake formula below) remain as the FALLBACK for when `draft_results` is
+empty or unreachable. Yahoo's published order beats our model of it, every time.
 
-Parsing is therefore defensive and LOUD: an entry that does not yield a pick number, a team key
-and a player key is not silently skipped. On a shape mismatch the UI raises a banner and the app
-falls back to manual entry. It must never present a stale board as a live one.
+For teams `T` and slot `K` (1-based), round `r` (0-based): r even -> `r*T + K`; r odd ->
+`r*T + (T - K + 1)`. For T=4, K=2: 2, 7, 10, 15. Verified against the captured order.
+
+### 4.2 Draft results parsing — resolved by capture
+
+A pick slot appears in one of two normal states, and **both are expected**:
+
+    made:    {"pick":1,"round":1,"team_key":"...t.1","player_key":"470.p.40059"}
+    pending: {"pick":2,"round":1,"team_key":"...t.2"}          <-- no player_key yet
+
+Field names are exactly `pick`, `round`, `team_key`, `player_key`.
+
+The original design treated a missing `player_key` as a malformation. Against the real payload
+that produced **1 pick and 209 "malformed"** at pick 1, so the banner would have fired from the
+first second of the draft and never stopped — training the user to ignore the single signal that
+means "your board is lying to you". Parsing therefore returns three groups: `picks` (made),
+`pending` (future slots), and `malformed` (genuinely unusable — missing `pick` or `team_key`).
+**Only `malformed` raises the banner.**
 
 Yahoo player keys map to engine `player_id` through the existing tested crosswalk
 (`src/identity.js` -> Sleeper `gsis_id` -> nflverse, with the name-matching second pass). An
 unresolved pick still removes the player from the AVAILABLE pool by Yahoo key, so an identity gap
 degrades the recommendation rather than corrupting the pool.
+
+Scrubbed captures live in `test/fixtures/` and drive the parser tests.
 
 ## 5. Failure modes
 
