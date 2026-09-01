@@ -515,6 +515,7 @@ def run_backtest(
     seed: int = 2026,
     rounds: int = DEFAULT_ROUNDS,
     my_slot_for_teams: Callable[[int], int] | None = None,
+    on_cell: Callable[[int, int, pd.DataFrame, pd.DataFrame], None] | None = None,
 ) -> pd.DataFrame:
     """The full backtest: every (season, teams) cell in `seasons` x
     `team_counts`, concatenated into one table.
@@ -532,8 +533,7 @@ def run_backtest(
     reached `project_players`). This function is the fix: it builds `board`
     exactly ONCE per (season, teams) cell (`build_board(..., seed=seed)`,
     an explicit, fixed seed) and passes that SAME object into both
-    `run_backtest_cell` and `zero_scoring_diagnostics` below -- see
-    `test_run_backtest_and_diagnostics_share_one_board_and_are_reproducible`.
+    `run_backtest_cell` and `zero_scoring_diagnostics` below.
 
     `my_slot_for_teams` (default `teams // 2`, a fixed, non-tuned "middle of
     the draft order" choice -- not favouring the earliest or latest pick,
@@ -548,6 +548,22 @@ def run_backtest(
     per-trial ADP-noise draws comparable across cells (common random
     numbers, extended across the whole study, not just within one
     `compare_strategies` call).
+
+    C-2 (fix-round-2-brief.md): `scripts/run_backtest.py` used to
+    re-implement this exact (season, teams) loop inline -- byte-for-byte
+    the same board-build/`run_backtest_cell`/`zero_scoring_diagnostics`
+    sequence this function already runs -- purely so it could cache partial
+    results to disk after every cell (this is a ~25 minute run; a crash
+    losing all of it is a real cost) and print per-cell progress. `on_cell`,
+    called after each cell with `(season, teams, cell_result,
+    zero_scoring)` (this cell's `run_backtest_cell` row(s) and its
+    `zero_scoring_diagnostics` frame, `season`/`teams` already prepended to
+    both, matching `run_backtest_cell`'s own convention), is what lets the
+    script do that WITHOUT its own copy of this loop -- the script is now
+    the caller of this tested function, not a second implementation of it.
+    `zero_scoring_diagnostics` is computed at all ONLY when `on_cell` is
+    given (it costs an extra `trials`-draft simulation per cell for no
+    benefit to a caller that doesn't want it).
     """
     slot_for = my_slot_for_teams if my_slot_for_teams is not None else (lambda teams: teams // 2)
     rows = []
@@ -558,9 +574,19 @@ def run_backtest(
         # just repeat the same groupby/sum four times for nothing.
         actual = actual_points_by_player(history, config, season)
         for teams in team_counts:
+            slot = slot_for(teams)
             board = build_board(history, config, season, ffc, teams, seed=seed)
-            rows.append(run_backtest_cell(
-                board, config, season, teams, slot_for(teams),
+            cell = run_backtest_cell(
+                board, config, season, teams, slot,
                 trials, seed, actual, rounds=rounds,
-            ))
+            )
+            rows.append(cell)
+            if on_cell is not None:
+                zeros = zero_scoring_diagnostics(
+                    board, config, teams, slot, seed=seed, actual_points=actual,
+                    rounds=rounds, trials=trials,
+                )
+                zeros.insert(0, "season", season)
+                zeros.insert(1, "teams", teams)
+                on_cell(season, teams, cell, zeros)
     return pd.concat(rows, ignore_index=True)

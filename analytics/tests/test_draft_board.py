@@ -595,3 +595,63 @@ def test_run_backtest_returns_every_season_and_team_count_cell():
     assert set(out["strategy"]) == {
         "adp", "vor", "vor_survival_unconditional", "vor_survival_conditional",
     }
+
+
+def test_run_backtest_invokes_on_cell_once_per_cell_with_matching_zero_scoring():
+    # C-2 (fix-round-2-brief.md): `scripts/run_backtest.py` used to
+    # re-implement this exact (season, teams) loop inline purely to cache
+    # partial results after every cell. `on_cell` is what lets the script
+    # call this tested function instead of duplicating its loop -- pins
+    # that it fires once per (season, teams) cell, with the SAME
+    # season/teams/cell rows this function's own return value carries for
+    # that cell, plus a zero_scoring frame built from the SAME board (not a
+    # second, independently-built one -- see module WARNING on why that
+    # used to silently diverge).
+    history = _big_history()
+    ffc = _big_ffc_from(history)
+    seen: list[tuple[int, int, pd.DataFrame, pd.DataFrame]] = []
+
+    out = run_backtest(
+        history, CONFIG_OBJ, seasons=(2021,), ffc_by_season={2021: ffc},
+        team_counts=(4, 10), trials=3, seed=1, rounds=4,
+        on_cell=lambda season, teams, cell, zeros: seen.append((season, teams, cell, zeros)),
+    )
+
+    assert {(season, teams) for season, teams, _, _ in seen} == {(2021, 4), (2021, 10)}
+    assert len(seen) == 2
+    for season, teams, cell, zeros in seen:
+        expected_cell = out[(out["season"] == season) & (out["teams"] == teams)]
+        pd.testing.assert_series_equal(
+            cell["mean_score"].reset_index(drop=True),
+            expected_cell["mean_score"].reset_index(drop=True),
+        )
+        assert set(zeros["strategy"]) == {
+            "adp", "vor", "vor_survival_unconditional", "vor_survival_conditional",
+        }
+        assert (zeros["season"] == season).all()
+        assert (zeros["teams"] == teams).all()
+        assert (zeros["trials"] == 3).all()  # threaded from run_backtest's own `trials`
+
+
+def test_run_backtest_does_not_compute_zero_scoring_when_on_cell_is_not_given():
+    # The extra zero_scoring_diagnostics simulation (trials more drafts per
+    # cell) must only run when a caller actually wants it.
+    history = _big_history()
+    ffc = _big_ffc_from(history)
+    calls = {"n": 0}
+
+    def spy(*args, **kwargs):
+        calls["n"] += 1
+        return zero_scoring_diagnostics(*args, **kwargs)
+
+    import tt.studies.draft_board as draft_board_module
+    original = draft_board_module.zero_scoring_diagnostics
+    draft_board_module.zero_scoring_diagnostics = spy
+    try:
+        run_backtest(
+            history, CONFIG_OBJ, seasons=(2021,), ffc_by_season={2021: ffc},
+            team_counts=(4,), trials=3, seed=1, rounds=4,
+        )
+    finally:
+        draft_board_module.zero_scoring_diagnostics = original
+    assert calls["n"] == 0

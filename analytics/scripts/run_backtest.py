@@ -8,12 +8,15 @@ Prereqs (run once, or whenever the crosswalk should refresh):
   2. `node ../analytics/scripts/build_ffc_crosswalk.mjs` (from repo root)
 Both write into `analytics/data/`, which this script then reads.
 
-REPRODUCIBILITY: the board for each (season, teams) cell is built EXACTLY
-ONCE here (`build_board(..., seed=SEED)`) and handed to both `run_backtest_
-cell` and `zero_scoring_diagnostics` -- see `draft_board.run_backtest`'s own
-WARNING for why building it twice (the original version of this script,
-before this fix) silently gave the two functions two DIFFERENT random
-Monte Carlo projections for the "same" cell.
+C-2 (fix-round-2-brief.md): this script used to re-implement `draft_board.
+run_backtest`'s own (season, teams) loop inline -- build the board once,
+call `run_backtest_cell`, call `zero_scoring_diagnostics`, repeat -- purely
+so it could cache partial results to disk after every cell. That was
+byte-for-byte the same sequence `run_backtest` already runs, with zero
+tests ever exercising the script's copy of it. This script now calls
+`run_backtest` itself, passing `on_cell` for the incremental
+caching/progress printing `run_backtest`'s own signature exists to support
+-- the tested path is now the path that actually runs.
 """
 from __future__ import annotations
 
@@ -29,11 +32,8 @@ from tt.league import load_config  # noqa: E402
 from tt.studies.draft_board import (  # noqa: E402
     BACKTEST_SEASONS,
     TEAM_COUNTS,
-    actual_points_by_player,
-    build_board,
     load_ffc_crosswalk,
-    run_backtest_cell,
-    zero_scoring_diagnostics,
+    run_backtest,
 )
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -46,10 +46,6 @@ DONE_MARKER = DATA_DIR / "backtest_DONE.marker"
 def load_history(seasons) -> pd.DataFrame:
     frames = [pd.read_parquet(DATA_DIR / f"stats_player_week_{s}.parquet") for s in seasons]
     return pd.concat(frames, ignore_index=True)
-
-
-def my_slot_for(teams: int) -> int:
-    return teams // 2
 
 
 def main() -> None:
@@ -72,42 +68,32 @@ def main() -> None:
         print(f"[{time.time()-t_start:6.1f}s] {season} ffc crosswalk: "
               f"{resolved}/{len(ffc)} resolved", flush=True)
 
-    results = []
-    zero_rows = []
-    for season in BACKTEST_SEASONS:
-        # Actual points don't depend on `teams` -- computed once per season,
-        # reused across every team-count cell for that season.
-        actual = actual_points_by_player(history, config, season)
-        for teams in TEAM_COUNTS:
-            slot = my_slot_for(teams)
-            cell_start = time.time()
+    results: list[pd.DataFrame] = []
+    zero_rows: list[pd.DataFrame] = []
+    cell_start = {"t": t_start}
 
-            # Built ONCE, fixed seed, shared by both calls below -- see
-            # module docstring's REPRODUCIBILITY note.
-            board = build_board(history, config, season, ffc_by_season[season], teams, seed=SEED)
+    def on_cell(season: int, teams: int, cell: pd.DataFrame, zeros: pd.DataFrame) -> None:
+        results.append(cell)
+        zero_rows.append(zeros)
 
-            cell = run_backtest_cell(
-                board, config, season, teams, slot,
-                trials=TRIALS, seed=SEED, actual_points=actual, rounds=ROUNDS,
-            )
-            results.append(cell)
-            print(f"[{time.time()-t_start:6.1f}s] season={season} teams={teams} "
-                  f"my_slot={slot} done in {time.time()-cell_start:.1f}s", flush=True)
-            for _, row in cell.iterrows():
-                print(f"    {row['strategy']:28s} mean={row['mean_score']:8.2f} "
-                      f"std={row['std_score']:7.2f} ci95=[{row['ci95_low']:.2f}, "
-                      f"{row['ci95_high']:.2f}]", flush=True)
+        slot = teams // 2
+        print(f"[{time.time()-t_start:6.1f}s] season={season} teams={teams} "
+              f"my_slot={slot} done in {time.time()-cell_start['t']:.1f}s", flush=True)
+        for _, row in cell.iterrows():
+            print(f"    {row['strategy']:28s} mean={row['mean_score']:8.2f} "
+                  f"std={row['std_score']:7.2f} ci95=[{row['ci95_low']:.2f}, "
+                  f"{row['ci95_high']:.2f}]", flush=True)
+        cell_start["t"] = time.time()
 
-            zeros = zero_scoring_diagnostics(
-                board, config, teams, slot, seed=SEED, actual_points=actual, rounds=ROUNDS,
-            )
-            zeros.insert(0, "season", season)
-            zeros.insert(1, "teams", teams)
-            zero_rows.append(zeros)
+        # Cache after every cell so a crash never loses completed work.
+        pd.concat(results, ignore_index=True).to_csv(DATA_DIR / "backtest_results.csv", index=False)
+        pd.concat(zero_rows, ignore_index=True).to_csv(DATA_DIR / "backtest_zero_scoring.csv", index=False)
 
-            # Cache after every cell so a crash never loses completed work.
-            pd.concat(results, ignore_index=True).to_csv(DATA_DIR / "backtest_results.csv", index=False)
-            pd.concat(zero_rows, ignore_index=True).to_csv(DATA_DIR / "backtest_zero_scoring.csv", index=False)
+    run_backtest(
+        history, config, seasons=BACKTEST_SEASONS, ffc_by_season=ffc_by_season,
+        team_counts=TEAM_COUNTS, trials=TRIALS, seed=SEED, rounds=ROUNDS,
+        on_cell=on_cell,
+    )
 
     print(f"[{time.time()-t_start:6.1f}s] DONE", flush=True)
     DONE_MARKER.write_text(f"done at {time.time()-t_start:.1f}s\n")
