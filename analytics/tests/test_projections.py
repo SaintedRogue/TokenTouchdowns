@@ -266,6 +266,30 @@ def test_project_players_scores_fumbles_lost_from_league_weights():
            unscored.set_index("player_id").loc["FUMBLER", "proj_points"]
 
 
+def test_project_players_warns_when_the_league_scores_ret_td_or_two_pt(recwarn):
+    # F7: league.py used to drop 'Ret TD'/'2-PT' before project_players'
+    # own scoring guard could ever see them -- a silent gap behind a "fails
+    # loud" promise. Must now warn (not raise -- these have no simulated
+    # component to add, unlike a genuine wiring bug, and the real league
+    # this project targets scores both).
+    cfg_with_gap = replace(
+        CONFIG_OBJ,
+        scoring=[
+            *CONFIG_OBJ.scoring,
+            {"statId": 15, "name": "Ret TD", "group": "return", "value": 6},
+            {"statId": 16, "name": "2-PT", "group": "misc", "value": 2},
+        ],
+    )
+    project_players(history(), cfg_with_gap, seasons=(2024, 2025))
+    messages = [str(w.message) for w in recwarn.list]
+    assert any("Ret TD" in m and "2-PT" in m for m in messages)
+
+
+def test_project_players_does_not_warn_for_a_fully_mapped_league(recwarn):
+    project_players(history(), CONFIG_OBJ, seasons=(2024, 2025))
+    assert len(recwarn.list) == 0
+
+
 def test_project_players_raises_when_league_scores_a_stat_it_cannot_simulate(monkeypatch):
     # Fail loud, not silent: this is the general guard the fumbles bug
     # motivated. scoring_weights() itself only ever emits the closed set of

@@ -2,7 +2,13 @@ import json
 
 import pytest
 
-from tt.league import load_config, load_config_from_dict, scoring_weights, starters_per_team
+from tt.league import (
+    load_config,
+    load_config_from_dict,
+    missing_scored_columns,
+    scoring_weights,
+    starters_per_team,
+)
 
 # Real shape of the export: scoring is a LIST keyed by Yahoo stat id, not an
 # object keyed by display name. Yahoo reuses display names across categories
@@ -99,6 +105,46 @@ def test_scoring_weights_omits_stats_with_no_nflverse_mapping():
     }
     w = scoring_weights(load_config_from_dict(raw))
     assert all(v not in (3, 10) for v in w.values())
+
+
+def test_missing_scored_columns_flags_ret_td_and_two_point_conversion():
+    # F7: statId 15/49 (Ret TD -> nflverse special_teams_tds) and statId 16
+    # (2-PT -> the *_2pt_conversions columns) are stats an offensive skill
+    # player can score, and nflverse has columns for both, but
+    # scoring_weights has no entry for either -- these must be reported as
+    # a real, currently-unmodelled gap.
+    raw = {
+        **CONFIG,
+        "scoring": [
+            *CONFIG["scoring"],
+            {"statId": 15, "name": "Ret TD", "group": "return", "value": 6},
+            {"statId": 49, "name": "Ret TD", "group": "return", "value": 6},
+            {"statId": 16, "name": "2-PT", "group": "misc", "value": 2},
+        ],
+    }
+    missing = missing_scored_columns(load_config_from_dict(raw))
+    missing_ids = {stat["statId"] for stat in missing}
+    assert {15, 49, 16} <= missing_ids
+
+
+def test_missing_scored_columns_does_not_flag_known_unmodellable_k_def_stats():
+    # FG/PAT/Sack/Pts-Allow etc. are intentionally, silently omitted --
+    # nobody expects a K/DEF number from this offense-only pipeline, so
+    # flagging them would just be noise on every real league.
+    raw = {
+        **CONFIG,
+        "scoring": [
+            *CONFIG["scoring"],
+            {"statId": 19, "name": "FG 0-19", "group": "fgs", "value": 3},
+            {"statId": 50, "name": "Pts Allow 0", "group": "pts_allow", "value": 10},
+        ],
+    }
+    missing = missing_scored_columns(load_config_from_dict(raw))
+    assert missing == []
+
+
+def test_missing_scored_columns_is_empty_for_a_fully_mapped_config():
+    assert missing_scored_columns(load_config_from_dict(CONFIG)) == []
 
 
 def test_starters_per_team_splits_flex_across_eligible_positions():

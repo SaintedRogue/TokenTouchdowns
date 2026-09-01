@@ -76,6 +76,19 @@ key `scoring_weights` can produce has a simulated component to be weighted;
 if a league scores something this module genuinely cannot simulate, it
 raises rather than quietly dropping that rule from every player's number.
 
+That guarantee used to stop at `league.py`'s own front door: `Ret TD` and
+`2-PT` are stats an offensive skill player can score, and nflverse carries
+columns for both, but `league.scoring_weights` had no entry for either, so
+they never reached `scoring_weights(config)` for `_validate_scoring_is_
+simulated` to see in the first place -- a silent drop hiding behind a
+"fails loud" promise. `_warn_about_unmodellable_scoring` closes that,
+via `league.missing_scored_columns`: a WARNING (not a raise, since these
+have no simulated component to add rather than a wiring bug to fix, and the
+real league this project targets scores both) the moment a league scores
+something this module drops for a reason other than "obviously a K/DEF
+stat this pipeline was never going to project" (see F7 in
+fix-round-1-brief.md).
+
 ONLY QB/RB/WR/TE (`PROJECTABLE_POSITIONS`) ARE PROJECTED. Kicker and team
 defense scoring comes from columns this pipeline never ingests (field goals
 by distance, points allowed, sacks, forced turnovers); deriving a number for
@@ -84,6 +97,7 @@ one. See that constant's own comment for the full reasoning.
 """
 from __future__ import annotations
 
+import warnings
 import zlib
 from collections.abc import Iterable
 
@@ -91,7 +105,7 @@ import numpy as np
 import pandas as pd
 
 from .features import shrunk_rate
-from .league import LeagueConfig, scoring_weights
+from .league import LeagueConfig, missing_scored_columns, scoring_weights
 from .models.compose import simulate_components, summarise
 
 # Shrinkage strengths, in units of "opportunities worth of prior weight" (see
@@ -254,6 +268,41 @@ def _validate_scoring_is_simulated(weights: dict[str, float]) -> None:
             "simulated component for -- add a stream/shrinkage for it rather "
             "than silently dropping it from every projection (see "
             "_SIMULATED_COMPONENTS)."
+        )
+
+
+def _warn_about_unmodellable_scoring(config: LeagueConfig) -> None:
+    """Surface, rather than silently drop, any league-scored stat this
+    module cannot simulate for a reason `league.py` itself can't already
+    explain as "an intentionally-excluded K/DEF stat" -- see
+    `league.missing_scored_columns` (F7 in fix-round-1-brief.md).
+
+    `_validate_scoring_is_simulated` (above) only ever sees
+    `scoring_weights(config)` -- a dict `league.py` has ALREADY dropped
+    unmapped stat ids from -- so a stat this module never learns about at
+    all (Ret TD, 2-PT: nflverse has the columns, but this module has no
+    volume/rate model for either) never reached that check, and the
+    module's "fail loud, not quietly drop it" promise was only true
+    downstream of `league.py`'s own silent drop. This closes that gap with
+    a WARNING, not a raise: unlike the fumbles-lost bug class
+    `_validate_scoring_is_simulated` guards (a genuine wiring bug -- the
+    stat HAS a simulated component and the point formula just wasn't
+    summing it), `missing_scored_columns` covers stats with NO simulated
+    component at all. Raising would make every call against a league that
+    scores either stat (the real league this project targets does) fail
+    outright over a genuinely small gap (10-20 points over two seasons,
+    per the fix brief) rather than a fixable wiring bug -- a warning is
+    what makes the gap impossible to miss without also making the module
+    unusable for the league it exists to serve.
+    """
+    missing = missing_scored_columns(config)
+    if missing:
+        stats = sorted({f"{stat['name']!r} (statId {stat['statId']})" for stat in missing})
+        warnings.warn(
+            f"league scores {stats} but projections.py has no simulated "
+            "component for them (see league.missing_scored_columns) -- "
+            "every projection is silently missing this point value.",
+            stacklevel=2,
         )
 
 
@@ -572,6 +621,7 @@ def project_players(
     seasons = tuple(seasons)
     weights = scoring_weights(config)
     _validate_scoring_is_simulated(weights)
+    _warn_about_unmodellable_scoring(config)
 
     history = regular_season(history)
     history = _with_required_columns(history)
