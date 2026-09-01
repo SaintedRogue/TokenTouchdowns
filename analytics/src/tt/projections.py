@@ -246,6 +246,22 @@ _EMPTY_PRIOR = pd.Series({
 })
 
 
+class NoProjectableDataError(ValueError):
+    """Raised when `project_players` has no player-weeks left to compute a
+    positional prior from once `history` is filtered down to
+    `PROJECTABLE_POSITIONS` and the requested `seasons` -- an empty
+    `history` to begin with, a frame containing only non-projectable
+    positions (e.g. a kicker-only frame), or a `seasons=` window that
+    matches no rows at all (e.g. a pre-season call before any games in that
+    season exist).
+
+    Replaces `KeyError: "None of ['position'] are in the columns"` --
+    `pd.DataFrame([]).set_index('position')`'s genuinely correct behaviour
+    for zero input rows, but a message that names neither the real cause
+    nor which function hit it (see F8 in fix-round-1-brief.md).
+    """
+
+
 def _validate_scoring_is_simulated(weights: dict[str, float]) -> None:
     """Fail loudly if the league scores a stat this module cannot simulate.
 
@@ -521,7 +537,21 @@ def _positional_priors(subset: pd.DataFrame) -> pd.DataFrame:
     genuinely predictable) but not for rates the spec measures as
     functionally random, so a plain historical average is an equally good,
     simpler estimate of the baseline.
+
+    Raises `NoProjectableDataError` on an empty `subset` -- e.g. a kicker-
+    only `history` (nothing survives the `PROJECTABLE_POSITIONS` filter) or
+    a `seasons=` window matching no rows at all -- rather than letting
+    `pd.DataFrame([]).set_index('position')` raise its own generic,
+    uninformative `KeyError` a few lines below (see F8 in
+    fix-round-1-brief.md).
     """
+    if subset.empty:
+        raise NoProjectableDataError(
+            "no player-weeks to compute a positional prior from -- history "
+            "has no rows for a PROJECTABLE_POSITIONS position within the "
+            "requested seasons (an empty history, a kicker/DEF-only frame, "
+            "or a seasons= window with no matching rows all land here)"
+        )
     rows = []
     for position, group in subset.groupby("position"):
         rows.append({

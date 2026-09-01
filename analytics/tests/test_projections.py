@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from tt.league import LeagueConfig, load_config_from_dict, scoring_weights
-from tt.projections import project_players, season_volume
+from tt.projections import NoProjectableDataError, project_players, season_volume
 
 # Minimal league shape matching the real export (see tt.league module
 # docstring): scoring is a LIST keyed by Yahoo stat id, not display name.
@@ -334,6 +334,36 @@ def test_project_players_excludes_kickers_and_team_defenses():
     assert "KICKER" not in set(out["player_id"])
     assert "TEAMDEF" not in set(out["player_id"])
     assert set(out["position"]) <= {"QB", "RB", "WR", "TE"}
+
+
+def kicker_only_history():
+    """No PROJECTABLE_POSITIONS rows at all -- unlike
+    kicker_and_defense_history(), nothing survives the position filter, so
+    `subset` reaching `_positional_priors` is genuinely empty."""
+    rows = []
+    for season in (2024, 2025):
+        for week in range(1, 18):
+            rows.append({"player_id": "KICKER", "season": season, "week": week,
+                         "position": "K", "carries": 0, "targets": 0, "receptions": 0,
+                         "rushing_yards": 0, "receiving_yards": 0,
+                         "rushing_tds": 0.0, "receiving_tds": 0.0})
+    return pd.DataFrame(rows)
+
+
+def test_project_players_raises_a_named_error_on_a_kicker_only_frame():
+    # F8: this used to die with `KeyError: "None of ['position'] are in the
+    # columns"` -- correct that there's nothing to compute, useless as a
+    # message about WHY.
+    with pytest.raises(NoProjectableDataError):
+        project_players(kicker_only_history(), CONFIG_OBJ, seasons=(2024, 2025))
+
+
+def test_project_players_raises_a_named_error_when_no_season_matches():
+    # F8: a seasons= window matching zero rows (e.g. a pre-season call
+    # before any games in that season exist) hits the same empty-subset
+    # path as the kicker-only frame above.
+    with pytest.raises(NoProjectableDataError):
+        project_players(history(), CONFIG_OBJ, seasons=(2099,))
 
 
 def test_projectable_positions_names_the_excluded_positions_deliberately():
