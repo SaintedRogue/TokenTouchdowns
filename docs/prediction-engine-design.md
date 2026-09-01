@@ -160,7 +160,11 @@ STARTER-RELEVANT, weeks where the player scored >= 5 (n=4,454)
 ```
 
 `last_8` beats `last_3` on every metric in both pools, so it is the baseline a
-model must clear.
+model must clear. This measurement covers 2024-2025 only, with no 2023 data
+loaded to look back into, so early-2024 folds average `last_8` over fewer than
+eight trailing weeks — not a leak or a code defect, but it means the measured
+`last_8` bar is very slightly weaker than a full eight-week window on every
+fold would give.
 
 The two pools diverge for a specific, measured reason: 25.1% of player-weeks
 score under 1 point, and 17.6% score exactly zero. Most of the full pool is

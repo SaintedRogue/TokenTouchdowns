@@ -35,7 +35,8 @@ df = load_seasons("stats_player", range(2015, 2026), Path("data"))
 
 Downloads are cached to `data/` (one parquet file per season, gitignored) and
 reused on later calls; pass `force=True` to `fetch_season` to refetch a
-season. Each cached season is roughly 8 MB.
+season. Each cached season is roughly 800 KB (parquet, not the much larger
+CSV nflverse also publishes), so a full 2015-2025 cache is roughly 8 MB total.
 
 ## The one rule that matters
 
