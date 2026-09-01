@@ -21,6 +21,18 @@ ASSETS: dict[str, str] = {
 }
 
 
+# Datasets whose rows are per-week and therefore span both the regular
+# season and the postseason, tagged by a `season_type` column in
+# {"REG", "POST"}. Fantasy football is scored over the regular season only
+# (see `projections.REGULAR_SEASON_TYPE`), so a consumer MUST be able to tell
+# the two apart. If nflverse ever ships one of these assets without that
+# column, every downstream aggregate would silently start averaging over the
+# wrong population -- so this module fails loudly instead, in keeping with
+# its own "pinned rather than discovered, so a layout change fails loudly"
+# contract.
+_SEASON_TYPED_DATASETS = frozenset({"stats_player"})
+
+
 def nflverse_url(dataset: str, filename: str) -> str:
     return f"{BASE}/{dataset}/{filename}"
 
@@ -92,4 +104,12 @@ def load_seasons(
         pd.read_parquet(fetch_season(dataset, season, data_dir, fetch=fetch))
         for season in season_list
     ]
-    return pd.concat(frames, ignore_index=True)
+    out = pd.concat(frames, ignore_index=True)
+    if dataset in _SEASON_TYPED_DATASETS and "season_type" not in out.columns:
+        raise ValueError(
+            f"{dataset}: no 'season_type' column -- this asset is expected to "
+            "carry REG/POST rows and every consumer filters on it (see "
+            "projections.regular_season). Refusing to hand back a frame whose "
+            "regular-season rows cannot be told apart from postseason ones."
+        )
+    return out

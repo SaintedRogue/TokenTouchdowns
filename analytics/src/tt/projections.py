@@ -131,15 +131,31 @@ SACK_FUMBLE_STRENGTH = 600.0
 # Expected games played per season: NOT a rate over opportunities like the
 # constants above, but the same shrinkage mechanics apply directly if it's
 # framed as one -- "games per season", shrunk toward a positional prior, with
-# each player's own recency-weighted total season-count standing in for the
-# denominator (see season_volume's `_combine`). A single unit here is worth
-# one full season of recency weight (season weights run 1, 3, 9, ... under
-# the default scheme), so GAMES_STRENGTH=4.0 means roughly "trust a lone
-# recent season a bit, but a lone OLD season (weight 1) gets pulled hard
-# toward the prior." Kept deliberately small relative to the
-# opportunity-count strengths above because the quantity it's shrinking is
-# itself small (single digits to 17), not hundreds of carries.
-GAMES_STRENGTH = 4.0
+# each player's own recency-weighted season count standing in for the
+# denominator (see `_games_evidence` and season_volume's `_combine`).
+#
+# A single unit here is worth ONE MOST-RECENT SEASON of evidence. That is now
+# literally true, because `_games_evidence` normalises the recency weights to
+# effective seasons; it was previously FALSE for any window other than two
+# seasons, and that discrepancy was the bug. The raw weight total grows
+# geometrically with the number of seasons a caller lists (2 -> 4, 3 -> 13,
+# 5 -> 121, 7 -> 1093), so against a fixed strength the prior's share of the
+# estimate slid from 50% down to 0.4% purely from how much ancient,
+# near-zero-weight history the caller happened to pass. Josh Allen projected
+# 12.18 games on `seasons=(2024, 2025)` and 16.05 on `(2019..2025)` with his
+# weighted per-game volume identical to two decimal places.
+#
+# The VALUE is the old 4.0 restated in the new units, not a re-tuning: the
+# normaliser for a two-season window is the maximum weight, 3, so 4.0/3
+# reproduces the previously-calibrated two-season behaviour EXACTLY (pinned
+# by test_two_season_proj_games_is_unchanged_by_the_evidence_normalisation)
+# while removing the window dependence everywhere else. In effective-seasons
+# terms it reads as: the positional prior is worth about one and a third
+# recent seasons of a player's own observed availability -- so a lone recent
+# season is trusted somewhat, and a lone OLD season (normalised weight 1/3 or
+# less) is pulled hard toward the prior, which is what the original comment
+# claimed all along.
+GAMES_STRENGTH = 4.0 / 3.0
 
 # The real NFL regular-season length. proj_games can never legitimately
 # exceed this -- it caps both a shrunk estimate that lands above it (rare)
@@ -190,6 +206,25 @@ _SIMULATED_COMPONENTS = frozenset({
     "passing_yards", "passing_tds", "passing_interceptions", "sack_fumbles_lost",
 })
 
+# nflverse's `stats_player_week_{season}.parquet` -- the asset `ingest.py`
+# pins and this module's real caller loads -- carries BOTH regular-season and
+# postseason rows, tagged by `season_type` in {"REG", "POST"} at weeks 1-18
+# and 19-22 respectively (882 of 19,422 rows in 2025). Fantasy football is
+# scored over the regular season only, so every postseason row is a row from
+# a different population than the one being projected, and counting them:
+#
+#   - inflates `games` (a playoff run reads as a 21-game season, which
+#     SEASON_LENGTH then clamps back to 17 -- CONCEALING the inflation
+#     rather than preventing it),
+#   - blends January usage into a regular-season per-game rate, and
+#   - contaminates the positional efficiency/TD-rate priors.
+#
+# Critically, the bias is not noise: only good teams play in January, so the
+# inflation is CORRELATED WITH TEAM QUALITY and therefore looks exactly like
+# signal (measured: Josh Allen +16.9% projected points, Stafford +16.6%,
+# Chase +0.8% -- enough to reorder the delivered draft board).
+REGULAR_SEASON_TYPE = "REG"
+
 _EMPTY_PRIOR = pd.Series({
     "rush_eff": 0.0, "rush_td_rate": 0.0, "rush_fumble_rate": 0.0,
     "rec_eff": 0.0, "rec_td_rate": 0.0, "catch_rate": 0.0, "rec_fumble_rate": 0.0,
@@ -222,6 +257,30 @@ def _validate_scoring_is_simulated(weights: dict[str, float]) -> None:
         )
 
 
+def regular_season(history: pd.DataFrame) -> pd.DataFrame:
+    """`history` restricted to regular-season rows -- see
+    `REGULAR_SEASON_TYPE` for why postseason rows are a different population.
+
+    Applied at the TOP of both public entry points (`season_volume` and
+    `project_players`), before any aggregation, so no caller can reach an
+    aggregate computed over the wrong rows. Idempotent, so the fact that
+    `project_players` both filters and calls `season_volume` (which filters
+    again) costs nothing.
+
+    A frame with NO `season_type` column at all passes through unchanged.
+    That is not an assumption about unknown data: it is the documented
+    contract for a hand-built frame that never had postseason rows to begin
+    with (every fixture in this module's test suite, and any caller
+    assembling its own history). The place where a MISSING column would be
+    alarming is ingestion -- an nflverse asset that stopped carrying
+    `season_type` would mean the release layout changed underneath us -- and
+    that is exactly where it raises instead; see `ingest.load_seasons`.
+    """
+    if "season_type" not in history.columns:
+        return history
+    return history[history["season_type"] == REGULAR_SEASON_TYPE]
+
+
 def _with_required_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Every stat column this module reads, defaulting missing ones to zero.
 
@@ -248,6 +307,41 @@ def _default_recency_weights(seasons: Iterable[int]) -> dict[int, float]:
     """
     ordered = sorted(set(seasons))
     return {season: 3.0 ** i for i, season in enumerate(ordered)}
+
+
+def _weight_scale(recency_weights: dict[int, float]) -> float:
+    """The normaliser that turns raw recency weights into effective seasons:
+    the weight of the MOST RECENT season in the window.
+
+    Anchoring on the maximum (rather than, say, the sum) is what makes the
+    result scale-invariant. Under a geometric scheme the weight of a season
+    `k` years before the newest is `ratio ** -k` once divided by the maximum,
+    which depends only on how old that season is -- never on how many even
+    older seasons the caller also listed. Falls back to 1.0 when no weight is
+    positive, so the caller's own units pass through untouched rather than
+    dividing by zero.
+    """
+    scale = max(recency_weights.values(), default=0.0)
+    return float(scale) if scale > 0 else 1.0
+
+
+def _games_evidence(
+    season_weights: Iterable[float], recency_weights: dict[int, float]
+) -> float:
+    """How many EFFECTIVE SEASONS of availability evidence a player carries.
+
+    `season_weights` are that one player's own per-season recency weights.
+    Dividing their total by `_weight_scale` expresses the result in units of
+    "most-recent seasons", which is the unit `GAMES_STRENGTH` is defined in
+    (see that constant). A player present in every season of the window has
+    an effective sample size in [1, ratio/(ratio-1)) -- bounded at 1.5 under
+    the default 3x scheme no matter how deep the history goes -- because a
+    season the weighting scheme has already declared near-worthless for
+    VOLUME cannot simultaneously count as strong evidence of AVAILABILITY.
+    The raw total, by contrast, grows without limit (4, 13, 121, 1093, ...),
+    which is what made the prior's influence depend on the caller's window.
+    """
+    return float(sum(season_weights)) / _weight_scale(recency_weights)
 
 
 def season_volume(
@@ -289,6 +383,7 @@ def season_volume(
         "carries_per_game", "targets_per_game", "attempts_per_game",
         "games", "proj_games",
     ]
+    history = regular_season(history)
     history = _with_required_columns(history)
     subset = history[history["season"].isin(seasons)]
     if subset.empty:
@@ -327,8 +422,14 @@ def season_volume(
             carries = float((group["carries"] * group["weight"]).sum() / total_weight)
             targets = float((group["targets"] * group["weight"]).sum() / total_weight)
             attempts = float((group["attempts"] * group["weight"]).sum() / total_weight)
-            weighted_games = float((group["games"] * group["weight"]).sum())
-            games_evidence = float(total_weight)
+            # Numerator and evidence are normalised by the SAME scale, so
+            # the blend below is a weighted average in effective-season
+            # units -- the units GAMES_STRENGTH is defined in. Normalising
+            # only one of the two would rescale the estimate itself rather
+            # than the prior's influence on it.
+            scale = _weight_scale(recency_weights)
+            weighted_games = float((group["games"] * group["weight"]).sum()) / scale
+            games_evidence = _games_evidence(group["weight"], recency_weights)
         else:
             # No season this player appears in carries positive recency
             # weight (e.g. only seasons outside an explicit recency_weights
@@ -472,6 +573,7 @@ def project_players(
     weights = scoring_weights(config)
     _validate_scoring_is_simulated(weights)
 
+    history = regular_season(history)
     history = _with_required_columns(history)
     history = history[history["position"].isin(PROJECTABLE_POSITIONS)]
     names = _resolve_names(history)
@@ -585,6 +687,19 @@ def project_players(
             "passing_yards": pass_yards, "passing_tds": pass_tds,
             "passing_interceptions": interceptions, "sack_fumbles_lost": sack_fumbles,
         }
+        # `_SIMULATED_COMPONENTS` is a promise about this dict; keeping the
+        # two in lockstep here means a component added to one and forgotten
+        # in the other fails immediately instead of becoming a silently
+        # unscored stat -- the same failure mode the constant exists to
+        # prevent. This is a structural check only: that a key holds the
+        # RIGHT array is not checkable here at all, and is pinned instead by
+        # test_each_scoring_component_actually_reaches_proj_points.
+        if set(components) != _SIMULATED_COMPONENTS:
+            raise AssertionError(
+                "components and _SIMULATED_COMPONENTS have drifted apart: "
+                f"{sorted(set(components) ^ _SIMULATED_COMPONENTS)}"
+            )
+
         points = np.zeros(n)
         for stat, weight in weights.items():
             points = points + components[stat] * weight

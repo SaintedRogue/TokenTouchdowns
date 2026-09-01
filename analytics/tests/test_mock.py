@@ -432,3 +432,102 @@ def test_optimal_lineup_score_has_a_usable_default_when_no_config_is_given():
     roster = pd.DataFrame([{"player_id": "x", "position": "RB", "proj_points": 12.0}])
     score = optimal_lineup_score()(roster)
     assert score >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# F10: `trials` must actually be trials -- a deterministic strategy has to see
+# a DIFFERENT draft environment on every one of them.
+# ---------------------------------------------------------------------------
+
+
+def test_compare_strategies_gives_a_deterministic_strategy_real_trial_variance():
+    """THE F10 guard. `strategy_vor` is a pure function of the board: it never
+    reads `_effective_adp`, so under a leaguewide-symmetric simulation every
+    opposing team also ignored the per-trial noise and every one of 50 trials
+    replayed a byte-identical draft. Task 7's real-data run duly reported
+    `std_score = 0.00` over 50 trials for both `vor` and `vor_survival` --
+    which means the headline comparison (adp 1199.18 / vor 1290.53 /
+    vor_survival 1130.65) was three SINGLE samples, with no way to tell any
+    difference from noise because no noise was ever generated.
+
+    `compare_strategies` now drafts the opposing nine teams off the noisy ADP
+    market, so trial `i`'s board differs from trial `j`'s and a deterministic
+    strategy faces a genuinely different draft each time.
+    """
+    out = compare_strategies(
+        board(), {"vor": strategy_vor}, trials=6, teams=10, my_slot=3, seed=11,
+    ).set_index("strategy")
+    assert out.loc["vor", "std_score"] > 0.0
+    assert out.loc["vor", "min_score"] < out.loc["vor", "max_score"]
+
+
+def test_compare_strategies_reports_the_uncertainty_of_its_own_mean():
+    """A mean with no stated uncertainty is exactly how an unpowered
+    difference gets read as a real one -- the failure Task 7's table walked
+    into. `sem_score` and the 95% interval must be present, consistent with
+    `std_score`, and must bracket the mean."""
+    out = compare_strategies(
+        board(), {"vor": strategy_vor}, trials=6, teams=10, my_slot=3, seed=11,
+    ).iloc[0]
+    # Sample standard error, from the sample (ddof=1) standard deviation.
+    trials = out["trials"]
+    assert out["sem_score"] == pytest.approx(
+        out["std_score"] * (trials / (trials - 1)) ** 0.5 / trials**0.5
+    )
+    assert out["ci95_low"] == pytest.approx(out["mean_score"] - 1.96 * out["sem_score"])
+    assert out["ci95_high"] == pytest.approx(out["mean_score"] + 1.96 * out["sem_score"])
+    assert out["ci95_low"] < out["mean_score"] < out["ci95_high"]
+
+
+def test_compare_strategies_varies_the_opponents_not_just_my_own_picks():
+    """Pins the MECHANISM, not just the symptom. The variance has to come from
+    the opposing teams responding to the per-trial seed; a strategy that is
+    itself deterministic must still be handed different boards.
+
+    Run with a spy strategy that records the board it is shown at its very
+    first pick: across trials those boards must differ. (At `my_slot=3` the
+    first pick already follows three opponent picks, so an unvaried
+    environment would show an identical board every time.)
+    """
+    seen: list[tuple] = []
+
+    def spy(board_, roster, pick, next_pick, teams):
+        if not roster:
+            seen.append(tuple(board_["player_id"]))
+        return strategy_vor(board_, roster, pick, next_pick, teams)
+
+    compare_strategies(board(), {"spy": spy}, trials=5, teams=10, my_slot=3, seed=3)
+    assert len(seen) == 5
+    assert len(set(seen)) > 1, "every trial showed my_slot the identical board"
+
+
+def test_simulate_draft_can_give_the_opponents_their_own_strategy():
+    """`opponent_strategy` is what lets `compare_strategies` ask "how does MY
+    policy do against a market", while `simulate_draft`'s own default stays
+    the symmetric "if the whole league drafted this way" question its
+    docstring describes."""
+    calls = {"mine": 0, "theirs": 0}
+
+    def mine(board_, roster, pick, next_pick, teams):
+        calls["mine"] += 1
+        return strategy_vor(board_, roster, pick, next_pick, teams)
+
+    def theirs(board_, roster, pick, next_pick, teams):
+        calls["theirs"] += 1
+        return strategy_adp(board_, roster, pick, next_pick, teams)
+
+    simulate_draft(board(), teams=10, rounds=3, my_slot=3, strategy=mine,
+                   seed=1, opponent_strategy=theirs)
+    assert calls["mine"] == 3            # my three picks
+    assert calls["theirs"] == 27         # the other nine teams' three picks each
+
+
+def test_simulate_draft_defaults_to_one_strategy_for_the_whole_league():
+    calls = {"n": 0}
+
+    def counting(board_, roster, pick, next_pick, teams):
+        calls["n"] += 1
+        return strategy_adp(board_, roster, pick, next_pick, teams)
+
+    simulate_draft(board(), teams=10, rounds=3, my_slot=3, strategy=counting, seed=1)
+    assert calls["n"] == 30

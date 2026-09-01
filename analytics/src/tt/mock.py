@@ -292,6 +292,7 @@ def simulate_draft(
     seed: int,
     adp_noise: float = ADP_NOISE_DEFAULT,
     return_all: bool = False,
+    opponent_strategy: Strategy | None = None,
 ) -> pd.DataFrame:
     """Run one full snake draft; return `my_slot`'s drafted roster (one row
     per round, in the order it was drafted) or, with `return_all=True`,
@@ -303,16 +304,23 @@ def simulate_draft(
     (0..teams-1); an out-of-range value raises immediately rather than
     silently returning an empty roster.
 
-    ALL `teams` teams draft under the SAME `strategy` in a single call --
-    there is no separate "the market" vs. "my" policy. This is what makes
-    `compare_strategies` a fair, symmetric question: "if the whole league
-    drafted this way, how well would `my_slot`'s resulting roster score,"
-    compared across different leaguewide policies -- not "how well do I do
-    against a fixed, possibly mismatched, opponent model." A caller that
-    wants asymmetric opponents can still do so: nothing stops a `strategy`
-    closure from behaving differently once `len(roster)` or the pick
-    context reveals which team it's being asked to act for, but this
-    module does not build that in.
+    By DEFAULT (`opponent_strategy=None`) all `teams` teams draft under the
+    SAME `strategy`, with no separate "the market" vs. "my" policy. That
+    asks the symmetric question "if the whole league drafted this way, how
+    well would `my_slot`'s resulting roster score."
+
+    `opponent_strategy`, when given, is used for every slot EXCEPT
+    `my_slot`, which asks the other question: "how does MY policy do against
+    a field that drafts some other way." `compare_strategies` needs this
+    one, and not for realism alone -- under the symmetric default a
+    deterministic strategy (`strategy_vor` reads only `vor`; nothing in it
+    or in its nine identical opponents ever touches `_effective_adp`)
+    reproduces a BYTE-IDENTICAL draft for every seed, so `trials` silently
+    collapses to a single repeated sample. Task 7's real-data run measured
+    exactly that: `std_score = 0.00` across 50 trials. Giving the opponents
+    a market-following policy is what makes the per-trial seed reach the
+    simulation at all, and therefore what makes a mock draft a simulation
+    rather than a replay.
 
     Determinism: the input `board` is copied, never mutated (see
     `test_simulate_draft_does_not_mutate_the_input_board`). The only
@@ -350,7 +358,8 @@ def simulate_draft(
         pick_number = i + 1
         next_pick_number = _next_pick_number(teams, round_index, slot)
 
-        chosen = strategy(available, rosters[slot], pick_number, next_pick_number, teams)
+        acting = strategy if (opponent_strategy is None or slot == my_slot) else opponent_strategy
+        chosen = acting(available, rosters[slot], pick_number, next_pick_number, teams)
         chosen_id = chosen.get("player_id")
         if chosen_id is None or chosen_id not in set(available["player_id"]):
             raise ValueError(
@@ -421,10 +430,37 @@ def compare_strategies(
     adp_noise: float = ADP_NOISE_DEFAULT,
     score_roster: Callable[[pd.DataFrame], float] | None = None,
     config: LeagueConfig | None = None,
+    opponent_strategy: Strategy | None = None,
 ) -> pd.DataFrame:
     """Run `trials` simulated drafts per strategy and score each resulting
     `my_slot` roster, returning one summary row per strategy: `strategy`,
-    `trials`, `mean_score`, `std_score`, `min_score`, `max_score`.
+    `trials`, `mean_score`, `std_score`, `sem_score`, `ci95_low`,
+    `ci95_high`, `min_score`, `max_score`.
+
+    TRIALS MUST ACTUALLY VARY (read before changing `opponent_strategy`).
+    The strategy under test is evaluated against a FIELD of opponents, which
+    defaults to `strategy_adp` -- the noisy consensus market. This is not
+    only the more realistic question; it is what makes `trials` mean
+    anything. `strategy_vor` and `strategy_vor_survival` are deterministic
+    functions of the board, so if the opposing teams also ignored the
+    per-trial ADP noise draw (which they did, under the old leaguewide-
+    symmetric default) every trial replayed the identical draft. Task 7
+    measured `std_score = 0.00` over 50 trials for both, meaning its
+    headline comparison rested on three single samples with no way to
+    separate a real difference from noise. Passing `opponent_strategy` a
+    strategy that ignores `_effective_adp` reintroduces exactly that defect;
+    pass `opponent_strategy=None` only when deliberately asking the
+    symmetric "if the whole league drafted this way" question, and expect
+    zero variance from a deterministic strategy when you do.
+
+    UNCERTAINTY IS REPORTED, NOT LEFT TO THE READER. `sem_score` is the
+    standard error of `mean_score` (the sample standard deviation, ddof=1,
+    over sqrt(trials)) and `ci95_low`/`ci95_high` are the normal-
+    approximation 95% interval around the mean. A difference between two
+    strategies whose intervals overlap is not a result, and reporting the
+    mean alone is precisely how Task 7's unpowered table came to look like
+    one. With `trials == 1` there is no spread to estimate, so `sem_score`
+    and the interval bounds are NaN rather than a falsely precise 0.
 
     SCORING IS PLUGGABLE -- read this before changing `score_roster`'s
     default. `score_roster` defaults to `optimal_lineup_score(config)`,
@@ -459,19 +495,34 @@ def compare_strategies(
     defaults matching `simulate_draft`'s own).
     """
     scorer = score_roster if score_roster is not None else optimal_lineup_score(config)
+    # `strategy_adp` is the default FIELD, not a default for the strategy
+    # under test -- see this function's docstring for why an opponent model
+    # that responds to the per-trial noise is what makes `trials` real.
+    opponents = strategy_adp if opponent_strategy is None else opponent_strategy
     trial_seeds = np.random.default_rng(seed).integers(0, 2**31 - 1, size=trials).tolist()
 
     rows = []
     for name, strategy in strategies.items():
         scores = [
-            scorer(simulate_draft(board, teams, rounds, my_slot, strategy, seed=trial_seed, adp_noise=adp_noise))
+            scorer(simulate_draft(
+                board, teams, rounds, my_slot, strategy, seed=trial_seed,
+                adp_noise=adp_noise, opponent_strategy=opponents,
+            ))
             for trial_seed in trial_seeds
         ]
+        # ddof=1: these trials are a SAMPLE of possible draft nights, not the
+        # population of them, and the standard error of the mean is what the
+        # reader needs to judge whether a gap between two strategies is real.
+        sem = float(np.std(scores, ddof=1) / np.sqrt(trials)) if trials > 1 else float("nan")
+        mean = float(np.mean(scores))
         rows.append({
             "strategy": name,
             "trials": trials,
-            "mean_score": float(np.mean(scores)),
+            "mean_score": mean,
             "std_score": float(np.std(scores)),
+            "sem_score": sem,
+            "ci95_low": mean - 1.96 * sem,
+            "ci95_high": mean + 1.96 * sem,
             "min_score": float(np.min(scores)),
             "max_score": float(np.max(scores)),
         })

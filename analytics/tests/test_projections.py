@@ -8,7 +8,7 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
-from tt.league import LeagueConfig, load_config_from_dict
+from tt.league import LeagueConfig, load_config_from_dict, scoring_weights
 from tt.projections import project_players, season_volume
 
 # Minimal league shape matching the real export (see tt.league module
@@ -368,3 +368,333 @@ def test_project_players_falls_back_to_player_id_when_no_name_column_exists():
     names = out.set_index("player_id")["name"]
     assert names["A"] == "A"
     assert names["B"] == "B"
+
+
+# ---------------------------------------------------------------------------
+# F1: postseason rows must never be counted as regular-season games.
+# ---------------------------------------------------------------------------
+
+
+def history_with_postseason():
+    """The real nflverse `stats_player_week_{season}.parquet` shape: a
+    `season_type` column in {REG, POST}, with POST rows at weeks 19-22.
+
+    PLAYOFF is a player whose regular season is a flat 10 carries a game for
+    all 17 weeks, and who then plays four postseason games at 30 carries. Only
+    the 17 REG rows describe a regular-season fantasy player; the four POST
+    rows both triple his apparent per-game volume and push his games-played to
+    21 (which `SEASON_LENGTH` would then silently clamp to 17, hiding the
+    inflation rather than preventing it). Because only good teams play in
+    January, this bias is correlated with team quality -- it looks exactly
+    like signal.
+    """
+    rows = []
+    for week in range(1, 18):
+        rows.append({"player_id": "PLAYOFF", "season": 2025, "week": week,
+                     "season_type": "REG", "position": "RB", "carries": 10,
+                     "targets": 0, "receptions": 0, "rushing_yards": 40,
+                     "receiving_yards": 0, "rushing_tds": 0.0, "receiving_tds": 0.0})
+    for week in range(19, 23):
+        rows.append({"player_id": "PLAYOFF", "season": 2025, "week": week,
+                     "season_type": "POST", "position": "RB", "carries": 30,
+                     "targets": 0, "receptions": 0, "rushing_yards": 120,
+                     "receiving_yards": 0, "rushing_tds": 0.0, "receiving_tds": 0.0})
+    return pd.DataFrame(rows)
+
+
+def test_season_volume_excludes_postseason_rows_from_per_game_volume():
+    # LEVEL, not direction: the REG-only per-game rate is exactly 10.0.
+    # Including the four 30-carry POST games gives 13.8.
+    out = season_volume(history_with_postseason(), seasons=(2025,))
+    assert out.set_index("player_id").loc["PLAYOFF", "carries_per_game"] == pytest.approx(10.0)
+
+
+def test_season_volume_excludes_postseason_rows_from_games_played():
+    # `games` is the raw observed count feeding the expected-games shrinkage.
+    # 17 regular-season games, not 21 playoff-inflated ones (which
+    # SEASON_LENGTH would clamp back to 17, concealing the inflation).
+    out = season_volume(history_with_postseason(), seasons=(2025,))
+    assert out.set_index("player_id").loc["PLAYOFF", "games"] == 17
+
+
+def test_project_players_excludes_postseason_rows_from_efficiency_priors():
+    # The postseason rows here are MORE efficient (4.0 yds/carry both, but
+    # triple the volume), so leaving them in inflates the projection. Pinned
+    # against the identical history with the POST rows physically removed:
+    # filtering must be exactly equivalent to never having been given them.
+    full = history_with_postseason()
+    reg_only = full[full["season_type"] == "REG"].drop(columns=["season_type"])
+    with_post = project_players(full, CONFIG_OBJ, seasons=(2025,), seed=5)
+    without = project_players(reg_only, CONFIG_OBJ, seasons=(2025,), seed=5)
+    assert with_post.set_index("player_id").loc["PLAYOFF", "proj_points"] == pytest.approx(
+        without.set_index("player_id").loc["PLAYOFF", "proj_points"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# F2: every scoring component must be PINNED, not merely present as a dict key.
+# ---------------------------------------------------------------------------
+
+
+def single_stream_history():
+    """One player per volume stream, each with volume in EXACTLY one stream.
+
+    This isolation is the whole point. `_validate_scoring_is_simulated` can
+    only check that `components` HAS a key -- never that the key holds the
+    right array -- so both `"passing_yards": np.zeros(n)` and a mis-key like
+    `"passing_yards": rush_yards` pass it. A fixture whose players accumulate
+    several streams at once cannot tell those apart either: a mis-keyed
+    passing weight would still move a QB who also runs.
+
+    PASSER throws and does nothing else (zero carries, zero targets), RUSHER
+    only runs, RECEIVER only catches -- so for each of the eleven scored
+    components there is exactly one player for whom that component is the
+    ONLY thing its array could legitimately be. Each is the sole occupant of
+    their position, so the positional prior equals their own observed rate
+    and every simulated rate is meaningfully positive.
+    """
+    rows = []
+    for season in (2024, 2025):
+        for week in range(1, 18):
+            rows.append({"player_id": "PASSER", "season": season, "week": week,
+                         "position": "QB",
+                         "carries": 0, "rushing_yards": 0, "rushing_tds": 0.0,
+                         "rushing_fumbles_lost": 0.0,
+                         "targets": 0, "receptions": 0, "receiving_yards": 0,
+                         "receiving_tds": 0.0, "receiving_fumbles_lost": 0.0,
+                         "attempts": 35, "passing_yards": 260, "passing_tds": 2.0,
+                         "passing_interceptions": 0.8, "sack_fumbles_lost": 0.3})
+            rows.append({"player_id": "RUSHER", "season": season, "week": week,
+                         "position": "RB",
+                         "carries": 20, "rushing_yards": 90, "rushing_tds": 0.6,
+                         "rushing_fumbles_lost": 0.3,
+                         "targets": 0, "receptions": 0, "receiving_yards": 0,
+                         "receiving_tds": 0.0, "receiving_fumbles_lost": 0.0,
+                         "attempts": 0, "passing_yards": 0, "passing_tds": 0.0,
+                         "passing_interceptions": 0.0, "sack_fumbles_lost": 0.0})
+            rows.append({"player_id": "RECEIVER", "season": season, "week": week,
+                         "position": "WR",
+                         "carries": 0, "rushing_yards": 0, "rushing_tds": 0.0,
+                         "rushing_fumbles_lost": 0.0,
+                         "targets": 10, "receptions": 7, "receiving_yards": 95,
+                         "receiving_tds": 0.6, "receiving_fumbles_lost": 0.3,
+                         "attempts": 0, "passing_yards": 0, "passing_tds": 0.0,
+                         "passing_interceptions": 0.0, "sack_fumbles_lost": 0.0})
+    return pd.DataFrame(rows)
+
+
+# Which single-stream player accumulates each scored component.
+COMPONENT_OWNER = {
+    "rushing_yards": "RUSHER", "rushing_tds": "RUSHER", "rushing_fumbles_lost": "RUSHER",
+    "receiving_yards": "RECEIVER", "receiving_tds": "RECEIVER", "receptions": "RECEIVER",
+    "receiving_fumbles_lost": "RECEIVER",
+    "passing_yards": "PASSER", "passing_tds": "PASSER",
+    "passing_interceptions": "PASSER", "sack_fumbles_lost": "PASSER",
+}
+
+
+def _project_with_weights(weights, monkeypatch):
+    """Run the real `project_players` path with `scoring_weights` replaced.
+
+    Patching `scoring_weights` (the same technique
+    `test_project_players_raises_when_league_scores_a_stat_it_cannot_simulate`
+    already uses) is what lets a test vary ONE component's weight in
+    isolation: the league export keys scoring by Yahoo stat id, and id 18
+    alone maps to all three fumble columns, so no config edit can isolate
+    `rushing_fumbles_lost` from `sack_fumbles_lost`. The fixture's
+    single-stream players supply that isolation instead.
+    """
+    import tt.projections as projections_module
+    monkeypatch.setattr(projections_module, "scoring_weights", lambda config: dict(weights))
+    return project_players(
+        single_stream_history(), CONFIG_OBJ, seasons=(2024, 2025), n=400, seed=17,
+    ).set_index("player_id")["proj_points"]
+
+
+BASE_WEIGHTS = scoring_weights(CONFIG_OBJ)
+
+
+def test_every_simulated_component_is_scored_by_the_league_weights():
+    # Guards the matrix below against silently shrinking: if a component is
+    # ever dropped from `scoring_weights`' reach, the parametrised test would
+    # simply stop covering it and still report green.
+    from tt.projections import _SIMULATED_COMPONENTS
+    assert set(BASE_WEIGHTS) == set(_SIMULATED_COMPONENTS)
+    assert len(BASE_WEIGHTS) == 11
+
+
+@pytest.mark.parametrize("stat", sorted(BASE_WEIGHTS))
+def test_each_scoring_component_actually_reaches_proj_points(stat, monkeypatch):
+    """THE guard for the fumbles bug class, applied to all eleven components.
+
+    `proj_points` is by construction LINEAR in each scoring weight
+    (`points = sum(components[stat] * weight[stat])`), and every stream's RNG
+    seed is derived from the player id alone, so the simulated component
+    arrays are byte-identical across these three runs. That gives an exact
+    algebraic identity to assert rather than a direction:
+
+        proj(weight doubled) - proj(base) == proj(base) - proj(weight zeroed)
+
+    and both differences equal `weight[stat] * mean(components[stat])`. If
+    that component were zeroed (`np.zeros(n)`) or mis-keyed to another
+    stream's array, its owner -- who has volume in NO other stream -- would
+    see a difference of exactly 0, which the magnitude assertion rejects. The
+    sign assertion additionally pins that a NEGATIVE weight (interceptions,
+    fumbles lost) subtracts: removing a penalty must RAISE the projection.
+    """
+    owner = COMPONENT_OWNER[stat]
+    weight = BASE_WEIGHTS[stat]
+
+    base = _project_with_weights(BASE_WEIGHTS, monkeypatch)[owner]
+    zeroed = _project_with_weights({**BASE_WEIGHTS, stat: 0.0}, monkeypatch)[owner]
+    doubled = _project_with_weights({**BASE_WEIGHTS, stat: weight * 2.0}, monkeypatch)[owner]
+
+    contribution = base - zeroed
+    # `summarise` rounds proj_points to 2 dp, so the identity holds to within
+    # the rounding of the three values it is computed from, not to machine
+    # precision.
+    assert doubled - base == pytest.approx(contribution, abs=0.05)
+    assert abs(contribution) > 0.5, (
+        f"{stat!r} contributes nothing to {owner}'s projection -- its entry in "
+        "`components` is zeroed, mis-keyed, or never summed"
+    )
+    assert (contribution > 0) == (weight > 0), (
+        f"{stat!r} moves {owner}'s projection in the wrong direction for a "
+        f"weight of {weight}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F3: expected-games shrinkage must not depend on how many seasons the caller
+# happened to pass.
+# ---------------------------------------------------------------------------
+
+
+def seven_season_history():
+    """One full-time IRONMAN (17 games in every season 2019-2025) alongside a
+    realistic depth chart of short-stint backups in every season.
+
+    The backups are what give the positional games prior a stable, modest
+    value in EVERY window, so the only thing varying between a 2-season and a
+    7-season call is the arithmetic under test -- not the prior it regresses
+    toward, and not IRONMAN's own weighted mean games (a flat 17 either way).
+    """
+    RATE = dict(attempts=30, passing_yards=220, passing_tds=1.5,
+                passing_interceptions=0.6, carries=3, rushing_yards=10,
+                rushing_tds=0.0, targets=0, receptions=0, receiving_yards=0,
+                receiving_tds=0.0)
+    rows = []
+    for season in range(2019, 2026):
+        for week in range(1, 18):
+            rows.append({"player_id": "IRONMAN", "season": season, "week": week,
+                         "position": "QB", **RATE})
+        for n_games, tag in [(2, "a"), (3, "b"), (1, "c"), (5, "d")]:
+            for week in range(1, n_games + 1):
+                rows.append({"player_id": f"BACKUP{tag}{season}", "season": season,
+                             "week": week, "position": "QB", **RATE})
+    return pd.DataFrame(rows)
+
+
+def test_proj_games_does_not_depend_on_how_many_seasons_were_supplied():
+    """THE F3 guard. `games_evidence` was the raw geometric sum of the recency
+    weights (2 seasons -> 4, 7 seasons -> 1093) weighed against a fixed
+    GAMES_STRENGTH, so the positional prior's share of the estimate slid from
+    50% to 0.4% purely from how much ancient, near-zero-weight history the
+    caller happened to include. Measured on real data, Josh Allen projected
+    12.18 games on a 2-season window and 16.05 on a 7-season one -- a 32%
+    swing in proj_points with his weighted per-game volume identical to 2 dp,
+    and non-uniform across players, so it moved the ranking too.
+
+    Normalised evidence expresses EFFECTIVE SEASONS instead, which is bounded
+    regardless of window length, so the same player must land in the same
+    place.
+    """
+    history = seven_season_history()
+    two = season_volume(history, seasons=(2024, 2025))
+    seven = season_volume(history, seasons=tuple(range(2019, 2026)))
+    narrow = two.set_index("player_id").loc["IRONMAN", "proj_games"]
+    wide = seven.set_index("player_id").loc["IRONMAN", "proj_games"]
+    assert narrow == pytest.approx(wide, abs=0.5), (
+        f"proj_games moved {abs(wide - narrow):.2f} games purely from widening "
+        "the seasons window"
+    )
+
+
+def test_games_evidence_is_bounded_effective_seasons_not_a_geometric_total():
+    """Pins the mechanism, not just its symptom. Under the default 3x recency
+    scheme the normalised weights are 1, 1/3, 1/9, ... so a player present in
+    every season of ANY window has an effective sample size in [1, 1.5) --
+    bounded -- whereas the raw geometric sum grows without limit (4, 13, 121,
+    1093, ...). A regression to the raw sum makes this run away."""
+    from tt.projections import _games_evidence, _default_recency_weights
+
+    for length in (2, 3, 5, 7, 12):
+        seasons = tuple(range(2026 - length, 2026))
+        weights = _default_recency_weights(seasons)
+        evidence = _games_evidence(list(weights.values()), weights)
+        assert 1.0 <= evidence < 1.5, f"{length} seasons gave evidence {evidence}"
+
+
+def test_a_low_evidence_player_is_pulled_toward_the_positional_games_prior():
+    """GAMES_STRENGTH itself must be pinned: the reviewer found the Easton
+    Stick regression test stays green with `GAMES_STRENGTH = 0.0`, i.e. with
+    the shrinkage the whole fix is about entirely disabled.
+
+    OLD's only evidence is a single 5-game season two years back. His raw
+    weighted mean is 5.0 games; the positional prior (a depth chart full of
+    short-stint backups plus one ironman) is well below 17. Shrinkage must
+    leave him STRICTLY BETWEEN the two: equal to 5.0 means no shrinkage at
+    all (strength 0), equal to the prior means his own history was discarded
+    (infinite strength). Both degenerate ends are excluded by construction.
+    """
+    from tt.projections import GAMES_STRENGTH, season_volume as sv
+    history = easton_stick_shape_history()
+    out = sv(history, seasons=(2023, 2024, 2025)).set_index("player_id")
+
+    # The positional prior is the unweighted mean games across every
+    # player-season at the position, recomputed here from the fixture itself
+    # rather than hardcoded, so the test tracks the fixture.
+    reg = history[history["season"].isin((2023, 2024, 2025))]
+    prior = reg.groupby(["player_id", "season"])["week"].count().mean()
+
+    old = out.loc["OLD", "proj_games"]
+
+    # LEVEL, restated independently of the implementation. OLD's only season
+    # is 2023, whose recency weight is 1 against a most-recent-season weight
+    # of 9, so his effective evidence is 1/9 of a season and his normalised
+    # weighted games are 5/9. The documented blend is then
+    # (weighted + prior * strength) / (evidence + strength).
+    evidence = 1.0 / 9.0
+    expected = (5.0 * evidence + prior * GAMES_STRENGTH) / (evidence + GAMES_STRENGTH)
+    assert old == pytest.approx(expected, abs=1e-9)
+
+    # And the two degenerate ends are excluded by a real margin, not by a
+    # float epsilon: GAMES_STRENGTH = 0.0 lands exactly on 5.0, an infinite
+    # strength lands exactly on the prior.
+    assert old > 5.0 + 1.0
+    assert old < prior
+
+
+def test_two_season_proj_games_is_unchanged_by_the_evidence_normalisation():
+    """The default call is a 2-season window, and the normalisation is a pure
+    change of UNITS there: dividing the evidence by the maximum recency weight
+    (3, for two seasons) and dividing GAMES_STRENGTH by the same 3 leaves the
+    blend algebraically identical. This pins that the fix removed the window
+    dependence WITHOUT quietly re-tuning the default behaviour it was already
+    calibrated for -- the hand-computed value below is the pre-fix output.
+    """
+    from tt.projections import GAMES_STRENGTH
+    out = season_volume(easton_stick_shape_history(), seasons=(2024, 2025))
+    starter = out.set_index("player_id").loc["STARTER", "proj_games"]
+
+    # Hand-computed against the OLD (pre-normalisation) arithmetic:
+    # weights 1 (2024) and 3 (2025); STARTER plays 17 in both, so
+    # weighted_games = 1*17 + 3*17 = 68 and raw evidence = 4.
+    # prior = mean games per player-season at QB over the two seasons.
+    reg = easton_stick_shape_history()
+    reg = reg[reg["season"].isin((2024, 2025))]
+    prior = reg.groupby(["player_id", "season"])["week"].count().mean()
+    expected = (68.0 + prior * 4.0) / (4.0 + 4.0)
+    assert starter == pytest.approx(expected, abs=1e-9)
+    # And the constant is expressed on the effective-seasons scale.
+    assert GAMES_STRENGTH == pytest.approx(4.0 / 3.0)
