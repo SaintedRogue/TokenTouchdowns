@@ -40,3 +40,30 @@ def test_summarise_of_a_constant_series_has_zero_spread():
     assert out["mean"] == pytest.approx(7.0)
     assert out["sd"] == pytest.approx(0.0)
     assert out["p10"] == pytest.approx(out["p90"])
+
+
+def test_relative_variance_falls_as_volume_rises():
+    # More opportunities means more averaging, so the coefficient of variation
+    # must SHRINK with volume. The earlier model sampled efficiency once per
+    # week and scaled it, making variance grow as opportunities squared -- which
+    # would have told the playoff optimiser that a workhorse is more volatile
+    # than a backup, the opposite of the truth.
+    low = simulate_points(volume=3.0, eff_rate=4.0, td_rate=0.0, n=20000, seed=2)
+    high = simulate_points(volume=30.0, eff_rate=4.0, td_rate=0.0, n=20000, seed=2)
+    cv_low = low.std() / low.mean()
+    cv_high = high.std() / high.mean()
+    assert cv_high < cv_low, f"CV should fall with volume, got {cv_low:.3f} -> {cv_high:.3f}"
+
+
+def test_yards_are_never_negative():
+    # Gamma has non-negative support, so no clipping and no point mass at zero.
+    s = simulate_points(volume=10.0, eff_rate=4.0, td_rate=0.0, n=20000, seed=4)
+    assert s.min() >= 0.0
+
+
+def test_mean_is_preserved_across_efficiency_spread():
+    # The cv parameter must change spread WITHOUT moving the mean.
+    tight = simulate_points(volume=10.0, eff_rate=4.0, td_rate=0.0, n=40000, seed=6, yards_cv=0.3)
+    loose = simulate_points(volume=10.0, eff_rate=4.0, td_rate=0.0, n=40000, seed=6, yards_cv=1.5)
+    assert tight.mean() == pytest.approx(loose.mean(), rel=0.05)
+    assert loose.std() > tight.std()
