@@ -61,3 +61,55 @@ test('normalize preserves standings team_standings data', () => {
   assert.equal(league.standings.teams.length, 4);
   assert.ok(league.standings.teams[0].team_standings, 'standings block present');
 });
+
+// --- roster_positions: a collection with no `count` sibling -----------------
+//
+// Yahoo's league settings return roster_positions as a bare array of
+// single-key-wrapped items -- `[{roster_position: {...}}, {roster_position: {...}}, ...]`
+// with no `count` anywhere. The old code assumed every array was an
+// attribute-fragment list to be merged into one object, so nine positions
+// collapsed into whichever one was assigned last (IR). These tests use the
+// real committed fixture, which reproduces the bug exactly.
+
+test('normalize turns roster_positions (a collection with no count) into an array of every position, not just the last one', () => {
+  const { league } = normalize(fixture('league-settings'));
+  const positions = league.settings.roster_positions;
+  assert.ok(Array.isArray(positions), 'roster_positions should be an array');
+  assert.equal(positions.length, 9, 'all 9 roster positions must survive, not just the last');
+});
+
+test('normalize preserves every roster position with its correct count, unwrapped from its wrapper', () => {
+  const { league } = normalize(fixture('league-settings'));
+  const positions = league.settings.roster_positions;
+  // Collection items must be unwrapped from {roster_position: X} down to X.
+  assert.ok(!('roster_position' in positions[0]), 'items should be unwrapped, not left as {roster_position: X}');
+  const byPosition = Object.fromEntries(positions.map((p) => [p.position, p.count]));
+  assert.deepEqual(byPosition, {
+    QB: 1, RB: 2, WR: 2, TE: 1, 'W/R/T': 1, K: 1, DEF: 1, BN: 6, IR: 2,
+  });
+});
+
+test('normalize still merges the mixed roster shape (numeric key + real attributes) instead of turning it into an array', () => {
+  // roster: { "0": { players: [] }, coverage_type: "week", week: 1, ... } has a
+  // numeric key ALONGSIDE plain attributes -- the merge-up behaviour that
+  // splices numeric-keyed fragments into the parent must still apply here.
+  const out = normalize(fixture('team-roster'));
+  assert.equal(Array.isArray(out.team.roster), false, 'the mixed roster shape must not become an array');
+  assert.deepEqual(out.team.roster, {
+    players: [], coverage_type: 'week', week: 1, is_prescoring: 0, is_editable: 0,
+  });
+});
+
+test('normalize still turns a count-bearing numeric-keyed collection into an array (regression guard)', () => {
+  const raw = {
+    fantasy_content: {
+      league: {
+        teams: { 0: { team: { name: 'A' } }, 1: { team: { name: 'B' } }, count: 2 },
+      },
+    },
+  };
+  const out = normalize(raw);
+  assert.ok(Array.isArray(out.league.teams), 'a count-bearing collection should still become an array');
+  assert.equal(out.league.teams.length, 2);
+  assert.deepEqual(out.league.teams.map((t) => t.name).sort(), ['A', 'B']);
+});

@@ -31,11 +31,21 @@ const META_KEYS = new Set(['xml:lang', 'yahoo:uri', 'copyright', 'refresh_rate',
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** A Yahoo collection: numeric-string keys alongside a `count` sibling. */
+/**
+ * A Yahoo collection: numeric-string keys, usually alongside a `count`
+ * sibling -- but `count` is not load-bearing. Some collections (e.g. league
+ * settings' roster_positions when it arrives object-shaped) carry only
+ * numeric keys and no `count` at all. An object whose keys are ALL numeric
+ * is unambiguously a collection either way; one with numeric keys PLUS real
+ * attributes (e.g. `roster: { "0": {...}, coverage_type: "week" }`) is not --
+ * that shape's numeric-keyed fragment gets merged up by normalizeObject
+ * instead. `count` itself is ignored when checking "all numeric" so its
+ * presence doesn't disqualify the classic shape.
+ */
 function isCollection(v) {
   if (!isPlainObject(v)) return false;
-  const keys = Object.keys(v);
-  return keys.includes('count') && keys.some((k) => /^\d+$/.test(k));
+  const keys = Object.keys(v).filter((k) => k !== 'count');
+  return keys.length > 0 && keys.every((k) => /^\d+$/.test(k));
 }
 
 /** Collection items arrive wrapped as `{ team: … }` / `{ player: … }`. */
@@ -45,6 +55,33 @@ function unwrapSingleKey(v) {
   return keys.length === 1 ? v[keys[0]] : v;
 }
 
+/**
+ * A Yahoo collection can also arrive as a bare JSON array of items that all
+ * share the exact same single wrapper key -- e.g. league settings'
+ * roster_positions: `[{roster_position: X}, {roster_position: Y}, ...]`,
+ * with no numeric-keyed object and no `count` anywhere. That is
+ * indistinguishable in shape from Yahoo's attribute-fragment arrays (e.g.
+ * `team: [[{team_key: …}, {name: …}, …]]`) EXCEPT that attribute fragments
+ * never repeat a key, while these collection items always repeat the same
+ * one. Requiring 2+ items keeps single-item wrapped values (e.g.
+ * `managers: [{manager: X}]`) flattening to a plain object as before, since
+ * a lone item is ambiguous and every real single-item case in the fixtures
+ * is meant to stay an object.
+ */
+function isRepeatedKeyArray(items) {
+  const objs = items.filter((it) => !Array.isArray(it));
+  if (objs.length < 2) return false;
+  let sharedKey;
+  for (const item of objs) {
+    if (!isPlainObject(item)) return false;
+    const keys = Object.keys(item);
+    if (keys.length !== 1) return false;
+    if (sharedKey === undefined) sharedKey = keys[0];
+    else if (keys[0] !== sharedKey) return false;
+  }
+  return true;
+}
+
 function normalizeValue(value) {
   if (Array.isArray(value)) {
     // An empty collection arrives as a literal []. Preserve its array-ness so
@@ -52,7 +89,13 @@ function normalizeValue(value) {
     if (value.length === 0) return [];
     // Yahoo nests the attribute list one level deeper: `team: [[ … ]]`.
     // Flattening once turns both shapes into a single list of parts to merge.
-    return normalizeObject(flattenAttrs(value.flat()));
+    const flat = value.flat();
+    if (isRepeatedKeyArray(flat)) {
+      return flat
+        .filter((it) => !Array.isArray(it))
+        .map((item) => normalizeValue(unwrapSingleKey(item)));
+    }
+    return normalizeObject(flattenAttrs(flat));
   }
   if (isCollection(value)) {
     return collectionToArray(value).map((item) => normalizeValue(unwrapSingleKey(item)));
