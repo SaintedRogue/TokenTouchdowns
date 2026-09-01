@@ -20,7 +20,7 @@ the parts that are not.
   schedules           (existing)       (existing)     (existing)
       |                    |________________|____________|
       v                                     |
-  ingest/   python + duckdb -> parquet      | node (existing, untouched)
+  ingest/   python + pandas -> parquet      | node (existing, untouched)
       v                                     |
   features/  POINT-IN-TIME correct          |
       v                                     |
@@ -187,10 +187,15 @@ high-scoring weeks, so the trailing-average baseline was built, in part, from
 knowledge of which weeks were good — lookahead bias, the same failure mode
 `features.prior_weeks`'s point-in-time guard exists to prevent everywhere
 else in this codebase, introduced here because this measurement sat outside
-that guard, in a one-off script that was never committed. In this instance
-the bias happened to make the baseline look *better* (a history of
-only-good-weeks understated how volatile a real starter's next week is), not
-worse, so it did not read as suspicious on its face. The corrected numbers
+that guard, in a one-off script that was never committed. The effect was
+mixed, not uniform: it artificially improved the error metrics (MAE 5.062 and
+RMSE 6.593, vs the correct 5.617 and 7.367, both flattered by predictions
+pulled toward each player's own ceiling) while artificially worsening
+Spearman (0.372 vs the correct 0.425, because that same pull compresses
+players together and destroys the between-player ordering rank correlation
+measures) — and Spearman is the metric this document calls the meaningful
+one, which is why the flawed figure's one visibly-worse number read as
+appropriate humility rather than a red flag. The corrected numbers
 above come from `compare_baselines(df, ..., min_actual=5.0)`, which restricts
 only the *actuals being scored* to `points >= 5` and always predicts from a
 player's complete, unfiltered trailing history — see the `min_actual`

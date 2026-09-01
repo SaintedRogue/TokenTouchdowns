@@ -45,12 +45,14 @@ def compare_baselines(
     exact failure mode `features.prior_weeks`'s point-in-time guard exists to
     prevent elsewhere in this codebase. This is not hypothetical -- it is
     exactly how the original (pre-`min_actual`) starter-relevant figure in
-    the design doc was produced. In that case a history built only from a
-    player's own good weeks turned out to be a *worse* predictor of the next
-    good week than their full history, so the bias happened to make the
-    baseline look weaker than it should have -- but the direction of the
-    error is not something to rely on; the point is that it measured the
-    wrong thing. Always pass the full, unfiltered frame and use
+    the design doc was produced. The effect there was mixed, not uniform: it
+    artificially improved MAE and RMSE (predictions pulled toward each
+    player's own ceiling landed closer to the high-scoring actuals being
+    scored) while artificially worsening Spearman (that same pull compresses
+    players together, destroying the between-player ordering rank
+    correlation measures) -- do not assume the error pushes a metric in any
+    particular direction; the point is that it measured the wrong thing.
+    Always pass the full, unfiltered frame and use
     `min_actual` to filter what gets scored, never what gets predicted from.
     """
     subset = df[df["season"].isin(seasons)]
