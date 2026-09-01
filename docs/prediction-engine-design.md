@@ -101,14 +101,18 @@ normalise for team context, so they survive a player changing teams.
 
 ## 3. Substrate
 
-- **DuckDB** as the analytical store. Reads nflverse parquet directly; ~500k
-  player-weeks across all seasons is trivial for it. No server.
+- **Phase 1** reads nflverse parquet directly with `pandas.read_parquet`
+  (`ingest.load_seasons`); no query engine sits in front of it. At the current
+  scale (~500k player-weeks across all seasons) this is sufficient and fast.
+  No server.
 - **Python** (3.14, `uv`-managed venv) for ingestion, features, models, backtests.
 - **Node** keeps the Yahoo session, the CLI, and all existing behaviour. It reads
   artifacts the Python side writes; it is not restructured.
 
-Verified installable on this machine: duckdb, pandas, numpy, scikit-learn,
-pyarrow, scipy on Python 3.14.7.
+`duckdb` and `scikit-learn` are declared dependencies, verified installable on
+this machine alongside pandas, numpy, pyarrow, and scipy (Python 3.14.7), but
+unused so far. They are declared ahead of need: Phase 2's query and modelling
+layers are where they come in, not Phase 1.
 
 ## 4. Components
 
