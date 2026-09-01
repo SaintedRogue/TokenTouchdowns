@@ -42,7 +42,7 @@ import {
 } from './sources/index.js';
 import { SCORING_FORMATS } from './sources/ffc.js';
 import { readCache, writeCache } from './cache.js';
-import { buildCrosswalk, buildAdpIndex, matchAdp, lookupByYahooKey } from './identity.js';
+import { buildCrosswalk, buildAdpIndex, matchAdp, lookupByYahooKey, normalizeName } from './identity.js';
 import { enrichPlayers, IMPLEMENTED_CAPABILITIES } from './enrich.js';
 import { createAnalyticsClient, AnalyticsError, DEFAULT_ANALYTICS_DIR } from './analytics.js';
 import path from 'node:path';
@@ -78,6 +78,7 @@ Commands:
   lineup                 Optimal lineup for this week
   playoff                Variance-aware lineup vs. an opponent
   season                 Championship odds via season simulation
+  trade                  Evaluate a trade, or search for one, by championship-probability delta
   help                   Show this message
 
 Draft engine flags (analytics/data/league.json + nflverse parquet required):
@@ -94,6 +95,19 @@ Draft engine flags (analytics/data/league.json + nflverse parquet required):
             --mock-draft          simulate a draft, then simulate the season
             --rosters=PATH        supply your own hypothetical rosters
                                    (JSON: {"rosters": {team: [...]}, "schedule": [...]})
+  trade --give=A,B --get=C,D [--with=TEAM] [--n N]
+          Evaluate one proposal (player names on your roster / the counterparty's).
+          Shows BOTH sides' change in championship probability, always with its
+          uncertainty (a standard error and 95% interval) -- these deltas are tiny
+          (real mutual trades move the title ~0.4-1.0pp) and a delta whose interval
+          crosses zero is marked "(noise)"/"(ns)", never printed as if it were signal.
+          --with=TEAM is required whenever more than one counterparty is possible.
+  trade --find [--with=TEAM] [--max-give N] [--max-get N] [--n N] [--exhaustive]
+          Search for trades that help you, ranked, showing the counterparty's delta
+          too so mutually-beneficial ones are identifiable (MUTUAL column). Screened
+          by default (fast); --exhaustive simulates every candidate exactly (can take
+          minutes on a full roster).
+          Same --mock-draft / --rosters=PATH predraft demonstration paths as season.
 
 Player filters:
   --position=QB  --status=A  --search=kelce  --count=25  --sort=OR
@@ -379,6 +393,125 @@ export function pct(n) {
 }
 
 /**
+ * A championship-probability DELTA as signed percentage points, to two
+ * decimals -- `tt trade`'s real deltas run 0.004-0.010 (0.4pp-1.0pp), and
+ * `pct`'s whole-number rounding turns every one of those into "0%" or "1%",
+ * which reads as "no effect" (or "huge effect") when the real number is
+ * neither. See the task's own "render percentages sensibly" requirement.
+ * Always signed (`+`/`-`) since a delta's sign is the first thing worth
+ * reading, including an exact zero (`+0.00pp`, not a bare `0.00pp`).
+ */
+export function ppDelta(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '-';
+  const v = n * 100;
+  const sign = v >= 0 ? '+' : '';
+  return `${sign}${v.toFixed(2)}pp`;
+}
+
+/** A magnitude in the same percentage-point units as `ppDelta` -- for a
+ * standard error or an interval half-width, which are never signed. */
+export function ppValue(n) {
+  return typeof n === 'number' && Number.isFinite(n) ? `${(n * 100).toFixed(2)}pp` : '-';
+}
+
+/** `--give="Josh Allen,Bijan Robinson"` -> `['Josh Allen', 'Bijan Robinson']`.
+ * A bare flag (`true`, `parseArgs`' reading of `--give` with no `=value`)
+ * or an unset one both mean "no names given", not a single empty-string
+ * name. */
+export function parseCommaList(value) {
+  if (value === undefined || value === true) return [];
+  return String(value).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Resolve player NAMES (typed by the user on the command line) against one
+ * roster's own `name` field, strictly: an unmatched or ambiguous name is a
+ * `UsageError` naming the candidates it found, never a silent guess -- the
+ * same "never guess" discipline `src/identity.js`'s ADP/crosswalk matching
+ * already enforces, applied here to a roster instead of an external feed.
+ * Matching is case/diacritic/punctuation-insensitive via `normalizeName`
+ * (reused, not re-derived) so "josh allen" or "Josh Allen Jr." both find
+ * "Josh Allen" -- but two DIFFERENT roster players who normalize to the
+ * same key are reported as an unresolvable ambiguity, not resolved by
+ * whichever happened to be indexed last.
+ */
+export function resolvePlayersByName(names, roster, teamLabel) {
+  const byNorm = new Map();
+  for (const p of roster ?? []) {
+    const key = normalizeName(p.name);
+    if (!byNorm.has(key)) byNorm.set(key, []);
+    byNorm.get(key).push(p);
+  }
+  return names.map((raw) => {
+    const key = normalizeName(raw);
+    const matches = byNorm.get(key) ?? [];
+    if (matches.length === 0) {
+      const rosterNames = (roster ?? []).map((p) => p.name).filter(Boolean);
+      throw new UsageError(
+        `No player named "${raw}" found on ${teamLabel}'s roster. ` +
+        `Roster: ${rosterNames.length ? rosterNames.join(', ') : '(empty)'}`,
+      );
+    }
+    if (matches.length > 1) {
+      throw new UsageError(
+        `"${raw}" matches more than one player on ${teamLabel}'s roster: ` +
+        `${matches.map((m) => `${m.name} (${m.position})`).join(', ')} -- be more specific`,
+      );
+    }
+    return matches[0];
+  });
+}
+
+/**
+ * Resolve `--with=TEAM` against a set of team labels: an exact key match,
+ * or a case-insensitive substring of that key's display name (mirrors
+ * `playoff`'s own `--opponent` matching) -- never a guess when zero or
+ * more than one team matches, exactly like `resolvePlayersByName` above.
+ * `teamNames` maps a roster key to its display name; for the offline demo
+ * modes (mock draft, `--rosters=PATH`) the display name IS the key (see
+ * the `trade` case below), so the same exact-or-substring rule works
+ * unmodified across live Yahoo team names and simulated team labels alike.
+ */
+export function resolveWithFlag(value, teamKeys, teamNames, excludeKey) {
+  const needle = String(value);
+  const lower = needle.toLowerCase();
+  const others = teamKeys.filter((k) => k !== excludeKey);
+  const matches = others.filter((k) => k === needle || (teamNames[k] ?? '').toLowerCase().includes(lower));
+  if (matches.length === 0) {
+    throw new UsageError(
+      `--with="${value}" does not match any other team. Teams: ` +
+      others.map((k) => teamNames[k] ?? k).join(', '),
+    );
+  }
+  if (matches.length > 1) {
+    throw new UsageError(
+      `--with="${value}" matches more than one team: ${matches.map((k) => teamNames[k] ?? k).join(', ')} ` +
+      '-- use the exact team key',
+    );
+  }
+  return matches[0];
+}
+
+/** The single OTHER team in a two-team league, when `--with` was not
+ * given -- the one case a counterparty can be resolved without asking,
+ * because there is nothing to disambiguate. Three or more possible
+ * counterparties always requires `--with=TEAM`: guessing which of several
+ * other teams the user meant is exactly the kind of silent guess this
+ * command refuses to make (see `resolveWithFlag`/`resolvePlayersByName`
+ * above). */
+export function resolveCounterparty(withValue, teamKeys, teamNames, myTeamLabel) {
+  if (withValue !== undefined && withValue !== true) {
+    return resolveWithFlag(withValue, teamKeys, teamNames, myTeamLabel);
+  }
+  const others = teamKeys.filter((k) => k !== myTeamLabel);
+  if (others.length === 1) return others[0];
+  throw new UsageError(
+    `More than one possible counterparty -- pass --with=TEAM to say which one. Teams: ` +
+    others.map((k) => teamNames[k] ?? k).join(', '),
+  );
+}
+
+/**
  * `--roster=PATH` for `draft pick`: the user's own JSON file tracking what
  * they've drafted so far THIS draft night. Node has no live source for this
  * (unlike `lineup`/`playoff`'s season roster, an in-progress live draft
@@ -602,6 +735,86 @@ async function resolveLeagueKey(client, given) {
   const leagues = await myLeagues(client);
   if (leagues.length === 0) throw new YahooApiError('No leagues found for this account');
   return leagues[0].league_key;
+}
+
+/**
+ * Fetch every team's live roster (identity-resolved) and the real
+ * regular-season schedule for a league -- the EXACT input `season`'s live
+ * path builds. `trade`'s live path needs the SAME two things (every
+ * roster, to resolve typed player names and find/confirm a counterparty;
+ * the real schedule, to simulate against), so this is extracted ONCE
+ * rather than duplicated a second time (the task's own instruction: "tt
+ * trade needs the SAME inputs ... reuse that fetching/resolving code").
+ *
+ * THE PREDRAFT GUARD lives here too, since both callers need the identical
+ * check and the identical message SHAPE -- only the command name and the
+ * verb describing what there is "nothing to" do yet differ (`season`:
+ * "simulate"; `trade`: "trade"), per the task's requirement that `tt
+ * trade` fail with "the same clear, actionable message style tt season
+ * already uses."
+ */
+async function fetchLiveLeagueRosters(client, leagueKey, {
+  cacheDir, err, nflverseRosterPath, out, jsonMode, commandName, activity,
+}) {
+  const { league: settingsLeague } = await client.get(`league/${leagueKey}/settings`);
+  const league = leagueConfig(settingsLeague);
+  if (league.draftStatus === 'predraft') {
+    throw new UsageError(
+      `This league is predraft -- every roster is empty, so there is nothing to ${activity}.\n` +
+      `Run \`tt ${commandName}\` again once your real draft is complete, or exercise this ` +
+      'command right now with:\n' +
+      `  tt ${commandName} --mock-draft          (a simulated draft against this league's own player pool)\n` +
+      `  tt ${commandName} --rosters=PATH         (your own hand-built hypothetical rosters)`,
+    );
+  }
+
+  const { league: teamsLeague } = await client.get(`league/${leagueKey}/teams`);
+  const teams = teamsLeague.teams ?? [];
+  const teamNames = Object.fromEntries(teams.map((t) => [t.team_key, t.name]));
+
+  // Yahoo rejects a combined `teams;out=roster` request for a league
+  // ("Invalid subresource roster requested") -- one call per team is the
+  // only way in. Considerately few for this league (4); scales with
+  // num_teams up to max_teams (10).
+  if (!jsonMode) {
+    out.write(`Fetching ${teams.length} team rosters individually ` +
+      '(Yahoo has no combined roster resource for a league)...\n');
+  }
+  const rosters = {};
+  const identities = {};
+  let anyPlayers = false;
+  for (const t of teams) {
+    // eslint-disable-next-line no-await-in-loop -- Yahoo has no bulk roster resource
+    const { team } = await client.get(buildRosterResource(t.team_key, {}));
+    const players = team.roster?.players ?? [];
+    if (players.length > 0) anyPlayers = true;
+    const identity = await resolveRosterIdentity(players, { cacheDir, err, nflverseRosterPath });
+    identities[t.team_key] = identity;
+    rosters[t.team_key] = identity.roster;
+  }
+  if (!anyPlayers) {
+    throw new UsageError(
+      `Every roster in this league is empty -- there is nothing to ${activity}.\n` +
+      `Try:\n  tt ${commandName} --mock-draft\n  tt ${commandName} --rosters=PATH`,
+    );
+  }
+
+  if (!jsonMode) {
+    out.write(`Fetching ${league.playoffStartWeek - 1} weeks of regular-season schedule...\n`);
+  }
+  const schedule = [];
+  for (let week = 1; week < league.playoffStartWeek; week += 1) {
+    // eslint-disable-next-line no-await-in-loop -- Yahoo has no bulk scoreboard resource
+    const { league: sb } = await client.get(`league/${leagueKey}/scoreboard;week=${week}`);
+    for (const m of sb.scoreboard?.matchups ?? []) {
+      const [home, away] = m.teams ?? [];
+      if (home?.team_key && away?.team_key) {
+        schedule.push({ week, home_team: home.team_key, away_team: away.team_key });
+      }
+    }
+  }
+
+  return { league, teams, teamNames, rosters, identities, schedule };
 }
 
 export async function runCommand(
@@ -1127,70 +1340,19 @@ export async function runCommand(
             'built this file from one.';
         } else {
           const leagueKey = await resolveLeagueKey(client, flags.league);
-          const { league: settingsLeague } = await client.get(`league/${leagueKey}/settings`);
-          const league = leagueConfig(settingsLeague);
-          if (league.draftStatus === 'predraft') {
-            throw new UsageError(
-              'This league is predraft -- every roster is empty, so there is nothing to ' +
-              'simulate.\nRun `tt season` again once your draft is complete, or exercise this ' +
-              'command right now with:\n' +
-              '  tt season --mock-draft          (a simulated draft against this league\'s own player pool)\n' +
-              '  tt season --rosters=PATH         (your own hand-built hypothetical rosters)',
-            );
-          }
+          const live = await fetchLiveLeagueRosters(client, leagueKey, {
+            cacheDir, err, nflverseRosterPath, out, jsonMode: flags?.json,
+            commandName: 'season', activity: 'simulate',
+          });
           extraFlags = {
-            playoffStartWeek: league.playoffStartWeek,
-            endWeek: league.endWeek,
-            playoffTeams: league.numPlayoffTeams,
-            reseed: league.usesPlayoffReseeding ? 1 : 0,
+            playoffStartWeek: live.league.playoffStartWeek,
+            endWeek: live.league.endWeek,
+            playoffTeams: live.league.numPlayoffTeams,
+            reseed: live.league.usesPlayoffReseeding ? 1 : 0,
           };
-
-          const { league: teamsLeague } = await client.get(`league/${leagueKey}/teams`);
-          const teams = teamsLeague.teams ?? [];
-          teamNames = Object.fromEntries(teams.map((t) => [t.team_key, t.name]));
-
-          // Yahoo rejects a combined `teams;out=roster` request for a league
-          // ("Invalid subresource roster requested") -- one call per team is
-          // the only way in. Considerately few for this league (4); noted
-          // here since it scales with num_teams up to max_teams (10).
-          if (!flags?.json) {
-            out.write(`Fetching ${teams.length} team rosters individually ` +
-              '(Yahoo has no combined roster resource for a league)...\n');
-          }
-          const rosters = {};
-          identities = {};
-          let anyPlayers = false;
-          for (const t of teams) {
-            const { team } = await client.get(buildRosterResource(t.team_key, {}));
-            const players = team.roster?.players ?? [];
-            if (players.length > 0) anyPlayers = true;
-            const identity = await resolveRosterIdentity(players, { cacheDir, err, nflverseRosterPath });
-            identities[t.team_key] = identity;
-            rosters[t.team_key] = identity.roster;
-          }
-          if (!anyPlayers) {
-            throw new UsageError(
-              'Every roster in this league is empty -- there is nothing to simulate.\n' +
-              'Try:\n  tt season --mock-draft\n  tt season --rosters=PATH',
-            );
-          }
-
-          if (!flags?.json) {
-            out.write(`Fetching ${league.playoffStartWeek - 1} weeks of regular-season schedule...\n`);
-          }
-          const schedule = [];
-          for (let week = 1; week < league.playoffStartWeek; week += 1) {
-            // eslint-disable-next-line no-await-in-loop -- Yahoo has no bulk
-            // scoreboard resource; each week is its own request.
-            const { league: sb } = await client.get(`league/${leagueKey}/scoreboard;week=${week}`);
-            for (const m of sb.scoreboard?.matchups ?? []) {
-              const [home, away] = m.teams ?? [];
-              if (home?.team_key && away?.team_key) {
-                schedule.push({ week, home_team: home.team_key, away_team: away.team_key });
-              }
-            }
-          }
-          stdinPayload = { rosters, schedule };
+          teamNames = live.teamNames;
+          identities = live.identities;
+          stdinPayload = { rosters: live.rosters, schedule: live.schedule };
         }
 
         const payload = await analytics.run('season', {
@@ -1249,6 +1411,242 @@ export async function runCommand(
           if (!names || names.length === 0) continue;
           const label = teamNames[teamKey] ?? teamKey;
           out.write(`${label}: no projection available for ${names.join(', ')} ` +
+            '(e.g. K/DEF are not modelled)\n');
+        }
+        return 0;
+      }
+
+      case 'trade': {
+        const find = flags.find === true;
+        const giveNames = parseCommaList(flags.give);
+        const getNames = parseCommaList(flags.get);
+        if (find) {
+          if (giveNames.length > 0 || getNames.length > 0) {
+            throw new UsageError('--find searches for trades and cannot be combined with --give/--get');
+          }
+        } else if (giveNames.length === 0 || getNames.length === 0) {
+          throw new UsageError(
+            'tt trade needs --give=... and --get=... (comma-separated player names on your ' +
+            'roster and the counterparty\'s), or --find to search for trades',
+          );
+        }
+
+        const mockDraft = flags['mock-draft'] === true;
+        const rostersFlag = flags.rosters;
+        if (mockDraft && rostersFlag !== undefined) {
+          throw new UsageError('--mock-draft and --rosters are mutually exclusive -- pass one or the other');
+        }
+
+        let stdinRosters;
+        let schedule;
+        let teamNames = {};
+        let sourceNote = null;
+        let extraFlags = {};
+        let identities = null;
+        let myTeamLabel;
+        let rostersForResolution;
+
+        if (mockDraft) {
+          sourceNote =
+            'SOURCE: a SIMULATED DRAFT (mock.simulate_draft against this league\'s own player ' +
+            'pool), not your live league -- run `tt trade` again once your real draft is ' +
+            'complete for an answer that means something.';
+          // Determinism: this command may call the analytics engine TWICE
+          // below (once to resolve typed player names against the
+          // simulated rosters, once to actually evaluate/search) -- both
+          // calls MUST see the SAME seed, or the second call's simulated
+          // draft can diverge from the rosters the first call resolved
+          // names against. See analytics/src/tt/cli.py's cmd_trade
+          // docstring, "--rosters-only" section.
+          const seed = intFlag(flags, 'seed') ?? Math.floor(Math.random() * 2_147_483_647);
+          extraFlags = {
+            mockDraft: true, teams: intFlag(flags, 'teams'), rounds: intFlag(flags, 'rounds'), seed,
+          };
+          const resolvePayload = await analytics.run('trade', {
+            flags: { ...extraFlags, rostersOnly: true },
+            stdin: {},
+          });
+          rostersForResolution = resolvePayload.rosters;
+          teamNames = Object.fromEntries(Object.keys(rostersForResolution).map((k) => [k, k]));
+          myTeamLabel = 'Mock Team 1';
+        } else if (rostersFlag !== undefined) {
+          if (rostersFlag === true) {
+            throw new UsageError('--rosters needs a file path, e.g. --rosters=my-rosters.json');
+          }
+          let raw;
+          try {
+            raw = await readFile(rostersFlag, 'utf8');
+          } catch (e) {
+            throw new UsageError(`Could not read --rosters file "${rostersFlag}": ${e.message}`);
+          }
+          let parsed;
+          try {
+            parsed = JSON.parse(raw);
+          } catch (e) {
+            throw new UsageError(`--rosters file "${rostersFlag}" is not valid JSON: ${e.message}`);
+          }
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+              || !parsed.rosters || typeof parsed.rosters !== 'object') {
+            throw new UsageError(
+              `--rosters file "${rostersFlag}" must be a JSON object shaped ` +
+              '{"rosters": {"<team>": [{"player_id":...,"name":...,"position":...}, ...]}, ' +
+              '"schedule": [{"week":1,"home_team":...,"away_team":...}, ...] (optional)}',
+            );
+          }
+          stdinRosters = parsed.rosters;
+          schedule = parsed.schedule;
+          rostersForResolution = parsed.rosters;
+          teamNames = Object.fromEntries(Object.keys(parsed.rosters).map((k) => [k, k]));
+          [myTeamLabel] = Object.keys(parsed.rosters);
+          if (!myTeamLabel) throw new UsageError(`--rosters file "${rostersFlag}" has no teams`);
+          sourceNote =
+            `SOURCE: rosters supplied from ${rostersFlag} -- not your live league unless you ` +
+            'built this file from one.';
+        } else {
+          const leagueKey = await resolveLeagueKey(client, flags.league);
+          const live = await fetchLiveLeagueRosters(client, leagueKey, {
+            cacheDir, err, nflverseRosterPath, out, jsonMode: flags?.json,
+            commandName: 'trade', activity: 'trade',
+          });
+          extraFlags = {
+            playoffStartWeek: live.league.playoffStartWeek,
+            endWeek: live.league.endWeek,
+            playoffTeams: live.league.numPlayoffTeams,
+            reseed: live.league.usesPlayoffReseeding ? 1 : 0,
+          };
+          teamNames = live.teamNames;
+          identities = live.identities;
+          stdinRosters = live.rosters;
+          schedule = live.schedule;
+          rostersForResolution = live.rosters;
+          myTeamLabel = flags.team && flags.team !== true ? flags.team : await myTeamKey(client, leagueKey);
+        }
+
+        const rosterKeys = Object.keys(rostersForResolution);
+        let theirTeamLabel;
+        if (find) {
+          if (flags.with !== undefined && flags.with !== true) {
+            theirTeamLabel = resolveWithFlag(flags.with, rosterKeys, teamNames, myTeamLabel);
+          }
+        } else {
+          theirTeamLabel = resolveCounterparty(flags.with, rosterKeys, teamNames, myTeamLabel);
+        }
+
+        let giveIds;
+        let getIds;
+        if (!find) {
+          const myRoster = rostersForResolution[myTeamLabel] ?? [];
+          const theirRoster = rostersForResolution[theirTeamLabel] ?? [];
+          giveIds = resolvePlayersByName(giveNames, myRoster, teamNames[myTeamLabel] ?? myTeamLabel)
+            .map((p) => p.player_id);
+          getIds = resolvePlayersByName(getNames, theirRoster, teamNames[theirTeamLabel] ?? theirTeamLabel)
+            .map((p) => p.player_id);
+        }
+
+        const finalStdin = {
+          ...(mockDraft ? {} : { rosters: stdinRosters, schedule }),
+          my_team: myTeamLabel,
+          ...(find
+            ? (theirTeamLabel ? { their_team: theirTeamLabel } : {})
+            : { their_team: theirTeamLabel, i_give: giveIds, i_get: getIds }),
+        };
+
+        const payload = await analytics.run('trade', {
+          flags: {
+            ...extraFlags,
+            find,
+            n: intFlag(flags, 'n'),
+            maxGive: find ? intFlag(flags, 'max-give') : undefined,
+            maxGet: find ? intFlag(flags, 'max-get') : undefined,
+            screenTop: find ? intFlag(flags, 'screen-top') : undefined,
+            exhaustive: find ? (flags.exhaustive === true) : undefined,
+          },
+          stdin: finalStdin,
+          // Relayed live so `--find`'s up-front candidate-count estimate
+          // (analytics/src/tt/cli.py's cmd_trade, "PROGRESS" docstring
+          // section) is visible WHILE the one blocking call runs, not
+          // discarded because it never appeared in a failure message.
+          stderr: err,
+        });
+
+        if (flags?.json) {
+          out.write(`${JSON.stringify(payload, null, 2)}\n`);
+          return 0;
+        }
+
+        const label = (key) => teamNames[key] ?? key;
+        if (mockDraft || rostersFlag !== undefined) {
+          out.write(`Trading as: ${label(myTeamLabel)}\n`);
+        }
+
+        if (find) {
+          out.write(
+            `Trade search for ${label(payload.my_team)} -- SIMULATION (n=${payload.n}, paired ` +
+            'standard error reported with every delta)\n',
+          );
+          const screenNote = payload.screen_top == null
+            ? 'screen DISABLED via --exhaustive: every enumerated candidate was simulated exactly'
+            : `screened to the top ${payload.screen_top} per side per counterparty before simulating`;
+          out.write(
+            `${payload.candidates_simulated} of ${payload.candidates_enumerated} enumerated ` +
+            `candidate(s) simulated (${screenNote})\n`,
+          );
+          if (sourceNote) out.write(`${sourceNote}\n`);
+
+          const rows = (payload.candidates ?? []).map((c) => ({
+            with: label(c.their_team),
+            give: c.give_names || '(nothing)',
+            get: c.get_names || '(nothing)',
+            myDelta: `${ppDelta(c.my_delta)}±${ppValue(c.my_delta_se)}${c.my_significant ? '' : ' (ns)'}`,
+            theirDelta:
+              `${ppDelta(c.their_delta)}±${ppValue(c.their_delta_se)}${c.their_significant ? '' : ' (ns)'}`,
+            mutual: c.mutual ? 'YES' : '',
+          }));
+          out.write(`${formatTable(rows, [
+            { key: 'with', label: 'WITH' }, { key: 'give', label: 'I GIVE' }, { key: 'get', label: 'I GET' },
+            { key: 'myDelta', label: 'MY TITLE Δ' }, { key: 'theirDelta', label: 'THEIR TITLE Δ' },
+            { key: 'mutual', label: 'MUTUAL' },
+          ])}\n`);
+          out.write(
+            '(ns) = not significant: the 95% interval around this delta includes zero -- read ' +
+            'it as noise, not as an effect.\n',
+          );
+        } else {
+          out.write(
+            `Trade evaluation -- SIMULATION (n=${payload.n}, paired standard error reported ` +
+            'with every delta)\n',
+          );
+          if (sourceNote) out.write(`${sourceNote}\n`);
+
+          const rows = (payload.sides ?? []).map((s) => ({
+            team: label(s.team),
+            role: s.role,
+            gives: s.give_names || '(nothing)',
+            gets: s.get_names || '(nothing)',
+            delta: `${ppDelta(s.delta)}±${ppValue(s.delta_se)}`,
+            ci: `[${ppDelta(s.delta_ci_low)}, ${ppDelta(s.delta_ci_high)}]`,
+            sig: s.significant ? 'yes' : 'no (noise)',
+          }));
+          out.write(`${formatTable(rows, [
+            { key: 'team', label: 'TEAM' }, { key: 'role', label: 'ROLE' },
+            { key: 'gives', label: 'GIVES' }, { key: 'gets', label: 'GETS' },
+            { key: 'delta', label: 'TITLE Δ' }, { key: 'ci', label: '95% CI' },
+            { key: 'sig', label: 'SIGNIFICANT' },
+          ])}\n`);
+        }
+
+        if (identities) {
+          for (const [teamKey, identity] of Object.entries(identities)) {
+            out.write(`${label(teamKey)}: ${identity.matched} matched, ${identity.unresolved.length} ` +
+              `unresolved (of ${identity.total})\n`);
+            if (identity.unresolved.length > 0) {
+              out.write(`  Unresolved: ${identity.unresolved.join(', ')}\n`);
+            }
+          }
+        }
+        for (const [teamKey, names] of Object.entries(payload.unprojected_players ?? {})) {
+          if (!names || names.length === 0) continue;
+          out.write(`${label(teamKey)}: no projection available for ${names.join(', ')} ` +
             '(e.g. K/DEF are not modelled)\n');
         }
         return 0;

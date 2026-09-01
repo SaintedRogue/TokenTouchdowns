@@ -149,6 +149,30 @@ test('run with no flags/stdin still calls the subcommand cleanly', async () => {
   assert.deepEqual(spawn.calls[0].args, ['-m', 'tt.cli', 'mock']);
 });
 
+test('run relays stderr chunks live to an optional stderr sink, on top of buffering them for a failure message', async () => {
+  // `tt trade --find` prints an up-front candidate-count estimate to
+  // Python's own stderr before its one (possibly slow) blocking call --
+  // see analytics/src/tt/cli.py's cmd_trade docstring. Without this relay
+  // that text is invisible: it only ever reached the accumulated `stderr`
+  // string this module already builds for a FAILURE message, and a
+  // successful run threw that buffer away unread. An optional `stderr`
+  // sink lets a caller see it live, on a successful run too.
+  const spawn = scriptedSpawn({ stdout: '{"ok":true}\n', stderr: 'up to 214 candidates...\n', code: 0 });
+  const client = createAnalyticsClient({ spawn, pythonBin: '/fake/python', cwd: '/x' });
+  const chunks = [];
+  const sink = { write: (s) => chunks.push(s) };
+  const result = await client.run('trade', { stderr: sink });
+  assert.deepEqual(result, { ok: true });
+  assert.equal(chunks.join(''), 'up to 214 candidates...\n');
+});
+
+test('run works with no stderr sink given -- existing callers are unaffected', async () => {
+  const spawn = scriptedSpawn({ stdout: '{"ok":true}\n', stderr: 'some progress\n', code: 0 });
+  const client = createAnalyticsClient({ spawn, pythonBin: '/fake/python', cwd: '/x' });
+  const result = await client.run('trade');
+  assert.deepEqual(result, { ok: true });
+});
+
 test('default pythonBin and cwd point at analytics/.venv relative to the repo', () => {
   const client = createAnalyticsClient({ spawn: scriptedSpawn() });
   assert.match(client.pythonBin, /analytics[/\\]\.venv[/\\]bin[/\\]python$/);
