@@ -31,21 +31,11 @@ const META_KEYS = new Set(['xml:lang', 'yahoo:uri', 'copyright', 'refresh_rate',
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/**
- * A Yahoo collection: numeric-string keys, usually alongside a `count`
- * sibling -- but `count` is not load-bearing. Some collections (e.g. league
- * settings' roster_positions when it arrives object-shaped) carry only
- * numeric keys and no `count` at all. An object whose keys are ALL numeric
- * is unambiguously a collection either way; one with numeric keys PLUS real
- * attributes (e.g. `roster: { "0": {...}, coverage_type: "week" }`) is not --
- * that shape's numeric-keyed fragment gets merged up by normalizeObject
- * instead. `count` itself is ignored when checking "all numeric" so its
- * presence doesn't disqualify the classic shape.
- */
+/** A Yahoo collection: numeric-string keys alongside a `count` sibling. */
 function isCollection(v) {
   if (!isPlainObject(v)) return false;
-  const keys = Object.keys(v).filter((k) => k !== 'count');
-  return keys.length > 0 && keys.every((k) => /^\d+$/.test(k));
+  const keys = Object.keys(v);
+  return keys.includes('count') && keys.some((k) => /^\d+$/.test(k));
 }
 
 /** Collection items arrive wrapped as `{ team: … }` / `{ player: … }`. */
