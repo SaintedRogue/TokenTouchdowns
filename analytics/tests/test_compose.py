@@ -42,17 +42,16 @@ def test_summarise_of_a_constant_series_has_zero_spread():
     assert out["p10"] == pytest.approx(out["p90"])
 
 
-def test_relative_variance_falls_as_volume_rises():
-    # More opportunities means more averaging, so the coefficient of variation
-    # must SHRINK with volume. The earlier model sampled efficiency once per
-    # week and scaled it, making variance grow as opportunities squared -- which
-    # would have told the playoff optimiser that a workhorse is more volatile
-    # than a backup, the opposite of the truth.
-    low = simulate_points(volume=3.0, eff_rate=4.0, td_rate=0.0, n=20000, seed=2)
-    high = simulate_points(volume=30.0, eff_rate=4.0, td_rate=0.0, n=20000, seed=2)
-    cv_low = low.std() / low.mean()
-    cv_high = high.std() / high.mean()
-    assert cv_high < cv_low, f"CV should fall with volume, got {cv_low:.3f} -> {cv_high:.3f}"
+def test_relative_variance_keeps_shrinking_at_high_volume():
+    # Sampling yards PER OPPORTUNITY makes the coefficient of variation fall
+    # without bound as volume rises. The earlier model drew one efficiency value
+    # per week and scaled it, which floors CV at ~0.5 no matter how many
+    # opportunities a player gets -- so testing only the DIRECTION of the change
+    # cannot tell the two apart (Poisson noise alone makes both decrease).
+    # The floor is the discriminating signature.
+    high = simulate_points(volume=300.0, eff_rate=4.0, td_rate=0.0, n=20000, seed=2)
+    cv = high.std() / high.mean()
+    assert cv < 0.25, f"CV at volume 300 should be well under the old model's ~0.5 floor, got {cv:.3f}"
 
 
 def test_yards_are_never_negative():
