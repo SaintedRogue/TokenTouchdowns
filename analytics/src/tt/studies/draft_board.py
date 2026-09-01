@@ -344,12 +344,29 @@ def actual_lineup_score(
     maps to NaN via `.map`, then to an explicit `0.0` via `.fillna` -- the
     brief's "a bust scores ZERO, not NaN and not excluded" requirement,
     satisfied at exactly this line.
+
+    M-10 (fix-round-2-brief.md): a non-empty roster with no `player_id`
+    column used to fall through to `base_score(roster)` -- grading it on
+    the roster's ORIGINAL `proj_points`, precisely the circular metric this
+    whole module exists to replace. That is a silent trapdoor back into the
+    module's one non-negotiable bug class, not a graceful degrade, so it now
+    raises instead. A genuinely EMPTY roster (no picks at all) still scores
+    0.0 directly -- there is nothing circular about "an empty roster is
+    worth nothing," and `optimal_lineup_score` would say the same thing.
     """
     base_score = optimal_lineup_score(config)
 
     def _score(roster: pd.DataFrame) -> float:
-        if roster.empty or "player_id" not in roster.columns:
-            return base_score(roster)
+        if roster.empty:
+            return 0.0
+        if "player_id" not in roster.columns:
+            raise ValueError(
+                "actual_lineup_score: a non-empty roster has no 'player_id' "
+                "column, so it cannot be graded on actual_points_by_player -- "
+                "this must never silently fall back to proj_points (the "
+                "circular default this module exists to eliminate; see M-10 "
+                "in review-final.md)"
+            )
         decorated = roster.assign(
             proj_points=roster["player_id"].map(actual_points).fillna(0.0)
         )

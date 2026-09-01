@@ -333,18 +333,40 @@ def test_actual_lineup_score_zeros_a_drafted_player_with_no_actual_points():
 
 
 def test_actual_lineup_score_only_counts_starters_not_bench():
-    # 3 RBs drafted, this league starts at most 2.5 (2 + half the W/R flex);
-    # round(2.5) = 2 -> the WORST of the three by actual points is benched
-    # and must not count, even though it was the "best" pick by proj_points.
+    # 4 RBs drafted. This league's RB-eligible starting slots are 2 fixed
+    # RB + 1 "W/R" flex (RB/WR eligible) = 3 total -- the top 3 by actual
+    # points start (including the flex, per the M-4 fix: the flex is
+    # awarded to the best remaining flex-eligible player, not rounded
+    # away), and only the 4th, worst RB is truly benched.
     roster = pd.DataFrame([
         {"player_id": "R1", "position": "RB", "proj_points": 1.0},
         {"player_id": "R2", "position": "RB", "proj_points": 1.0},
         {"player_id": "R3", "position": "RB", "proj_points": 1.0},
+        {"player_id": "R4", "position": "RB", "proj_points": 1.0},
     ])
-    actual = pd.Series({"R1": 100.0, "R2": 90.0, "R3": 1.0})
+    actual = pd.Series({"R1": 100.0, "R2": 90.0, "R3": 50.0, "R4": 1.0})
     scorer = actual_lineup_score(actual, CONFIG_OBJ)
     score = scorer(roster)
-    assert score == pytest.approx(190.0)  # R3's real 1.0 sits on the bench
+    assert score == pytest.approx(240.0)  # R4's real 1.0 sits on the bench
+
+
+def test_actual_lineup_score_returns_zero_for_a_genuinely_empty_roster():
+    # A truly empty roster (no picks at all) is worth 0 -- there is nothing
+    # circular about that, unlike M-10's silent proj_points fallback below.
+    scorer = actual_lineup_score(pd.Series(dtype=float), CONFIG_OBJ)
+    assert scorer(pd.DataFrame()) == 0.0
+
+
+def test_actual_lineup_score_raises_rather_than_silently_grading_on_proj_points():
+    # MUTATION GUARD (M-10). The old code's fallback for a non-empty roster
+    # missing 'player_id' was `return base_score(roster)` -- grading on the
+    # roster's ORIGINAL proj_points, exactly the circular metric this
+    # module exists to replace. proj_points=999.0 here would sail through
+    # that fallback; a correct implementation must raise instead.
+    roster = pd.DataFrame([{"position": "RB", "proj_points": 999.0}])  # no player_id column
+    scorer = actual_lineup_score(pd.Series({"x": 1.0}), CONFIG_OBJ)
+    with pytest.raises(ValueError, match="player_id"):
+        scorer(roster)
 
 
 # ---------------------------------------------------------------------------
