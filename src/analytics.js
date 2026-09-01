@@ -78,8 +78,19 @@ export function createAnalyticsClient({
    * stdin, then the stream is closed (`tt.cli` blocks reading stdin until
    * EOF -- see that module's own docstring). Resolves with the parsed
    * JSON result on a clean exit, rejects with `AnalyticsError` otherwise.
+   *
+   * `stderr` (optional): a writable sink (`{ write(str) }`, e.g. `src/
+   * cli.js`'s own injected `err`) that receives every stderr chunk LIVE,
+   * as the child emits it -- on top of, not instead of, the accumulated
+   * `stderr` string this function already builds for a failure message.
+   * Exists for `tt trade --find`: `tt.cli`'s `cmd_trade` writes an
+   * up-front candidate-count estimate to ITS stderr before its one
+   * (possibly slow) blocking call, specifically so the command does not
+   * appear to hang -- and that text is invisible to a caller who never
+   * passes this, since a SUCCESSFUL run previously had no path from the
+   * accumulated buffer to anywhere a user could see it.
    */
-  async function run(subcommand, { flags = {}, stdin = {} } = {}) {
+  async function run(subcommand, { flags = {}, stdin = {}, stderr: stderrSink = undefined } = {}) {
     const args = buildArgs(subcommand, flags);
 
     let child;
@@ -111,7 +122,11 @@ export function createAnalyticsClient({
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
-    child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.stderr?.on('data', (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      stderrSink?.write?.(text);
+    });
 
     // Writing stdin happens SYNCHRONOUSLY inside this executor, before the
     // 'close'/'error' listeners below ever get a chance to fire (those are

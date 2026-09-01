@@ -1,7 +1,8 @@
 """Phase 2 CLI adapter (docs/draft-engine-design.md section 4).
 
-`tt draft board`/`pick`/`mock`/`lineup`/`playoff` live on ONE Node CLI
-surface (`bin/tt.js` -> `src/cli.js`), but the analytics engine is Python.
+`tt draft board`/`pick`/`mock`/`lineup`/`playoff`/`season`/`trade` live on
+ONE Node CLI surface (`bin/tt.js` -> `src/cli.js`), but the analytics
+engine is Python.
 This module is the Python half of the bridge: `src/analytics.js` spawns
 `analytics/.venv/bin/python -m tt.cli <subcommand> ...`, writes a JSON
 payload to its stdin, and parses exactly one JSON document back off stdout.
@@ -70,8 +71,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import IO, Any
 
@@ -86,21 +89,52 @@ from .mock import (
     Strategy,
     _pick_number,  # noqa: F401 -- deliberately reused, not re-derived; see module docstring
     compare_strategies,
+    simulate_draft,
     strategy_adp,
     strategy_vor,
     strategy_vor_survival,
 )
 from .playoff import DEFAULT_N as PLAYOFF_DEFAULT_N, playoff_lineup
 from .projections import project_players
+from .season import DEFAULT_N as SEASON_DEFAULT_N, round_robin_schedule, simulate_season
 from .studies.draft_board import attach_adp
 from .survival import add_survival
+from .trade import DEFAULT_N as TRADE_DEFAULT_N, evaluate_trade, find_trades
 from .vor import add_vor
+from .weekly import project_week
 
 DEFAULT_MC_N = 5000
 DEFAULT_TRIALS = 50
 DEFAULT_BOARD_COUNT = 50
 DEFAULT_PICK_N = 5
 STRATEGY_NAMES = ("adp", "vor", "vor_survival")
+
+# `tt season`'s CLI-level fallback for --playoff-start-week/--end-week when
+# neither is given -- THIS PROJECT'S OWN live league settings (verified
+# 2026-09-01: playoff_start_week 16, end_week 17), used ONLY as a
+# convenience default for the --mock-draft / --rosters=PATH DEMONSTRATION
+# path (see cmd_season). This is CLI ergonomics, not analytics: the same
+# category as DEFAULT_PICK_N above or cmd_mock's `seed = ... else 2026`,
+# never read by season.py itself (which hardcodes nothing -- see that
+# module's own docstring). A LIVE run against real Yahoo rosters ALWAYS
+# gets these from src/cli.js's fresh settings fetch and passes them
+# explicitly, which overrides this default outright; this constant is only
+# ever reached when nobody supplied a real number to override it with.
+_DEMO_PLAYOFF_START_WEEK = 16
+_DEMO_END_WEEK = 17
+
+# `tt trade --find`'s CLI-level speed/completeness defaults. `max_give`/
+# `max_get` match `find_trades`' OWN kwarg defaults exactly (stated here
+# too, not just inherited silently, so a reader of --help sees the real
+# number); `screen_top` likewise matches its engine default. None of these
+# override anything -- they exist purely so `tt.cli`'s own `--help` names a
+# number instead of pointing a reader at trade.py. See `cmd_trade`'s
+# docstring for why the screen stays ON by default (a person will wait for
+# ~10s, not ~800s -- see that module's own docstring's "812 s" measurement
+# for what disabling it (`--exhaustive`) can cost on a full-size league).
+_TRADE_FIND_DEFAULT_MAX_GIVE = 2
+_TRADE_FIND_DEFAULT_MAX_GET = 2
+_TRADE_FIND_DEFAULT_SCREEN_TOP = 40
 
 
 class CliError(Exception):
@@ -300,6 +334,61 @@ def _roster_df(roster: list[dict], proj_by_id: pd.DataFrame) -> tuple[pd.DataFra
     return pd.DataFrame(rows), unprojected
 
 
+def _mock_draft_rosters(
+    history: pd.DataFrame, config: LeagueConfig, ffc: pd.DataFrame,
+    season: int, teams: int, rounds: int, mc_n: int, seed: int | None,
+) -> dict[str, list[dict]]:
+    """One simulated snake draft (`mock.simulate_draft`) against this
+    league's own projected player pool, returned as `{"Mock Team N": [...]}`
+    -- the exact DEMONSTRATION rosters `cmd_season`'s `--mock-draft` branch
+    builds, factored out here so `cmd_trade`'s own `--mock-draft` support
+    builds the SAME rosters the SAME way rather than a second copy of the
+    same few lines.
+
+    DETERMINISM IS LOAD-BEARING, not incidental. `cmd_trade`'s
+    `--rosters-only` two-call flow (see that function's docstring) depends
+    on calling this function TWICE with the same `seed` and getting back
+    IDENTICAL rosters both times -- exactly the same guarantee `draft_seed`
+    already gave `cmd_season` (defaults to 2026 when `seed` is `None`, so
+    a run with no explicit `--seed` is still reproducible, not merely "the
+    same within one process").
+    """
+    board = _build_board(history, config, teams, season, ffc, n=mc_n, seed=seed)
+    draft_seed = seed if seed is not None else 2026
+    picks = simulate_draft(
+        board, teams=teams, rounds=rounds, my_slot=0,
+        strategy=strategy_vor_survival(config, rounds=rounds),
+        seed=draft_seed, return_all=True,
+    )
+    return {
+        f"Mock Team {int(slot) + 1}": group.to_dict("records")
+        for slot, group in picks.groupby("slot")
+    }
+
+
+def _season_roster_df(roster: list[dict], weekly_ids: set) -> tuple[pd.DataFrame, list[str]]:
+    """Build the bare `(player_id, name, position)` frame `season.
+    simulate_season` joins against a league-wide `weekly.project_week`
+    board -- unlike `_roster_df` above, this does NOT pre-compute
+    `proj_points`/`sd` itself (season.py's own `_joined_roster` does that
+    join, choosing the marginal/conditional view in exactly one place; see
+    that module's docstring). Same never-drop discipline as `_roster_df`:
+    a roster entry Node could not resolve (`player_id: None`) or one this
+    engine has no weekly projection for (not in `weekly_ids` -- a K/DEF, or
+    simply absent from history) still gets a row, and is named in the
+    returned `unprojected` list rather than silently vanishing from the
+    simulated roster.
+    """
+    rows: list[dict] = []
+    unprojected: list[str] = []
+    for p in roster:
+        pid = p.get("player_id")
+        rows.append({"player_id": pid, "name": p.get("name"), "position": p.get("position")})
+        if pid is None or pid not in weekly_ids:
+            unprojected.append(p.get("name") or pid or "(unknown player)")
+    return pd.DataFrame(rows, columns=["player_id", "name", "position"]), unprojected
+
+
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
@@ -493,12 +582,392 @@ def cmd_playoff(args: argparse.Namespace, stdin_payload: dict) -> dict:
     }
 
 
+def cmd_season(args: argparse.Namespace, stdin_payload: dict) -> dict:
+    """Championship odds for the whole league via `season.simulate_season`.
+
+    ROSTERS come from one of three mutually exclusive sources:
+      - stdin `{"rosters": {team_key: [roster entries...]}}` -- the live
+        path, one entry per Yahoo team, resolved to nflverse `player_id`
+        by src/cli.js exactly as `lineup`/`playoff` already do.
+      - `--mock-draft` -- a DEMONSTRATION: `mock.simulate_draft` runs one
+        simulated snake draft against this league's own projected player
+        pool (`_build_board`, reused from `cmd_board`) and its `--teams`
+        (or the league's own `num_teams`) resulting rosters, labelled
+        "Mock Team N", are simulated instead. Never confusable with a real
+        answer -- the response's `"source"` is `"mock_draft"`, and
+        src/cli.js prints an explicit banner.
+      - stdin rosters supplied from a `--rosters=PATH` file (src/cli.js's
+        job to read and forward as the same `{"rosters": ...}` shape) --
+        this function does not know the difference between that and a
+        live Node fetch; both arrive the same way on stdin.
+
+    EVERY ROSTER EMPTY (the predraft case this league is actually in right
+    now) is a `CliError`, never a table of zeros that could be mistaken for
+    a real answer -- see the module docstring's general "never invent a
+    default" discipline and the task brief's explicit predraft requirement.
+
+    SCHEDULE: stdin `"schedule"` (Node's real `league/{key}/scoreboard`
+    fetch, one entry per matchup) when given; `season.round_robin_schedule`
+    over `playoff_start_week - 1` weeks otherwise -- the exact fallback
+    `season.py`'s own module docstring names for when Yahoo has none.
+
+    PLAYOFF SETTINGS (`--playoff-start-week`/`--end-week`/`--playoff-teams`/
+    `--reseed`) are never assumed by `season.py` itself (see that module's
+    docstring) and are forwarded here from whatever the caller passed --
+    live Yahoo settings on a real run, or the `_DEMO_*` fallback documented
+    above when nobody supplied real ones (only reachable via `--mock-draft`
+    /`--rosters` in practice, since src/cli.js's live path always passes
+    the real numbers explicitly).
+    """
+    if args.mock_draft and stdin_payload.get("rosters"):
+        raise CliError(
+            "--mock-draft and stdin rosters are mutually exclusive -- pass one or the other "
+            "(a live/--rosters roster payload, or --mock-draft to simulate one)."
+        )
+
+    config = _load_league(Path(args.config))
+    data_dir = Path(args.data_dir)
+    history = _load_history(data_dir)
+    season = args.season or _default_season(history)
+    reseed = True if args.reseed is None else bool(args.reseed)
+
+    adp_source = None
+    if args.mock_draft:
+        ffc, adp_source = _load_adp(data_dir, args.adp)
+        teams = args.teams or config.num_teams
+        rounds = args.rounds or DEFAULT_ROUNDS
+        rosters_payload = _mock_draft_rosters(
+            history, config, ffc, season, teams, rounds, args.mc_n, args.seed,
+        )
+        source = "mock_draft"
+    else:
+        rosters_payload = stdin_payload.get("rosters") or {}
+        source = "live"
+
+    if not rosters_payload or all(not roster for roster in rosters_payload.values()):
+        raise CliError(
+            "No rosters to simulate -- every roster is empty. This is expected before a draft "
+            "has happened (a predraft league): there is nothing to simulate yet. Run `tt season` "
+            "again once your real draft is complete, or exercise this command right now with "
+            "--mock-draft (a simulated draft against this league's own player pool) or "
+            "--rosters=PATH (your own hand-built hypothetical rosters)."
+        )
+
+    weekly_board = project_week(
+        history, config, seasons=_train_seasons(history, season),
+        n=args.mc_n, seed=args.seed,
+        as_of_season=season if args.week is not None else None,
+        as_of_week=args.week,
+    )
+    weekly_ids = set(weekly_board["player_id"])
+
+    rosters: dict[str, pd.DataFrame] = {}
+    unprojected_by_team: dict[str, list[str]] = {}
+    for team, roster in rosters_payload.items():
+        df, unprojected = _season_roster_df(roster, weekly_ids)
+        rosters[team] = df
+        unprojected_by_team[team] = unprojected
+
+    schedule_payload = stdin_payload.get("schedule")
+    if schedule_payload:
+        schedule = pd.DataFrame(schedule_payload)
+    else:
+        schedule = round_robin_schedule(list(rosters), weeks=args.playoff_start_week - 1)
+
+    result = simulate_season(
+        rosters, schedule, config, weekly=weekly_board,
+        playoff_start_week=args.playoff_start_week, end_week=args.end_week,
+        playoff_teams=args.playoff_teams, reseed=reseed, n=args.n, seed=args.seed,
+    )
+    return {
+        "season": season,
+        "week": args.week,
+        "source": source,
+        "adp_source": adp_source,
+        "n": result.attrs["n"],
+        "monte_carlo_se": result.attrs["monte_carlo_se"],
+        "playoff_start_week": result.attrs["playoff_start_week"],
+        "end_week": result.attrs["end_week"],
+        "playoff_teams": result.attrs["playoff_teams"],
+        "reseed": result.attrs["reseed"],
+        "regular_season_weeks": result.attrs["regular_season_weeks"],
+        "teams": _records(result),
+        "unprojected_players": unprojected_by_team,
+    }
+
+
+def _estimate_trade_candidates(
+    rosters: Mapping[str, pd.DataFrame], my_team: str, opponents: list[str],
+    max_give: int, max_get: int,
+) -> int:
+    """The EXACT number of candidate trades `find_trades` will enumerate
+    against `opponents` before any screening -- `math.comb` over roster
+    sizes, the same arithmetic `tt.trade`'s own module docstring uses to
+    state "24843 candidate trades" for a 13-man/2-for-2/3-counterparty
+    league. This is CLI-level bookkeeping, not a modelling decision (same
+    category as `_pick_number` -- see the module docstring): the
+    combinatorics are deterministic, so this can be computed cheaply BEFORE
+    the expensive call and printed to stderr as an honest up-front
+    estimate, since `find_trades` itself has no per-candidate progress
+    callback to report real progress with (see `cmd_trade`'s docstring)."""
+    my_n = len(rosters[my_team])
+    total = 0
+    for opponent in opponents:
+        their_n = len(rosters[opponent])
+        give_count = sum(math.comb(my_n, k) for k in range(1, max_give + 1) if k <= my_n)
+        get_count = sum(math.comb(their_n, k) for k in range(1, max_get + 1) if k <= their_n)
+        total += give_count * get_count
+    return total
+
+
+def cmd_trade(args: argparse.Namespace, stdin_payload: dict, stderr: IO[str]) -> dict:
+    """Trade valuation via `trade.evaluate_trade` / `trade.find_trades`
+    (docs/draft-engine-design.md's phase-3 trade section). Mirrors
+    `cmd_season` in almost every particular -- the SAME roster/schedule
+    input channels, the SAME predraft guard, the SAME `--mock-draft`/
+    `--rosters=PATH` offline demonstration paths -- because a trade is
+    valued against exactly the inputs a season is (see `tt.trade`'s own
+    module docstring: "a trade is worth the change it makes to
+    championship probability").
+
+    TWO CALL SHAPES, selected by `--find`:
+      `--find` -- `trade.find_trades`. Stdin needs only `rosters` (+
+      optional `schedule`) and `my_team`; an optional `their_team` narrows
+      the search to one counterparty (`--with=TEAM` on the Node side),
+      exactly like `find_trades`' own `their_teams`. Returns one row per
+      SIMULATED candidate, ranked.
+      otherwise -- `trade.evaluate_trade`. Stdin additionally needs
+      `their_team`, `i_give`, `i_get` -- player ids ALREADY resolved by
+      Node (exactly as it resolves `lineup`/`playoff`/`season` rosters;
+      see this module's own docstring and `src/identity.js`). Returns
+      exactly 2 rows.
+
+    `--rosters-only`: build and return `rosters` WITHOUT evaluating
+    anything -- the one piece of bookkeeping this command needs beyond
+    `cmd_season`'s. `--give`/`--get` are typed by the user as PLAYER NAMES
+    on the command line, and Node resolves a name to a `player_id` by
+    matching it against the actual roster -- but under `--mock-draft` that
+    roster does not exist until THIS module builds it
+    (`_mock_draft_rosters`), so Node cannot see it in advance the way it
+    can a live or `--rosters=PATH` roster. The fix is a two-call, not a
+    rewrite: Node calls this command once with `--rosters-only` to fetch
+    the deterministic, `--seed`-pinned rosters, resolves names against
+    them locally exactly as it would a live roster, then calls again
+    (same seed) with the resolved `i_give`/`i_get` -- `_mock_draft_rosters`
+    reproduces IDENTICAL rosters both times (see that function's own
+    docstring; pinned here by
+    `test_trade_rosters_only_is_deterministic_under_the_same_seed` and
+    `test_trade_mock_draft_two_call_flow_evaluates_the_rosters_it_resolved`).
+    Live and `--rosters=PATH` rosters never need this round trip: Node
+    already holds them before it ever calls this module.
+
+    PROGRESS. `find_trades` costs one season simulation per SURVIVING
+    candidate (its own docstring: up to minutes for an exhaustive
+    multi-player search) and exposes no incremental callback -- its
+    signature is frozen, and re-implementing its inner loop here just to
+    fake one would be a second model, exactly what `tt.trade` itself
+    refuses to do for `simulate_season` (see its "WHAT IS REUSED" section).
+    So: an honest UP-FRONT ESTIMATE to stderr before the one blocking call,
+    not a fabricated progress bar -- `_estimate_trade_candidates` is exact
+    (deterministic combinatorics), and actual cost is governed directly by
+    the `--max-give`/`--max-get`/`--screen-top`/`--exhaustive`/`--n` flags
+    this estimate names.
+
+    UNCERTAINTY. Every row this returns (`evaluate_trade`'s `sides`,
+    `find_trades`' `candidates`) already carries `delta_se`/
+    `delta_ci_low`/`delta_ci_high`/`significant` from the engine untouched
+    -- this module adds no rounding, no "significant"-only view, and drops
+    nothing. Rendering the interval so a sub-noise delta cannot read as
+    signal is `src/cli.js`'s job (see the task's own "OUTPUT REQUIREMENT
+    THAT MATTERS MOST"), which needs the raw numbers, not a pre-formatted
+    string.
+    """
+    if args.mock_draft and stdin_payload.get("rosters"):
+        raise CliError(
+            "--mock-draft and stdin rosters are mutually exclusive -- pass one or the other "
+            "(a live/--rosters roster payload, or --mock-draft to simulate one)."
+        )
+
+    config = _load_league(Path(args.config))
+    data_dir = Path(args.data_dir)
+    history = _load_history(data_dir)
+    season = args.season or _default_season(history)
+
+    adp_source = None
+    if args.mock_draft:
+        ffc, adp_source = _load_adp(data_dir, args.adp)
+        teams = args.teams or config.num_teams
+        rounds = args.rounds or DEFAULT_ROUNDS
+        rosters_payload = _mock_draft_rosters(
+            history, config, ffc, season, teams, rounds, args.mc_n, args.seed,
+        )
+        source = "mock_draft"
+    else:
+        rosters_payload = stdin_payload.get("rosters") or {}
+        source = "live"
+
+    if not rosters_payload or all(not roster for roster in rosters_payload.values()):
+        raise CliError(
+            "No rosters to trade against -- every roster is empty. This is expected before a "
+            "draft has happened (a predraft league): there is nothing to trade yet. Run `tt "
+            "trade` again once your real draft is complete, or exercise this command right now "
+            "with --mock-draft (a simulated draft against this league's own player pool) or "
+            "--rosters=PATH (your own hand-built hypothetical rosters)."
+        )
+
+    if args.rosters_only:
+        # SLIMMED to exactly the `(player_id, name, position)` shape a live
+        # or `--rosters=PATH` roster already has -- `rosters_payload` from
+        # `_mock_draft_rosters` carries every column the draft board/picks
+        # DataFrame does (VOR, tier, survival stats, ADP...), and
+        # `attach_adp` leaves `adp`/`stdev` (and anything survival derives
+        # from them) as literal NaN for a player this league's ADP feed
+        # doesn't cover (see `_load_adp`'s "never invent an ADP number").
+        # Handed to `json.dumps` UNMODIFIED, a raw NaN serialises as the
+        # bare, non-standard `NaN` token -- exactly the failure mode
+        # `_records`'s own docstring documents for a manual (non-`to_json`)
+        # dict round-trip, and one Node's strict `JSON.parse` rejects
+        # outright (Python's own `json.loads` accepts it non-strictly,
+        # which is why this has to be caught here, not downstream).
+        slim = {
+            team: [
+                {"player_id": p.get("player_id"), "name": p.get("name"), "position": p.get("position")}
+                for p in roster
+            ]
+            for team, roster in rosters_payload.items()
+        }
+        return {"season": season, "source": source, "adp_source": adp_source, "rosters": slim}
+
+    weekly_board = project_week(
+        history, config, seasons=_train_seasons(history, season),
+        n=args.mc_n, seed=args.seed,
+        as_of_season=season if args.week is not None else None,
+        as_of_week=args.week,
+    )
+    weekly_ids = set(weekly_board["player_id"])
+
+    rosters: dict[str, pd.DataFrame] = {}
+    unprojected_by_team: dict[str, list[str]] = {}
+    for team, roster in rosters_payload.items():
+        df, unprojected = _season_roster_df(roster, weekly_ids)
+        rosters[team] = df
+        unprojected_by_team[team] = unprojected
+
+    schedule_payload = stdin_payload.get("schedule")
+    if schedule_payload:
+        schedule = pd.DataFrame(schedule_payload)
+    else:
+        schedule = round_robin_schedule(list(rosters), weeks=args.playoff_start_week - 1)
+
+    reseed = True if args.reseed is None else bool(args.reseed)
+    playoff_teams_reported = args.playoff_teams if args.playoff_teams is not None else len(rosters)
+    common = dict(
+        weekly=weekly_board, playoff_start_week=args.playoff_start_week,
+        end_week=args.end_week, playoff_teams=args.playoff_teams,
+        reseed=reseed, n=args.n, seed=args.seed,
+    )
+
+    if args.find:
+        my_team = stdin_payload.get("my_team")
+        if not my_team:
+            raise CliError(
+                "stdin JSON must include 'my_team' (which team's championship odds to search for)"
+            )
+        if my_team not in rosters:
+            raise CliError(f"my_team {my_team!r} has no roster in the payload")
+        their_team = stdin_payload.get("their_team")
+        if their_team is not None and their_team not in rosters:
+            raise CliError(f"their_team {their_team!r} has no roster in the payload")
+        their_teams = [their_team] if their_team else None
+
+        screen_top = None if args.exhaustive else args.screen_top
+        opponents = their_teams if their_teams is not None else [t for t in rosters if t != my_team]
+        estimated = _estimate_trade_candidates(rosters, my_team, opponents, args.max_give, args.max_get)
+        stderr.write(
+            f"tt trade --find: up to {estimated} candidate trade(s) across {len(opponents)} "
+            f"counterpart{'y' if len(opponents) == 1 else 'ies'} "
+            f"(max_give={args.max_give}, max_get={args.max_get}) at n={args.n}. "
+            + (
+                f"Screened to the top {screen_top} per side per counterparty before simulating "
+                "(fast, but can miss a mutually-beneficial multi-player package -- see tt.trade's "
+                "own docstring; pass --exhaustive to disable the screen and simulate every "
+                "candidate instead). "
+                if screen_top is not None else
+                "SCREEN DISABLED (--exhaustive): every candidate above will be simulated exactly "
+                "-- this can take minutes on a full-size roster (tt.trade's own docstring measured "
+                "812s for an exhaustive 2-for-2). "
+            )
+            + "This is a single blocking call with no incremental progress to report.\n"
+        )
+        try:
+            result = find_trades(
+                rosters, schedule, config, my_team=my_team, max_give=args.max_give,
+                max_get=args.max_get, their_teams=their_teams, screen_top=screen_top, **common,
+            )
+        except KeyError as e:
+            raise CliError(f"Invalid trade search: {e.args[0] if e.args else e}") from e
+        except ValueError as e:
+            raise CliError(f"Invalid trade search: {e}") from e
+        return {
+            "mode": "find", "season": season, "source": source, "adp_source": adp_source,
+            "my_team": my_team,
+            "n": result.attrs["n"], "monte_carlo_se": result.attrs["monte_carlo_se"],
+            "playoff_start_week": args.playoff_start_week, "end_week": args.end_week,
+            "playoff_teams": playoff_teams_reported, "reseed": reseed,
+            "max_give": result.attrs["max_give"], "max_get": result.attrs["max_get"],
+            "screen_top": result.attrs["screen_top"],
+            "candidates_enumerated": result.attrs["candidates_enumerated"],
+            "candidates_simulated": result.attrs["candidates_simulated"],
+            "candidates": _records(result),
+            "unprojected_players": unprojected_by_team,
+        }
+
+    my_team = stdin_payload.get("my_team")
+    their_team = stdin_payload.get("their_team")
+    i_give = stdin_payload.get("i_give") or []
+    i_get = stdin_payload.get("i_get") or []
+    if not my_team or not their_team:
+        raise CliError("stdin JSON must include 'my_team' and 'their_team'")
+    if my_team not in rosters:
+        raise CliError(f"my_team {my_team!r} has no roster in the payload")
+    if their_team not in rosters:
+        raise CliError(f"their_team {their_team!r} has no roster in the payload")
+    if not i_give and not i_get:
+        raise CliError(
+            "stdin JSON must include a non-empty 'i_give' and/or 'i_get' array "
+            "(what you are trading) -- or pass --find to search for trades instead"
+        )
+
+    try:
+        result = evaluate_trade(
+            rosters, schedule, config, my_team=my_team, their_team=their_team,
+            i_give=i_give, i_get=i_get, **common,
+        )
+    except KeyError as e:
+        raise CliError(f"Invalid trade: {e.args[0] if e.args else e}") from e
+    except ValueError as e:
+        raise CliError(f"Invalid trade: {e}") from e
+
+    return {
+        "mode": "evaluate", "season": season, "source": source, "adp_source": adp_source,
+        "my_team": my_team, "their_team": their_team,
+        "n": result.attrs["n"], "monte_carlo_se": result.attrs["monte_carlo_se"],
+        "playoff_start_week": result.attrs["playoff_start_week"],
+        "end_week": result.attrs["end_week"],
+        "playoff_teams": playoff_teams_reported, "reseed": result.attrs["reseed"],
+        "sides": _records(result),
+        "unprojected_players": unprojected_by_team,
+    }
+
+
 COMMANDS = {
     "board": cmd_board,
     "pick": cmd_pick,
     "mock": cmd_mock,
     "lineup": cmd_lineup,
     "playoff": cmd_playoff,
+    "season": cmd_season,
+    "trade": cmd_trade,
 }
 
 
@@ -555,6 +1024,52 @@ def build_parser() -> argparse.ArgumentParser:
     playoff.add_argument("--week", type=int, default=None)
     playoff.add_argument("--sim-n", type=int, default=PLAYOFF_DEFAULT_N, dest="sim_n")
 
+    season = sub.add_parser("season", help="Championship odds via season simulation")
+    _add_data_flags(season)
+    season.add_argument("--n", type=int, default=SEASON_DEFAULT_N,
+                         help="Season simulation count (season.simulate_season's own n)")
+    season.add_argument("--week", type=int, default=None,
+                         help="As-of week for a leakage-safe in-season projection")
+    season.add_argument("--playoff-start-week", type=int, default=_DEMO_PLAYOFF_START_WEEK,
+                         dest="playoff_start_week")
+    season.add_argument("--end-week", type=int, default=_DEMO_END_WEEK, dest="end_week")
+    season.add_argument("--playoff-teams", type=int, default=None, dest="playoff_teams")
+    season.add_argument("--reseed", type=int, choices=[0, 1], default=None)
+    season.add_argument("--teams", type=int, default=None, help="team count for --mock-draft")
+    season.add_argument("--rounds", type=int, default=None, help="draft rounds for --mock-draft")
+    season.add_argument("--mock-draft", action="store_true", dest="mock_draft",
+                         help="DEMONSTRATION ONLY: simulate a draft instead of using live rosters")
+
+    trade = sub.add_parser(
+        "trade", help="Evaluate a trade, or search for one, by championship-probability delta")
+    _add_data_flags(trade)
+    trade.add_argument("--n", type=int, default=TRADE_DEFAULT_N,
+                        help="Simulation count (trade.evaluate_trade/find_trades' own n)")
+    trade.add_argument("--week", type=int, default=None,
+                        help="As-of week for a leakage-safe in-season projection")
+    trade.add_argument("--playoff-start-week", type=int, default=_DEMO_PLAYOFF_START_WEEK,
+                        dest="playoff_start_week")
+    trade.add_argument("--end-week", type=int, default=_DEMO_END_WEEK, dest="end_week")
+    trade.add_argument("--playoff-teams", type=int, default=None, dest="playoff_teams")
+    trade.add_argument("--reseed", type=int, choices=[0, 1], default=None)
+    trade.add_argument("--teams", type=int, default=None, help="team count for --mock-draft")
+    trade.add_argument("--rounds", type=int, default=None, help="draft rounds for --mock-draft")
+    trade.add_argument("--mock-draft", action="store_true", dest="mock_draft",
+                        help="DEMONSTRATION ONLY: simulate a draft instead of using live rosters")
+    trade.add_argument("--rosters-only", action="store_true", dest="rosters_only",
+                        help="Build and return rosters without evaluating a trade "
+                             "(Node's --mock-draft player-name-resolution prefetch)")
+    trade.add_argument("--find", action="store_true",
+                        help="Search for trades that help my_team, instead of evaluating one")
+    trade.add_argument("--max-give", type=int, default=_TRADE_FIND_DEFAULT_MAX_GIVE, dest="max_give")
+    trade.add_argument("--max-get", type=int, default=_TRADE_FIND_DEFAULT_MAX_GET, dest="max_get")
+    trade.add_argument("--screen-top", type=int, default=_TRADE_FIND_DEFAULT_SCREEN_TOP,
+                        dest="screen_top")
+    trade.add_argument("--exhaustive", action="store_true",
+                        help="Disable find_trades' screen: simulate every enumerated candidate "
+                             "exactly (can take minutes on a full-size roster; see tt.trade's "
+                             "own docstring)")
+
     return parser
 
 
@@ -599,7 +1114,12 @@ def main(
         handler = COMMANDS.get(args.command)
         if handler is None:
             raise CliError(f"Unknown command: {args.command}")
-        result: dict[str, Any] = handler(args, payload)
+        # `cmd_trade` alone needs `stderr` (its `--find` up-front candidate
+        # estimate -- see that function's own "PROGRESS" docstring section);
+        # every other handler keeps the original 2-argument contract.
+        result: dict[str, Any] = (
+            handler(args, payload, stderr) if args.command == "trade" else handler(args, payload)
+        )
     except CliError as e:
         stderr.write(f"{e}\n")
         return 1

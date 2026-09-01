@@ -413,6 +413,419 @@ def test_playoff_requires_an_opponent_roster(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# season
+# ---------------------------------------------------------------------------
+
+_SEASON_ROSTER = [
+    {"player_id": "rb1", "name": "RB One", "position": "RB"},
+    {"player_id": "rb2", "name": "RB Two", "position": "RB"},
+    {"player_id": "wr1", "name": "WR One", "position": "WR"},
+    {"player_id": "wr2", "name": "WR Two", "position": "WR"},
+    {"player_id": "qb1", "name": "QB One", "position": "QB"},
+    {"player_id": "te1", "name": "TE One", "position": "TE"},
+]
+
+
+def _four_identical_rosters() -> dict:
+    # Deliberately identical across all four teams: this section pins WIRING
+    # (right inputs in, championship_prob shaped output out), not the
+    # underlying math -- that is test_season.py's job. Identical rosters
+    # only need be *plausible*, not distinct.
+    return {team: [dict(p) for p in _SEASON_ROSTER] for team in ("A", "B", "C", "D")}
+
+
+def test_season_fails_clearly_when_every_roster_is_empty(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run(
+        ["season", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=50", "--seed=1"],
+        stdin_obj={"rosters": {"A": [], "B": [], "C": [], "D": []}},
+    )
+    assert code != 0
+    assert out == ""
+    assert "predraft" in err.lower() or "empty" in err.lower()
+    assert "mock-draft" in err
+    assert "rosters" in err
+
+
+def test_season_simulates_and_ranks_teams_by_championship_probability(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run(
+        ["season", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=200", "--seed=1"],
+        stdin_obj={"rosters": _four_identical_rosters()},
+    )
+    assert code == 0, err
+    assert out.count("\n") == 1  # exactly one JSON document, nothing stray
+    payload = json.loads(out)
+    assert payload["n"] == 200
+    assert "monte_carlo_se" in payload
+    # Demo defaults apply since --playoff-start-week/--end-week were not given.
+    assert payload["playoff_start_week"] == 16
+    assert payload["end_week"] == 17
+    assert payload["reseed"] is True
+    teams = payload["teams"]
+    assert len(teams) == 4
+    probs = [t["championship_prob"] for t in teams]
+    assert probs == sorted(probs, reverse=True)
+    assert sum(probs) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_season_falls_back_to_round_robin_schedule_when_none_supplied(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run(
+        ["season", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=50", "--seed=1"],
+        stdin_obj={"rosters": _four_identical_rosters()},
+    )
+    assert code == 0, err
+    payload = json.loads(out)
+    # Demo default playoff_start_week is 16 -> 15 regular-season weeks.
+    assert payload["regular_season_weeks"] == 15
+
+
+def test_season_reports_unprojected_players_instead_of_dropping_them(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    rosters = _four_identical_rosters()
+    rosters["A"].append({"player_id": None, "name": "Mystery Player", "position": "WR"})
+    code, out, err = _run(
+        ["season", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=50", "--seed=1"],
+        stdin_obj={"rosters": rosters},
+    )
+    assert code == 0, err
+    payload = json.loads(out)
+    assert "Mystery Player" in payload["unprojected_players"]["A"]
+
+
+def test_season_mock_draft_runs_without_any_stdin_rosters(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    _write_adp(data_dir)
+    code, out, err = _run([
+        "season", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=50", "--seed=1", "--teams=4", "--rounds=1", "--mock-draft",
+    ], stdin_obj={})
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["source"] == "mock_draft"
+    assert len(payload["teams"]) == 4
+
+
+def test_season_mock_draft_and_stdin_rosters_are_mutually_exclusive(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "season", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=50", "--seed=1", "--mock-draft",
+    ], stdin_obj={"rosters": _four_identical_rosters()})
+    assert code != 0
+    assert "mock-draft" in err.lower() and "mutually exclusive" in err.lower()
+
+
+def test_season_honors_playoff_teams_and_reseed_flags_from_the_cli(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "season", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=200", "--seed=1",
+        "--playoff-start-week=3", "--end-week=4", "--playoff-teams=2", "--reseed=0",
+    ], stdin_obj={"rosters": _four_identical_rosters()})
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["playoff_start_week"] == 3
+    assert payload["end_week"] == 4
+    assert payload["playoff_teams"] == 2
+    assert payload["reseed"] is False
+
+
+# ---------------------------------------------------------------------------
+# trade
+# ---------------------------------------------------------------------------
+
+def _four_distinct_rosters() -> dict:
+    """Four teams holding DIFFERENT projectable players -- unlike season's
+    `_four_identical_rosters`, a trade needs the two sides to actually hold
+    different players, or every proposal is either a no-op or a KeyError
+    (a team cannot give up a player it does not hold)."""
+    return {
+        "A": [dict(p) for p in _SEASON_ROSTER if p["player_id"] in ("rb1", "wr1")],
+        "B": [dict(p) for p in _SEASON_ROSTER if p["player_id"] in ("rb2", "wr2")],
+        "C": [dict(p) for p in _SEASON_ROSTER if p["player_id"] in ("qb1",)],
+        "D": [dict(p) for p in _SEASON_ROSTER if p["player_id"] in ("te1",)],
+    }
+
+
+def test_trade_evaluate_returns_two_sides_with_uncertainty_reported(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=200", "--seed=1",
+    ], stdin_obj={
+        "rosters": _four_distinct_rosters(),
+        "my_team": "A", "their_team": "B",
+        "i_give": ["rb1"], "i_get": ["rb2"],
+    })
+    assert code == 0, err
+    assert out.count("\n") == 1  # exactly one JSON document, nothing stray
+    payload = json.loads(out)
+    assert payload["mode"] == "evaluate"
+    sides = payload["sides"]
+    assert len(sides) == 2
+    assert {s["team"] for s in sides} == {"A", "B"}
+    for side in sides:
+        # THE OUTPUT REQUIREMENT THAT MATTERS MOST: every delta ships with
+        # its uncertainty, never bare.
+        assert "delta_se" in side
+        assert "delta_ci_low" in side and "delta_ci_high" in side
+        assert "significant" in side
+        assert side["delta_ci_low"] <= side["delta"] <= side["delta_ci_high"]
+
+
+def test_trade_fails_clearly_when_every_roster_is_empty(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=50", "--seed=1",
+    ], stdin_obj={
+        "rosters": {"A": [], "B": [], "C": [], "D": []},
+        "my_team": "A", "their_team": "B", "i_give": ["rb1"], "i_get": ["rb2"],
+    })
+    assert code != 0
+    assert out == ""
+    assert "predraft" in err.lower() or "empty" in err.lower()
+    assert "mock-draft" in err
+    assert "rosters" in err
+
+
+def test_trade_mock_draft_and_stdin_rosters_are_mutually_exclusive(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=50", "--seed=1", "--mock-draft",
+    ], stdin_obj={
+        "rosters": _four_distinct_rosters(), "my_team": "A", "their_team": "B",
+        "i_give": ["rb1"], "i_get": ["rb2"],
+    })
+    assert code != 0
+    assert "mock-draft" in err.lower() and "mutually exclusive" in err.lower()
+
+
+def test_trade_rosters_only_returns_rosters_without_evaluating(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    _write_adp(data_dir)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--seed=1", "--teams=4", "--rounds=1", "--mock-draft", "--rosters-only",
+    ], stdin_obj={})
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["source"] == "mock_draft"
+    assert "rosters" in payload
+    assert len(payload["rosters"]) == 4
+    for roster in payload["rosters"].values():
+        assert len(roster) >= 1
+        assert "player_id" in roster[0] and "name" in roster[0]
+    # rosters-only never runs the simulation -- no championship-probability
+    # fields at all, so a caller can never mistake this for a real answer.
+    assert "sides" not in payload and "candidates" not in payload
+
+
+def test_trade_rosters_only_never_leaks_a_bare_NaN_token_onto_stdout(tmp_path):
+    """`_mock_draft_rosters` returns whatever columns `mock.simulate_draft`'s
+    picks carry (VOR, tier, ADP, survival stats...), and `attach_adp` leaves
+    `adp`/`stdev` as literal NaN for any player this tiny fixture's ADP file
+    doesn't cover (`_write_adp` only covers rb1/wr1 -- see that helper and
+    `_load_adp`'s own docstring: "never invent an ADP number"). Round 2
+    forces at least one such player onto a roster. Node's `JSON.parse` is
+    STRICT and rejects the bare `NaN` token Python's `json.dumps` happily
+    emits for a raw (non-`_records`) dict round-trip -- see `_records`'s own
+    docstring for exactly this failure mode -- so this is checked on the
+    RAW TEXT, not `json.loads` (which accepts `NaN` non-strictly and would
+    hide the bug Node actually hits)."""
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    _write_adp(data_dir)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--seed=1", "--teams=2", "--rounds=3", "--mock-draft", "--rosters-only",
+    ], stdin_obj={})
+    assert code == 0, err
+    assert "NaN" not in out
+    payload = json.loads(out)
+    for roster in payload["rosters"].values():
+        for player in roster:
+            assert set(player) == {"player_id", "name", "position"}
+
+
+def test_trade_rosters_only_is_deterministic_under_the_same_seed(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    _write_adp(data_dir)
+    argv = [
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--seed=7", "--teams=4", "--rounds=1", "--mock-draft", "--rosters-only",
+    ]
+    code1, out1, err1 = _run(argv, stdin_obj={})
+    code2, out2, err2 = _run(argv, stdin_obj={})
+    assert code1 == 0 and code2 == 0, (err1, err2)
+    # THE LINCHPIN of the two-call --mock-draft flow (see cmd_trade's own
+    # docstring): Node calls this once to resolve typed player names
+    # against a roster, then again to evaluate the trade -- the two calls
+    # MUST reproduce identical rosters, or the ids Node resolved the first
+    # time would name the wrong players the second time.
+    assert json.loads(out1)["rosters"] == json.loads(out2)["rosters"]
+
+
+def test_trade_evaluate_rejects_an_unknown_team_cleanly(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=50", "--seed=1",
+    ], stdin_obj={
+        "rosters": _four_distinct_rosters(),
+        "my_team": "A", "their_team": "nobody",
+        "i_give": ["rb1"], "i_get": ["rb2"],
+    })
+    assert code != 0
+    assert out == ""
+    assert "nobody" in err
+    assert "Traceback" not in err
+
+
+def test_trade_evaluate_rejects_a_player_the_team_does_not_hold(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--n=50", "--seed=1",
+    ], stdin_obj={
+        "rosters": _four_distinct_rosters(),
+        "my_team": "A", "their_team": "B",
+        "i_give": ["qb1"], "i_get": ["rb2"],  # qb1 belongs to team C, not A
+    })
+    assert code != 0
+    assert out == ""
+    assert "qb1" in err
+    assert "Traceback" not in err
+
+
+def test_trade_find_returns_ranked_candidates_with_both_sides_deltas(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=200", "--seed=1", "--find",
+    ], stdin_obj={"rosters": _four_distinct_rosters(), "my_team": "A"})
+    assert code == 0, err
+    assert out.count("\n") == 1
+    payload = json.loads(out)
+    assert payload["mode"] == "find"
+    assert payload["my_team"] == "A"
+    candidates = payload["candidates"]
+    assert len(candidates) > 0
+    for c in candidates:
+        assert "my_delta_se" in c and "their_delta_se" in c
+        assert "my_significant" in c and "their_significant" in c
+        assert "mutual" in c
+    deltas = [c["my_delta"] for c in candidates]
+    assert deltas == sorted(deltas, reverse=True)
+
+
+def test_trade_find_honors_the_with_flag_restricting_to_one_counterparty(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=200", "--seed=1", "--find",
+    ], stdin_obj={"rosters": _four_distinct_rosters(), "my_team": "A", "their_team": "B"})
+    assert code == 0, err
+    payload = json.loads(out)
+    assert all(c["their_team"] == "B" for c in payload["candidates"])
+
+
+def test_trade_find_honors_max_give_max_get_and_screen_top_flags(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=200", "--seed=1", "--find",
+        "--max-give=1", "--max-get=1", "--screen-top=5",
+    ], stdin_obj={"rosters": _four_distinct_rosters(), "my_team": "A", "their_team": "B"})
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["max_give"] == 1
+    assert payload["max_get"] == 1
+    assert payload["screen_top"] == 5
+    for c in payload["candidates"]:
+        assert len(c["gives"]) <= 1
+        assert len(c["gets"]) <= 1
+
+
+def test_trade_find_exhaustive_flag_disables_the_screen(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=200", "--seed=1", "--find",
+        "--max-give=1", "--max-get=1", "--exhaustive",
+    ], stdin_obj={"rosters": _four_distinct_rosters(), "my_team": "A", "their_team": "B"})
+    assert code == 0, err
+    payload = json.loads(out)
+    assert payload["screen_top"] is None
+    assert payload["candidates_simulated"] == payload["candidates_enumerated"]
+
+
+def test_trade_find_prints_an_upfront_estimate_to_stderr_not_stdout(tmp_path):
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    code, out, err = _run([
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=200", "--seed=1", "--find",
+    ], stdin_obj={"rosters": _four_distinct_rosters(), "my_team": "A"})
+    assert code == 0, err
+    assert out.count("\n") == 1  # the estimate never lands on stdout
+    assert "candidate" in err.lower()
+
+
+def test_trade_mock_draft_two_call_flow_evaluates_the_rosters_it_resolved(tmp_path):
+    """Pins the design `cmd_trade`'s docstring describes: Node calls
+    `--rosters-only --mock-draft` once to resolve typed names against a
+    roster, then calls `--mock-draft` again (same seed) with the resolved
+    ids -- the second call must evaluate exactly the players the first
+    call named, because the two calls reproduce identical rosters."""
+    league = _write_league(tmp_path)
+    data_dir = _write_parquet(tmp_path)
+    _write_adp(data_dir)
+    resolve_argv = [
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--seed=3", "--teams=4", "--rounds=1", "--mock-draft", "--rosters-only",
+    ]
+    code, out, err = _run(resolve_argv, stdin_obj={})
+    assert code == 0, err
+    rosters = json.loads(out)["rosters"]
+    my_team, their_team = "Mock Team 1", "Mock Team 2"
+    give_id = rosters[my_team][0]["player_id"]
+    get_id = rosters[their_team][0]["player_id"]
+
+    eval_argv = [
+        "trade", f"--config={league}", f"--data-dir={data_dir}",
+        "--mc-n=30", "--n=200", "--seed=3", "--teams=4", "--rounds=1", "--mock-draft",
+    ]
+    code2, out2, err2 = _run(eval_argv, stdin_obj={
+        "my_team": my_team, "their_team": their_team,
+        "i_give": [give_id], "i_get": [get_id],
+    })
+    assert code2 == 0, err2
+    payload = json.loads(out2)
+    proposer = next(s for s in payload["sides"] if s["team"] == my_team)
+    assert proposer["gives"] == [give_id]
+    assert proposer["gets"] == [get_id]
+
+
+# ---------------------------------------------------------------------------
 # stdin / general robustness
 # ---------------------------------------------------------------------------
 
