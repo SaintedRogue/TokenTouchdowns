@@ -7,35 +7,50 @@ the way it is:
     carries 0.825 | targets 0.623 | fantasy points 0.466 | TDs 0.147
     yards per target 0.046 | yards per carry 0.016
 
-Carries and targets are the sticky, predictable part of a player's usage, so
-`season_volume` projects them directly, recency-weighted toward the most
-recent season. Yards-per-opportunity and touchdown rate are functionally
-random -- a player's own history there is mostly noise -- so they are never
-extrapolated; `project_players` regresses them hard toward a positional prior
-via `features.shrunk_rate` and lets that shrunk rate stand in for "skill".
-Points are never predicted directly (they autocorrelate WORSE than any of
-their own inputs); they are composed from volume + shrunk rates via
-`models.compose.simulate_points`, which is also what turns this into an
-honest DISTRIBUTION (p10/p50/p90) instead of a single falsely-precise number.
+Carries, targets and pass attempts are the sticky, predictable part of a
+player's usage, so `season_volume` projects them directly, recency-weighted
+toward the most recent season. Yards-per-opportunity and touchdown (and
+interception) rate are functionally random -- a player's own history there is
+mostly noise -- so they are never extrapolated; `project_players` regresses
+them hard toward a positional prior via `features.shrunk_rate` and lets that
+shrunk rate stand in for "skill". Points are never predicted directly (they
+autocorrelate WORSE than any of their own inputs); they are composed from
+volume + shrunk rates via `models.compose.simulate_components`, which is also
+what turns this into an honest DISTRIBUTION (p10/p50/p90) instead of a single
+falsely-precise number.
 
-TWO VOLUME STREAMS, ONE PLAYER (see task-3-report.md for the fuller writeup):
-a running back both carries and catches, and those two streams have
-different efficiencies, different touchdown rates, AND different scoring
-(a reception is worth points on its own; a carry is not). This module
-simulates the rushing and receiving streams SEPARATELY and sums the
-resulting point samples, rather than folding carries+targets into one
-combined "opportunity" -- the more faithful of the two options the brief
-allows, at the cost of twice the simulation work per player.
+THREE VOLUME STREAMS, ONE PLAYER (see task-3-report.md for the fuller
+writeup): a running back both carries and catches, and a running quarterback
+both throws and carries. Each stream has its own efficiency, its own
+touchdown rate, and its own scoring (a reception is worth points on its own; a
+carry alone is not; an interception is worth NEGATIVE points). This module
+simulates the rushing, receiving and passing streams SEPARATELY and sums the
+resulting point samples, rather than folding them into one combined
+"opportunity" -- the more faithful of the two options the brief allows, at the
+cost of one simulation call per stream per player. Every stat column this
+module reads (`_with_required_columns`) defaults to zero when a `history`
+frame doesn't track it at all, so a frame with no passing columns (e.g. a
+skill-position-only fixture) still works: the passing stream just contributes
+zero for every player.
 
-`models.compose.simulate_points` bakes in a fixed conversion (0.1 pt/yard,
-6 pt/TD) and has no notion of receptions at all, so this league's actual
-scoring (`league.scoring_weights`, never the hardcoded HALF_PPR) has to be
-applied on top rather than trusted to be baked into that function's return
-value. `_extract_yards_and_tds` recovers the underlying yards and touchdown
-samples from two calls to `simulate_points` that share a seed (see its
-docstring for why that is exact, not a hack), so this module can reweight
-them by the league's real per-yard and per-touchdown values and add a
-reception term `simulate_points` was never built to know about.
+`models.compose.simulate_components` returns (opportunities, yards,
+touchdowns) rather than a single fused points number, specifically so a
+caller can reweight by this league's actual scoring
+(`league.scoring_weights`, never the hardcoded HALF_PPR) instead of trusting
+`simulate_points`'s fixed 0.1 pt/yard, 6 pt/TD conversion -- and so it can
+derive a related count `simulate_components` has no concept of at all
+(receptions from targets, interceptions from attempts) from the SAME
+per-sample opportunity count that produced the yards and touchdowns for that
+stream, preserving the real correlation between a big-opportunity game and
+more of everything, rather than an independent, uncorrelated draw.
+
+A shrunk yards-per-opportunity rate can come out negative in real data (a
+player with more kneel-downs/tackles-for-loss than positive yardage on a
+small sample) -- a negative Gamma scale parameter is meaningless and
+`simulate_components` raises rather than silently producing garbage. Domain
+knowledge of which shrunk rates are "yards per opportunity" (and therefore
+must be clamped at zero) lives here, not in `models/compose.py`, which stays
+a generic simulator with no opinion on what its inputs represent.
 """
 from __future__ import annotations
 
@@ -47,31 +62,63 @@ import pandas as pd
 
 from .features import shrunk_rate
 from .league import LeagueConfig, scoring_weights
-from .models.compose import TD_POINTS, YARDS_POINT, simulate_points, summarise
+from .models.compose import simulate_components, summarise
 
 # Shrinkage strengths, in units of "opportunities worth of prior weight" (see
-# features.shrunk_rate's docstring). All three of these are the measured
-# near-zero-autocorrelation quantities the modelling principle calls
-# "functionally random" -- deliberately large relative to a typical
-# multi-season workload (a three-year workhorse RB might reach ~700-800
-# carries) so that even a big sample only partially overrides the positional
-# prior; a single season is dominated by the prior outright, which is the
-# intended behaviour, not a bug. The ORDERING across constants mirrors the
+# features.shrunk_rate's docstring). These are all quantities the modelling
+# principle treats as "functionally random" -- deliberately large relative to
+# a typical multi-season workload (a three-year workhorse RB might reach
+# ~700-800 carries; a three-year starting QB ~1600-1800 attempts) so that even
+# a big sample only partially overrides the positional prior; a single season
+# is dominated by the prior outright, which is the intended behaviour, not a
+# bug. The ORDERING across the rushing/receiving constants mirrors the
 # measured r values directly: yards/carry (r=0.016, the least real signal)
 # gets the strongest pull; TD rate (r=0.147, the most real signal of the
-# three) gets the weakest. Catch rate isn't one of the six measured
-# quantities in the spec, so its strength is a reasoned middle value, not a
-# measured one -- flagged here rather than presented as equally justified.
+# three) gets the weakest. Catch rate and every passing constant aren't among
+# the six measured quantities in the spec, so their strengths are reasoned
+# middle values, not measured ones -- flagged here rather than presented as
+# equally justified.
 RUSH_EFF_STRENGTH = 500.0
 REC_EFF_STRENGTH = 350.0
 RUSH_TD_STRENGTH = 300.0
 REC_TD_STRENGTH = 250.0
 CATCH_RATE_STRENGTH = 200.0
+PASS_EFF_STRENGTH = 1000.0
+PASS_TD_STRENGTH = 600.0
+PASS_INT_STRENGTH = 600.0
 
-_TOTAL_COLUMNS = (
+# Every stat column this module reads. A `history` frame that doesn't track a
+# stream at all (e.g. a skill-position-only fixture with no passing columns)
+# is filled to zero for the columns it's missing, rather than raising --
+# see `_with_required_columns`.
+_REQUIRED_STAT_COLUMNS = (
     "carries", "rushing_yards", "rushing_tds",
     "targets", "receiving_yards", "receiving_tds", "receptions",
+    "attempts", "passing_yards", "passing_tds", "passing_interceptions",
 )
+_TOTAL_COLUMNS = _REQUIRED_STAT_COLUMNS
+
+_EMPTY_PRIOR = pd.Series({
+    "rush_eff": 0.0, "rush_td_rate": 0.0,
+    "rec_eff": 0.0, "rec_td_rate": 0.0, "catch_rate": 0.0,
+    "pass_eff": 0.0, "pass_td_rate": 0.0, "pass_int_rate": 0.0,
+})
+
+
+def _with_required_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Every stat column this module reads, defaulting missing ones to zero.
+
+    Lets a frame that doesn't track a whole stream (no passing columns at
+    all, say) flow through unchanged rather than KeyError -- that stream
+    simply contributes zero for every player, which is correct: zero
+    attempts is a true fact about a player this module was never told threw
+    a pass, not a missing-data problem to solve.
+    """
+    df = df.copy()
+    for column in _REQUIRED_STAT_COLUMNS:
+        if column not in df.columns:
+            df[column] = 0.0
+    return df
 
 
 def _default_recency_weights(seasons: Iterable[int]) -> dict[int, float]:
@@ -91,7 +138,7 @@ def season_volume(
     seasons: Iterable[int],
     recency_weights: dict[int, float] | None = None,
 ) -> pd.DataFrame:
-    """Per-player expected per-game carries and targets.
+    """Per-player expected per-game carries, targets and pass attempts.
 
     Season-level selection (which seasons feed the projection), not a
     within-season as-of point, so this filters directly rather than routing
@@ -110,7 +157,11 @@ def season_volume(
     if recency_weights is None:
         recency_weights = _default_recency_weights(seasons)
 
-    columns = ["player_id", "position", "carries_per_game", "targets_per_game", "games"]
+    columns = [
+        "player_id", "position",
+        "carries_per_game", "targets_per_game", "attempts_per_game", "games",
+    ]
+    history = _with_required_columns(history)
     subset = history[history["season"].isin(seasons)]
     if subset.empty:
         return pd.DataFrame(columns=columns)
@@ -123,6 +174,7 @@ def season_volume(
             position=("position", "last"),
             carries=("carries", "mean"),
             targets=("targets", "mean"),
+            attempts=("attempts", "mean"),
             games=("week", "count"),
             weight=("_weight", "first"),
         )
@@ -134,6 +186,7 @@ def season_volume(
         if total_weight > 0:
             carries = float((group["carries"] * group["weight"]).sum() / total_weight)
             targets = float((group["targets"] * group["weight"]).sum() / total_weight)
+            attempts = float((group["attempts"] * group["weight"]).sum() / total_weight)
         else:
             # No season this player appears in carries positive recency
             # weight (e.g. only seasons outside an explicit recency_weights
@@ -141,10 +194,12 @@ def season_volume(
             # ZeroDivisionError or a silently dropped player.
             carries = float(group["carries"].mean())
             targets = float(group["targets"].mean())
+            attempts = float(group["attempts"].mean())
         return pd.Series({
             "position": group.sort_values("season")["position"].iloc[-1],
             "carries_per_game": carries,
             "targets_per_game": targets,
+            "attempts_per_game": attempts,
             "games": int(group["games"].sum()),
         })
 
@@ -176,6 +231,9 @@ def _positional_priors(subset: pd.DataFrame) -> pd.DataFrame:
             "rec_eff": _rate(group["receiving_yards"], group["targets"]),
             "rec_td_rate": _rate(group["receiving_tds"], group["targets"]),
             "catch_rate": _rate(group["receptions"], group["targets"]),
+            "pass_eff": _rate(group["passing_yards"], group["attempts"]),
+            "pass_td_rate": _rate(group["passing_tds"], group["attempts"]),
+            "pass_int_rate": _rate(group["passing_interceptions"], group["attempts"]),
         })
     return pd.DataFrame(rows).set_index("position")
 
@@ -194,42 +252,16 @@ def _stable_seed(player_id: str, offset: int) -> int:
 def _resolve_seed(seed: int | None) -> int:
     """A concrete, shareable base seed, even when the caller passes None.
 
-    `_extract_yards_and_tds` decomposes one stream into two `simulate_points`
-    calls that MUST share a seed (that is what makes the recovered yards and
-    touchdown samples correlated through a common opportunity count -- see
-    its docstring). Passing seed=None straight through would give each of
-    those two calls its own independent OS-entropy seed and silently
-    decorrelate yards from touchdowns. Resolving a concrete seed once here
-    keeps "seed=None" meaning "different every call" at the project_players
-    level while still sharing correctly within a call.
+    Every per-player-per-stream seed is derived from this one value (see
+    `_stable_seed`), so resolving a concrete integer once here -- rather than
+    threading `None` through and letting each stream draw its own
+    OS-entropy seed -- keeps "seed=None" meaning "different every call" at
+    the project_players level while every stream within one call still uses
+    a reproducible, derived seed.
     """
     if seed is not None:
         return int(seed)
     return int(np.random.default_rng().integers(0, 2**31 - 1))
-
-
-def _extract_yards_and_tds(
-    volume: float, eff_rate: float, td_rate: float, n: int, seed: int, yards_cv: float = 0.9,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Recover separate yards and touchdown-count samples from simulate_points.
-
-    simulate_points bakes in fixed weights (YARDS_POINT=0.1, TD_POINTS=6.0)
-    and returns only their SUM, so there is nothing in its return value to
-    reweight by this league's actual scoring on its own. Calling it twice
-    with the SAME seed -- once with td_rate=0 (isolates yards*YARDS_POINT)
-    and once with eff_rate=0 (isolates tds*TD_POINTS) -- recovers each
-    component exactly, dividing out the known constants.
-
-    This is exact, not approximate: the very first random draw inside
-    simulate_points is `rng.poisson(volume, size=n)` from a freshly-seeded
-    generator, so with matching seed/volume/n it is bit-identical between
-    the two calls. That shared opportunity count is what preserves the real
-    correlation between a big-target-share game and BOTH more yards and more
-    touchdowns, instead of treating the two as independent draws.
-    """
-    yards_points = simulate_points(volume, eff_rate, 0.0, n=n, seed=seed, yards_cv=yards_cv)
-    td_points = simulate_points(volume, 0.0, td_rate, n=n, seed=seed, yards_cv=yards_cv)
-    return yards_points / YARDS_POINT, td_points / TD_POINTS
 
 
 def project_players(
@@ -246,6 +278,7 @@ def project_players(
     """
     seasons = tuple(seasons)
     weights = scoring_weights(config)
+    history = _with_required_columns(history)
     volume = season_volume(history, seasons)
 
     subset = history[history["season"].isin(seasons)]
@@ -258,19 +291,25 @@ def project_players(
     rows = []
     for _, row in merged.iterrows():
         position = row["position"]
-        prior = (
-            priors.loc[position] if position in priors.index
-            else pd.Series({"rush_eff": 0.0, "rush_td_rate": 0.0,
-                             "rec_eff": 0.0, "rec_td_rate": 0.0, "catch_rate": 0.0})
-        )
+        prior = priors.loc[position] if position in priors.index else _EMPTY_PRIOR
 
-        rush_eff = shrunk_rate(row["rushing_yards"], row["carries"], prior["rush_eff"], RUSH_EFF_STRENGTH)
+        # A shrunk yards-per-opportunity rate becomes a Gamma SCALE parameter
+        # inside simulate_components, which cannot be negative. Real data can
+        # produce a negative rate on a small, kneel-down/loss-heavy sample --
+        # clamped here (not inside compose.py, which has no domain knowledge
+        # of which of its float inputs represent yards) because a negative
+        # expected yards-per-opportunity isn't a meaningful quantity to carry
+        # forward at all, not merely an implementation constraint.
+        rush_eff = max(shrunk_rate(row["rushing_yards"], row["carries"], prior["rush_eff"], RUSH_EFF_STRENGTH), 0.0)
         rush_td = shrunk_rate(row["rushing_tds"], row["carries"], prior["rush_td_rate"], RUSH_TD_STRENGTH)
-        rec_eff = shrunk_rate(row["receiving_yards"], row["targets"], prior["rec_eff"], REC_EFF_STRENGTH)
+        rec_eff = max(shrunk_rate(row["receiving_yards"], row["targets"], prior["rec_eff"], REC_EFF_STRENGTH), 0.0)
         rec_td = shrunk_rate(row["receiving_tds"], row["targets"], prior["rec_td_rate"], REC_TD_STRENGTH)
         catch_rate = shrunk_rate(row["receptions"], row["targets"], prior["catch_rate"], CATCH_RATE_STRENGTH)
+        pass_eff = max(shrunk_rate(row["passing_yards"], row["attempts"], prior["pass_eff"], PASS_EFF_STRENGTH), 0.0)
+        pass_td = shrunk_rate(row["passing_tds"], row["attempts"], prior["pass_td_rate"], PASS_TD_STRENGTH)
+        pass_int = shrunk_rate(row["passing_interceptions"], row["attempts"], prior["pass_int_rate"], PASS_INT_STRENGTH)
 
-        # A single simulate_points call at volume = per_game * games is
+        # A single simulate_components call at volume = per_game * games is
         # distributionally identical to summing `games` independent weekly
         # draws at the per-game volume (Poisson opportunities and, given
         # matching opportunities, Gamma yards and Binomial touchdowns are
@@ -279,26 +318,32 @@ def project_players(
         # per-week loop.
         rush_volume = row["carries_per_game"] * games
         rec_volume = row["targets_per_game"] * games
+        pass_volume = row["attempts_per_game"] * games
 
         player_id = row["player_id"]
         rush_seed = base_seed + _stable_seed(player_id, 0)
         rec_seed = base_seed + _stable_seed(player_id, 1)
         catch_seed = base_seed + _stable_seed(player_id, 2)
+        pass_seed = base_seed + _stable_seed(player_id, 3)
+        int_seed = base_seed + _stable_seed(player_id, 4)
 
-        rush_yards, rush_tds = _extract_yards_and_tds(rush_volume, rush_eff, rush_td, n, rush_seed)
-        rec_yards, rec_tds = _extract_yards_and_tds(rec_volume, rec_eff, rec_td, n, rec_seed)
+        _, rush_yards, rush_tds = simulate_components(rush_volume, rush_eff, rush_td, n=n, seed=rush_seed)
+        rec_opportunities, rec_yards, rec_tds = simulate_components(rec_volume, rec_eff, rec_td, n=n, seed=rec_seed)
+        pass_opportunities, pass_yards, pass_tds = simulate_components(pass_volume, pass_eff, pass_td, n=n, seed=pass_seed)
 
-        # Receptions: not modelled by simulate_points at all (it only knows
-        # yards and touchdowns), yet this league scores them explicitly. Its
-        # opportunity count is reconstructed with the SAME seed/volume/n
-        # `_extract_yards_and_tds` used for the receiving stream above --
-        # the exact draw simulate_points itself makes first -- so a
-        # big-target-share sample also gets more receptions, not an
-        # uncorrelated count; only the catch outcome itself gets its own
-        # independent randomness.
-        rec_opportunities = np.random.default_rng(rec_seed).poisson(max(rec_volume, 0.0), size=n)
+        # Receptions and interceptions: not modelled by simulate_components
+        # at all (it only knows yards and touchdowns), yet this league scores
+        # both explicitly (positively and negatively respectively). Each is
+        # drawn from the opportunity count simulate_components handed back
+        # for its own stream -- not reconstructed or re-derived -- so a
+        # big-target-share (or big-attempts) sample also gets more receptions
+        # (or interceptions), not an uncorrelated count; only the catch/pick
+        # outcome itself gets its own independent randomness.
         receptions = np.random.default_rng(catch_seed).binomial(
             rec_opportunities, min(max(catch_rate, 0.0), 1.0)
+        )
+        interceptions = np.random.default_rng(int_seed).binomial(
+            pass_opportunities, min(max(pass_int, 0.0), 1.0)
         )
 
         points = (
@@ -307,6 +352,9 @@ def project_players(
             + rec_yards * weights.get("receiving_yards", 0.0)
             + rec_tds * weights.get("receiving_tds", 0.0)
             + receptions * weights.get("receptions", 0.0)
+            + pass_yards * weights.get("passing_yards", 0.0)
+            + pass_tds * weights.get("passing_tds", 0.0)
+            + interceptions * weights.get("passing_interceptions", 0.0)
         )
         summary = summarise(points)
         rows.append({

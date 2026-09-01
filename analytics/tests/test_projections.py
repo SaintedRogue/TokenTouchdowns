@@ -98,3 +98,61 @@ def test_project_players_uses_league_scoring_not_a_constant():
     full_ppr = project_players(history(), ppr_cfg, seasons=(2024, 2025))
     assert full_ppr.set_index("player_id").loc["B", "proj_points"] > \
            half.set_index("player_id").loc["B", "proj_points"]
+
+
+def negative_rushing_history():
+    """A player whose net rushing yards are negative (kneel-downs / tackles
+    for loss outpacing positive gains). The sole player at this position, so
+    the positional prior equals their own (negative) observed rate and
+    shrinkage alone cannot pull the estimate positive -- reproducing the real
+    crash this fixture guards against: an unclamped negative shrunk
+    yards-per-carry rate reaching simulate_components as a negative Gamma
+    scale (ValueError: scale < 0).
+    """
+    rows = []
+    for season in (2024, 2025):
+        for week in range(1, 18):
+            rows.append({"player_id": "C", "season": season, "week": week,
+                         "position": "FB", "carries": 5, "targets": 0,
+                         "receptions": 0, "rushing_yards": -10, "receiving_yards": 0,
+                         "rushing_tds": 0.0, "receiving_tds": 0.0})
+    return pd.DataFrame(rows)
+
+
+def test_project_players_clamps_negative_efficiency_instead_of_crashing():
+    out = project_players(negative_rushing_history(), CONFIG_OBJ, seasons=(2024, 2025))
+    row = out.set_index("player_id").loc["C"]
+    assert row["proj_points"] >= 0.0
+    assert row["p10"] >= 0.0
+    assert row["p90"] >= 0.0
+
+
+def qb_history():
+    """Two QBs with IDENTICAL passing volume and efficiency, differing only
+    in rushing -- RUNNER carries far more, and more efficiently, than
+    POCKET. Isolates the rushing stream's contribution to a QB projection."""
+    rows = []
+    for season in (2024, 2025):
+        for week in range(1, 18):
+            rows.append({"player_id": "POCKET", "season": season, "week": week,
+                         "position": "QB", "carries": 2, "targets": 0, "receptions": 0,
+                         "rushing_yards": 5, "receiving_yards": 0,
+                         "rushing_tds": 0.0, "receiving_tds": 0.0,
+                         "attempts": 35, "passing_yards": 260,
+                         "passing_tds": 2.0, "passing_interceptions": 0.7})
+            rows.append({"player_id": "RUNNER", "season": season, "week": week,
+                         "position": "QB", "carries": 10, "targets": 0, "receptions": 0,
+                         "rushing_yards": 55, "receiving_yards": 0,
+                         "rushing_tds": 0.5, "receiving_tds": 0.0,
+                         "attempts": 35, "passing_yards": 260,
+                         "passing_tds": 2.0, "passing_interceptions": 0.7})
+    return pd.DataFrame(rows)
+
+
+def test_project_players_gives_a_running_qb_more_than_a_pocket_passer():
+    # Same passing volume and efficiency for both -- only rushing differs.
+    # Rushing QBs matter enormously in fantasy; the third (passing) stream
+    # existing must not drown out that difference.
+    out = project_players(qb_history(), CONFIG_OBJ, seasons=(2024, 2025))
+    proj = out.set_index("player_id")
+    assert proj.loc["RUNNER", "proj_points"] > proj.loc["POCKET", "proj_points"]

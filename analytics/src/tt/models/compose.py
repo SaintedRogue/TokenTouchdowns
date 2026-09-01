@@ -13,18 +13,35 @@ YARDS_POINT = 0.1   # 1 point per 10 yards
 TD_POINTS = 6.0
 
 
-def simulate_points(
+def simulate_components(
     volume: float,
     eff_rate: float,
     td_rate: float,
     n: int = 10_000,
     seed: int | None = None,
     yards_cv: float = 0.9,
-) -> np.ndarray:
-    """Sample a points distribution for one player-week.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sample (opportunities, yards, touchdowns) for one player-week.
 
-    volume   expected opportunities (carries + targets)
-    eff_rate expected yards per opportunity (a shrunk prior, not a prediction)
+    Returned separately rather than fused into points, because scoring is
+    league-specific: a half-PPR and a full-PPR league weight the same
+    physical performance differently, and receptions are not derivable from
+    a points total. Callers apply their own weights. Returning the shared
+    `opportunities` draw explicitly (rather than making a caller reverse-
+    engineer it, e.g. by re-seeding to reproduce the first internal draw) is
+    also what lets a caller derive a correlated related count -- receptions
+    from targets, interceptions from attempts -- that this function has no
+    concept of itself, from the SAME per-sample opportunity count feeding
+    yards and touchdowns.
+
+    volume   expected opportunities (carries, targets, or attempts)
+    eff_rate expected yards per opportunity (a shrunk prior, not a
+             prediction). Must be non-negative -- it becomes a Gamma scale
+             parameter, which cannot be negative; callers are responsible
+             for clamping a shrunk rate that could go negative (e.g. a
+             player with net negative rushing yards) before it reaches here,
+             since this function has no domain knowledge of which stat it's
+             being handed.
     td_rate  expected touchdowns per opportunity (heavily shrunk)
     yards_cv coefficient of variation of yards on a SINGLE opportunity (one
              carry or target). Yards on any one touch are highly variable --
@@ -52,6 +69,25 @@ def simulate_points(
     yards = np.where(opportunities > 0, rng.gamma(total_shape, scale, size=n), 0.0)
 
     tds = rng.binomial(opportunities, min(max(td_rate, 0.0), 1.0))
+    return opportunities, yards, tds
+
+
+def simulate_points(
+    volume: float,
+    eff_rate: float,
+    td_rate: float,
+    n: int = 10_000,
+    seed: int | None = None,
+    yards_cv: float = 0.9,
+) -> np.ndarray:
+    """Sample a points distribution for one player-week, at this module's own
+    fixed conversion (YARDS_POINT, TD_POINTS). A thin wrapper over
+    `simulate_components` -- see its docstring for the parameters, and for
+    why the components are exposed separately for callers whose scoring
+    (a league's actual per-yard/per-touchdown/per-reception weights) isn't
+    this module's fixed constants.
+    """
+    _, yards, tds = simulate_components(volume, eff_rate, td_rate, n=n, seed=seed, yards_cv=yards_cv)
     return yards * YARDS_POINT + tds * TD_POINTS
 
 
