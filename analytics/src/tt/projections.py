@@ -203,7 +203,6 @@ _REQUIRED_STAT_COLUMNS = (
     "targets", "receiving_yards", "receiving_tds", "receptions", "receiving_fumbles_lost",
     "attempts", "passing_yards", "passing_tds", "passing_interceptions", "sack_fumbles_lost",
 )
-_TOTAL_COLUMNS = _REQUIRED_STAT_COLUMNS
 
 # The full, fixed set of nflverse stat columns this module ever simulates a
 # points component for -- i.e. every key `points` (in project_players) can
@@ -583,15 +582,30 @@ def _resolve_names(history: pd.DataFrame) -> pd.Series:
     a caller with a slimmer history frame) -- the least-wrong default (same
     principle as `season_volume`'s own `_combine` fallback), not a missing
     column or a NaN that would break a board's display.
+
+    An empty string is treated the same as a missing value at each fallback
+    step -- `fillna` alone leaves `""` in place (it is not NaN), which would
+    silently ship a blank name to the board instead of falling back to
+    `player_name` or the player_id.
+
+    Picks the MOST RECENT season's name per player, not whichever row
+    `history` happens to list first: a plain `.first()` over an unsorted
+    frame returns the OLDEST name after a real player rename (a legal name
+    change, a display-name correction) and would flip depending on how
+    `history` happened to be concatenated -- sorting by `season` first
+    makes "most recent" well-defined regardless of input row order.
     """
     name = history.get("player_display_name")
     if name is None:
         name = pd.Series(pd.NA, index=history.index, dtype="object")
+    else:
+        name = name.replace("", pd.NA)
     player_name = history.get("player_name")
     if player_name is not None:
-        name = name.fillna(player_name)
+        name = name.fillna(player_name.replace("", pd.NA))
     name = name.fillna(history["player_id"])
-    return history.assign(_name=name).groupby("player_id")["_name"].first()
+    ordered = history.assign(_name=name).sort_values("season")
+    return ordered.groupby("player_id")["_name"].last()
 
 
 def _stable_seed(player_id: str, offset: int) -> int:
@@ -661,13 +675,17 @@ def project_players(
 
     subset = history[history["season"].isin(seasons)]
     priors = _positional_priors(subset)
-    totals = subset.groupby("player_id")[list(_TOTAL_COLUMNS)].sum().reset_index()
+    totals = subset.groupby("player_id")[list(_REQUIRED_STAT_COLUMNS)].sum().reset_index()
 
     merged = volume.merge(totals, on="player_id", how="left").fillna(0.0)
-    # Attached after fillna(0.0) above -- `names` is indexed by exactly the
-    # player_ids `volume` (and therefore `merged`) already contains, since
-    # both are derived from this same position-filtered `history`, so there
-    # is nothing here for that fillna to coerce to 0.0 in the first place.
+    # Attached after fillna(0.0) above -- `names` is indexed by every
+    # player_id in the position-filtered `history` (see `_resolve_names`),
+    # a SUPERSET of the player_ids `volume`/`merged` contain (`volume`
+    # additionally restricts to `seasons`; `names` deliberately doesn't, so
+    # a player rename in an OLDER season out of that window still resolves
+    # correctly). `.map` is a key-based lookup, so the extra names `names`
+    # carries for players outside this projection's season window are
+    # simply never looked up -- harmless, and not a fillna coercion.
     merged["name"] = merged["player_id"].map(names)
     base_seed = _resolve_seed(seed)
 

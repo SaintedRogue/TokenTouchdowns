@@ -83,6 +83,28 @@ def test_project_players_produces_a_distribution_not_just_a_mean():
     assert row["p10"] < row["proj_points"] < row["p90"]
 
 
+def test_project_players_default_sample_size_gives_a_stable_spread_estimate():
+    # `n` defaults to 5000 -- large enough that the reported spread (`sd`)
+    # is a genuine estimate of the underlying distribution, not an artifact
+    # of which handful of samples got drawn. Pins the DEFAULT specifically
+    # (no `n=` passed): the weaker check above (p10 < mean < p90) passes
+    # even at n=2, since two distinct samples almost always interpolate to
+    # three distinct values -- it can't tell "a real distribution" from
+    # "barely enough points to draw a line". Re-running the SAME projection
+    # under different seeds must agree closely on `sd`; at n=2, `sd` swings
+    # wildly seed to seed (measured: ~3-10 at n=2 vs ~22-23, spread <1, at
+    # the real default across the same five seeds).
+    sds = [
+        project_players(history(), CONFIG_OBJ, seasons=(2024, 2025), seed=s)
+        .set_index("player_id").loc["A", "sd"]
+        for s in (1, 2, 3, 4, 5)
+    ]
+    assert max(sds) - min(sds) < 3.0, (
+        f"sd swung {max(sds) - min(sds):.2f} across seeds -- the default "
+        "sample size is too small for a stable spread estimate"
+    )
+
+
 def test_project_players_scales_with_the_number_of_games():
     short = project_players(history(), CONFIG_OBJ, seasons=(2024, 2025), games=1)
     full = project_players(history(), CONFIG_OBJ, seasons=(2024, 2025), games=17)
@@ -123,42 +145,65 @@ def negative_rushing_history():
 
 
 def test_project_players_clamps_negative_efficiency_instead_of_crashing():
+    # `C` is the sole occupant of RB, so the positional prior equals their
+    # own negative rate and can't pull the estimate positive on its own --
+    # rush_eff clamps to exactly 0.0, and with zero receiving/passing volume
+    # too, every one of these values is exactly 0.0, not merely non-negative.
+    # `>= 0.0` against a value that IS 0.0 carries no information (it would
+    # pass just as well if the clamp silently produced -5.0 rounded up to
+    # "still technically doesn't crash") -- assert the actual clamped value.
     out = project_players(negative_rushing_history(), CONFIG_OBJ, seasons=(2024, 2025))
     row = out.set_index("player_id").loc["C"]
-    assert row["proj_points"] >= 0.0
-    assert row["p10"] >= 0.0
-    assert row["p90"] >= 0.0
+    assert row["proj_points"] == 0.0
+    assert row["p10"] == 0.0
+    assert row["p90"] == 0.0
 
 
 def qb_history():
-    """Two QBs with IDENTICAL passing volume and efficiency, differing only
-    in rushing -- RUNNER carries far more, and more efficiently, than
-    POCKET. Isolates the rushing stream's contribution to a QB projection."""
+    """Two QBs, differing in BOTH streams: POCKET is a true pocket passer
+    (zero rushing at all -- his whole projection has to come from passing);
+    RUNNER throws for noticeably LESS than POCKET but makes it up, and then
+    some, on the ground. Unlike an earlier version of this fixture (which
+    gave both IDENTICAL passing), passing volume here actually matters to
+    the RUNNER-over-POCKET comparison: zeroing the passing stream entirely
+    would crater POCKET to ~0 (see the dedicated passing-stream assertion
+    below) while leaving RUNNER's rushing points untouched, so the fixture
+    no longer lets a "delete passing" bug hide behind two equal, cancelling
+    numbers (see F9 in fix-round-1-brief.md).
+    """
     rows = []
     for season in (2024, 2025):
         for week in range(1, 18):
             rows.append({"player_id": "POCKET", "season": season, "week": week,
-                         "position": "QB", "carries": 2, "targets": 0, "receptions": 0,
-                         "rushing_yards": 5, "receiving_yards": 0,
+                         "position": "QB", "carries": 0, "targets": 0, "receptions": 0,
+                         "rushing_yards": 0, "receiving_yards": 0,
                          "rushing_tds": 0.0, "receiving_tds": 0.0,
-                         "attempts": 35, "passing_yards": 260,
-                         "passing_tds": 2.0, "passing_interceptions": 0.7})
+                         "attempts": 38, "passing_yards": 290,
+                         "passing_tds": 2.2, "passing_interceptions": 0.6})
             rows.append({"player_id": "RUNNER", "season": season, "week": week,
                          "position": "QB", "carries": 10, "targets": 0, "receptions": 0,
                          "rushing_yards": 55, "receiving_yards": 0,
                          "rushing_tds": 0.5, "receiving_tds": 0.0,
-                         "attempts": 35, "passing_yards": 260,
-                         "passing_tds": 2.0, "passing_interceptions": 0.7})
+                         "attempts": 28, "passing_yards": 200,
+                         "passing_tds": 1.4, "passing_interceptions": 0.7})
     return pd.DataFrame(rows)
 
 
 def test_project_players_gives_a_running_qb_more_than_a_pocket_passer():
-    # Same passing volume and efficiency for both -- only rushing differs.
-    # Rushing QBs matter enormously in fantasy; the third (passing) stream
-    # existing must not drown out that difference.
+    # RUNNER throws for meaningfully less than POCKET but makes up the gap,
+    # and then some, on the ground -- rushing QBs matter enormously in
+    # fantasy, and that edge must survive even though POCKET out-throws him.
     out = project_players(qb_history(), CONFIG_OBJ, seasons=(2024, 2025))
     proj = out.set_index("player_id")
     assert proj.loc["RUNNER", "proj_points"] > proj.loc["POCKET", "proj_points"]
+
+    # And the passing stream itself must actually be counted: POCKET has NO
+    # rushing/receiving at all, so his entire projection is passing -- a
+    # bug that deletes the passing stream (e.g. zeroing pass_volume before
+    # it reaches simulate_components) collapses him to ~0, which the
+    # comparison above alone cannot detect (see F9: the previous identical-
+    # passing fixture let a deleted passing stream cancel out unnoticed).
+    assert proj.loc["POCKET", "proj_points"] > 100.0
 
 
 def easton_stick_shape_history():
@@ -422,6 +467,33 @@ def test_project_players_falls_back_to_player_id_when_no_name_column_exists():
     names = out.set_index("player_id")["name"]
     assert names["A"] == "A"
     assert names["B"] == "B"
+
+
+def test_project_players_treats_an_empty_display_name_as_missing():
+    # `fillna` alone leaves "" in place (it isn't NaN) -- an empty
+    # player_display_name must still fall back to player_name, and an empty
+    # player_name must still fall back to the player_id itself.
+    h = history()
+    h["player_display_name"] = h["player_id"].map({"A": "", "B": "Bobby Byrne"})
+    h["player_name"] = h["player_id"].map({"A": "", "B": "B.Byrne"})
+    out = project_players(h, CONFIG_OBJ, seasons=(2024, 2025))
+    names = out.set_index("player_id")["name"]
+    assert names["A"] == "A"  # both name columns empty -> player_id
+    assert names["B"] == "Bobby Byrne"
+
+
+def test_project_players_uses_the_most_recent_seasons_name_after_a_rename():
+    # `history()`'s own row order lists every 2024 week (Old Name) before
+    # any 2025 week (New Name) -- exactly the shape a naive
+    # `groupby(...).first()` gets wrong: it would return the OLDEST name
+    # ("Old Name") simply because those rows come first in the frame. Must
+    # resolve to the MOST RECENT season's name regardless of row order.
+    h = history()
+    h["player_display_name"] = None
+    h.loc[(h["player_id"] == "A") & (h["season"] == 2024), "player_display_name"] = "Old Name"
+    h.loc[(h["player_id"] == "A") & (h["season"] == 2025), "player_display_name"] = "New Name"
+    out = project_players(h, CONFIG_OBJ, seasons=(2024, 2025))
+    assert out.set_index("player_id").loc["A", "name"] == "New Name"
 
 
 # ---------------------------------------------------------------------------
@@ -752,3 +824,115 @@ def test_two_season_proj_games_is_unchanged_by_the_evidence_normalisation():
     assert starter == pytest.approx(expected, abs=1e-9)
     # And the constant is expressed on the effective-seasons scale.
     assert GAMES_STRENGTH == pytest.approx(4.0 / 3.0)
+
+
+# ---------------------------------------------------------------------------
+# F9: efficiency/TD-rate shrinkage strengths are unpinned -- RUSH_EFF_STRENGTH
+# = 0.0 (shrinkage entirely disabled) survives the whole suite, and the same
+# is true of every other efficiency/TD-rate STRENGTH constant. Pinned the
+# same way GAMES_STRENGTH was (F3, above): a fixture where the player's own
+# raw rate clearly differs from the pooled positional prior, and an
+# assertion that shrinkage lands the OBSERVED rate strictly inside the two,
+# away from both degenerate ends (strength=0 -> exactly the raw rate;
+# strength=infinity -> exactly the prior) by a real margin.
+# ---------------------------------------------------------------------------
+
+_ZERO_STREAM_ROW = dict(
+    carries=0, rushing_yards=0, rushing_tds=0.0, rushing_fumbles_lost=0.0,
+    targets=0, receptions=0, receiving_yards=0, receiving_tds=0.0, receiving_fumbles_lost=0.0,
+    attempts=0, passing_yards=0, passing_tds=0.0, passing_interceptions=0.0, sack_fumbles_lost=0.0,
+)
+
+
+def two_group_history(position: str, sample: dict, other: dict, other_count: int = 6) -> pd.DataFrame:
+    """SAMPLE (one player) plus `other_count` OTHER players at `position`,
+    each at a CONSTANT weekly rate for every week of both seasons -- so the
+    pooled positional prior (`_positional_priors` sums numerator/denominator
+    across every row at the position) differs meaningfully from SAMPLE's own
+    rate, letting a shrinkage-strength test observe the pull between them.
+    Every row starts from `_ZERO_STREAM_ROW`, so only the one stream a given
+    case overrides ever contributes to proj_points -- no other simulated
+    component can contaminate the isolated stream under test."""
+    rows = []
+    for season in (2024, 2025):
+        for week in range(1, 18):
+            rows.append({"player_id": "SAMPLE", "season": season, "week": week,
+                         "position": position, **_ZERO_STREAM_ROW, **sample})
+            for i in range(other_count):
+                rows.append({"player_id": f"OTHER{i}", "season": season, "week": week,
+                             "position": position, **_ZERO_STREAM_ROW, **other})
+    return pd.DataFrame(rows)
+
+
+# (constant name, position, sample overrides, other overrides, the scored
+# stat this stream's points come from, the season_volume per-game column
+# that stream's volume lives in, sample's own raw rate, others' raw rate).
+# Every case's raw rates are chosen well apart (>=3x) so shrinkage's pull is
+# unambiguous against Monte Carlo noise at n=20000.
+_SHRINKAGE_STRENGTH_CASES = [
+    ("RUSH_EFF_STRENGTH", "RB",
+     dict(carries=20, rushing_yards=100), dict(carries=20, rushing_yards=40),
+     "rushing_yards", "carries_per_game", 5.0, 2.0),
+    ("REC_EFF_STRENGTH", "WR",
+     dict(targets=10, receiving_yards=150), dict(targets=10, receiving_yards=60),
+     "receiving_yards", "targets_per_game", 15.0, 6.0),
+    ("PASS_EFF_STRENGTH", "QB",
+     dict(attempts=35, passing_yards=350), dict(attempts=35, passing_yards=210),
+     "passing_yards", "attempts_per_game", 10.0, 6.0),
+    ("RUSH_TD_STRENGTH", "RB",
+     dict(carries=20, rushing_tds=2.0), dict(carries=20, rushing_tds=0.2),
+     "rushing_tds", "carries_per_game", 0.1, 0.01),
+    ("REC_TD_STRENGTH", "WR",
+     dict(targets=10, receiving_tds=1.5), dict(targets=10, receiving_tds=0.15),
+     "receiving_tds", "targets_per_game", 0.15, 0.015),
+    ("PASS_TD_STRENGTH", "QB",
+     dict(attempts=35, passing_tds=4.0), dict(attempts=35, passing_tds=0.7),
+     "passing_tds", "attempts_per_game", 4.0 / 35, 0.7 / 35),
+    ("CATCH_RATE_STRENGTH", "WR",
+     dict(targets=10, receptions=9.5), dict(targets=10, receptions=3.0),
+     "receptions", "targets_per_game", 0.95, 0.30),
+    ("PASS_INT_STRENGTH", "QB",
+     dict(attempts=35, passing_interceptions=3.0), dict(attempts=35, passing_interceptions=0.35),
+     "passing_interceptions", "attempts_per_game", 3.0 / 35, 0.35 / 35),
+]
+
+
+@pytest.mark.parametrize(
+    "strength_name,position,sample,other,weight_stat,volume_column,sample_rate,other_rate",
+    _SHRINKAGE_STRENGTH_CASES,
+    ids=[case[0] for case in _SHRINKAGE_STRENGTH_CASES],
+)
+def test_shrinkage_strength_pulls_the_observed_rate_toward_the_prior(
+    strength_name, position, sample, other, weight_stat, volume_column,
+    sample_rate, other_rate,
+):
+    history = two_group_history(position, sample, other)
+    weight = scoring_weights(CONFIG_OBJ)[weight_stat]
+
+    # season_volume gives SAMPLE's real per-game volume/proj_games exactly
+    # as project_players would compute them -- reused, not hand-derived, so
+    # the algebra below tracks the fixture rather than an assumption about
+    # what season_volume returns for it.
+    volume_row = season_volume(history, seasons=(2024, 2025)).set_index("player_id").loc["SAMPLE"]
+    per_game = volume_row[volume_column]
+    proj_games = volume_row["proj_games"]
+
+    out = project_players(history, CONFIG_OBJ, seasons=(2024, 2025), n=20_000, seed=5)
+    sample_points = out.set_index("player_id").loc["SAMPLE", "proj_points"]
+
+    # Every other stream is exactly zero by construction (_ZERO_STREAM_ROW),
+    # so proj_points = weight * E[count] = weight * per_game * proj_games *
+    # shrunk_rate -- solved backward for the one unknown, shrunk_rate itself.
+    observed_rate = sample_points / weight / (per_game * proj_games)
+
+    # A convex combination of a convex combination of {sample_rate,
+    # other_rate} is itself bounded in [other_rate, sample_rate] for ANY
+    # finite positive strength -- so this margin isn't case-specific tuning,
+    # it is what "meaningfully off both raw rates" means for every case.
+    span = sample_rate - other_rate
+    low, high = other_rate + 0.15 * span, sample_rate - 0.15 * span
+    assert low < observed_rate < high, (
+        f"{strength_name}: observed rate {observed_rate:.5f} is not "
+        f"meaningfully shrunk between the raw rates ({other_rate}..{sample_rate}) "
+        f"-- expected inside ({low:.5f}, {high:.5f})"
+    )
