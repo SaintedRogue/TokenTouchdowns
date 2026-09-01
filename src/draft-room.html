@@ -405,7 +405,14 @@
       bench.className = 'slot-player empty';
     } else {
       bench.className = 'slot-player';
-      bench.textContent = roster.bench.map(function (p) { return p.name + ' (' + p.position + ')'; }).join(', ');
+      // A pick the engine never matched still has a Yahoo name and still
+      // occupies a roster spot, so show it as a name with an honest marker
+      // rather than "470.p.42654 (null)" -- which told the user nothing at
+      // exactly the moment they were checking what they already own.
+      bench.textContent = roster.bench.map(function (p) {
+        if (p.position) return p.name + ' (' + p.position + ')';
+        return p.name + (p.unmatched ? ' (unmatched)' : '');
+      }).join(', ');
     }
   }
 

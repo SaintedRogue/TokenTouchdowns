@@ -367,18 +367,35 @@ export async function createDraftRoom({
    * Never guesses (buildAdpIndex/matchAdp's own defining property): returns
    * null, never a best guess, when no pass resolves.
    */
+  // Display name for a drafted player under WHICHEVER id lands in myRoster --
+  // the engine player_id when identity resolved, the raw Yahoo key when it did
+  // not. Without this the roster falls back to `rec?.name ?? id` and renders an
+  // unresolved pick as "470.p.42654 (null)", which tells the user nothing at
+  // the exact moment they are checking what they already own. We fetched the
+  // real name in pass 3; not showing it was pure oversight.
+  const displayNameById = new Map();
+
+  function rememberName(id, playerKey) {
+    if (!id) return;
+    const known = yahooNameCache.get(playerKey);
+    if (known?.name) displayNameById.set(id, known);
+  }
+
   function resolveYahooKey(playerKey) {
     const xw = lookupByYahooKey(crosswalk, playerKey);
-    if (xw?.gsisId) return xw.gsisId;
+    if (xw?.gsisId) { rememberName(xw.gsisId, playerKey); return xw.gsisId; }
     if (xw) {
       const fallback = matchAdp(nflverseIndex, { name: xw.name, position: xw.position, team: xw.team });
-      if (fallback?.playerId) return fallback.playerId;
+      if (fallback?.playerId) { rememberName(fallback.playerId, playerKey); return fallback.playerId; }
     }
     const yahooRecord = yahooNameCache.get(playerKey);
     if (yahooRecord) {
       const fallback = matchAdp(nflverseIndex, yahooRecord);
-      if (fallback?.playerId) return fallback.playerId;
+      if (fallback?.playerId) { rememberName(fallback.playerId, playerKey); return fallback.playerId; }
     }
+    // Unresolved: the pick still counts, and it still leaves the pool by Yahoo
+    // key, so remember the name under THAT key for display.
+    rememberName(playerKey, playerKey);
     return null;
   }
 
@@ -567,7 +584,16 @@ export async function createDraftRoom({
     }
     const remaining = draftState.myRoster.map((id) => {
       const rec = boardByPlayerId.get(id);
-      return { playerId: id, name: rec?.name ?? id, position: rec?.position ?? null };
+      if (rec) return { playerId: id, name: rec.name, position: rec.position ?? null, unmatched: false };
+      // Not on the board: either an unresolved pick, or a resolved one the
+      // engine never projects (K and DEF). Either way Yahoo told us the name.
+      const known = displayNameById.get(id);
+      return {
+        playerId: id,
+        name: known?.name ?? id,
+        position: known?.position ?? null,
+        unmatched: true,
+      };
     });
     const slots = slotDefs.map((slotPos) => {
       let idx = remaining.findIndex((p) => p.position === slotPos);
