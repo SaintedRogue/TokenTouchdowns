@@ -71,7 +71,16 @@ def replacement_levels(config: LeagueConfig, teams: int) -> dict[str, int]:
     defensive backs, long snappers...) has no entry, which `add_vor` treats
     as "VOR is not a meaningful concept for this position" rather than
     guessing at a rank.
+
+    A `teams` below 1 is rejected outright. It is not a degenerate-but-usable
+    league, it is a nonsense one: every replacement rank collapses to 0 or
+    negative, `add_vor` then skips every position, and the caller receives a
+    board with no VOR anywhere and no indication that anything went wrong.
+    Returning that silently would contradict this module's whole reason for
+    refusing to default `teams` in the first place.
     """
+    if teams < 1:
+        raise ValueError(f"teams must be at least 1 to draft a league, got {teams}")
     return {
         position: round(count * teams)
         for position, count in starters_per_team(config).items()
@@ -102,16 +111,29 @@ def _assign_tiers(vor: pd.Series) -> pd.Series:
     A new tier starts after any player whose drop to the next player
     exceeds `TIER_GAP_MULTIPLIER` times the position's own median gap.
 
+    The reference gap is measured ONLY between players at or above
+    replacement level -- which `vor >= 0` identifies exactly, since VOR is 0
+    at the replacement player by construction. This is the correction for a
+    measured failure: taken across a WHOLE position, the median gap is set by
+    the 200-340 near-identical sub-replacement players (real spacing of
+    0.26-0.42 points) while the top of the board is spaced 4-19 points apart,
+    so every adjacent pair at the top cleared the threshold and the real
+    2023-25 board came out as 65 tiers for 227 RBs -- the top 12 RBs in tiers
+    1 through 12, one each. That is a RANK wearing a tier's name, and it is
+    the precise outcome the multiplier is supposed to prevent. The formula
+    was never wrong; the POPULATION it was computed over was. Players nobody
+    would start cannot define what "typical spacing" means for players
+    everybody wants.
+
     The median -- and specifically the median of only the NONZERO gaps --
-    is the right "typical gap" baseline here for two reasons. First, a mean
-    would be dragged upward by the one or two genuinely huge gaps this
+    is the right baseline within that population for two reasons. First, a
+    mean would be dragged upward by the one or two genuinely huge gaps this
     function exists to detect, inflating the threshold exactly where a real
-    cliff exists. Second, a position's deep end is full of near-identical
-    (gap ~= 0) bench/waiver players; folding those zeros into the median
-    would understate the position's typical MEANINGFUL spacing and make
-    ordinary noise near the top look like a cliff by comparison. Ties
-    themselves (gap == 0) never start a new tier regardless of threshold --
-    there is no basis to split two players projected for the same points.
+    cliff exists. Second, ties (gap == 0) carry no spacing information;
+    folding them in understates the typical MEANINGFUL gap and makes ordinary
+    noise look like a cliff by comparison. Ties themselves never start a new
+    tier regardless of threshold -- there is no basis to split two players
+    projected for the same points.
 
     With very few players -- or only one nonzero gap in the whole group --
     "typical" is not well established; this deliberately stays conservative
@@ -121,9 +143,24 @@ def _assign_tiers(vor: pd.Series) -> pd.Series:
     if len(ordered) <= 1:
         return pd.Series(1, index=ordered.index, dtype=int)
 
-    gaps = -ordered.diff().to_numpy()[1:]  # drop to the next player, best to worst
-    nonzero_gaps = gaps[gaps > 0]
-    median_gap = float(np.median(nonzero_gaps)) if len(nonzero_gaps) else 0.0
+    values = ordered.to_numpy()
+    gaps = -np.diff(values)  # drop to the next player, best to worst
+
+    # Spacing BETWEEN startable players only: keep a gap when the players on
+    # both of its ends are at or above replacement (vor >= 0). The flat
+    # sub-replacement tail is excluded from setting the threshold, though it
+    # is still tiered by it.
+    startable = values >= 0.0
+    reference = gaps[startable[:-1] & startable[1:]]
+    reference = reference[reference > 0]
+    if len(reference) == 0:
+        # Every startable player is tied, or the position has no startable
+        # depth at all (a thin dataset, or teams so high that replacement
+        # falls off the end). Fall back to the position's own nonzero gaps
+        # rather than inventing a threshold from nothing.
+        reference = gaps[gaps > 0]
+
+    median_gap = float(np.median(reference)) if len(reference) else 0.0
     threshold = median_gap * TIER_GAP_MULTIPLIER if median_gap > 0 else float("inf")
 
     tiers = [1]
@@ -163,10 +200,21 @@ def add_vor(projections: pd.DataFrame, config: LeagueConfig, teams: int) -> pd.D
         level = levels.get(position)
         if not level or level < 1:
             continue  # no (meaningful) replacement level at this position
-        replacement_points = _replacement_points(group, level)
-        position_vor = group["proj_points"] - replacement_points
-        vor.loc[group.index] = position_vor
-        tier.loc[group.index] = _assign_tiers(position_vor).astype(float)
+        # A single NaN projection used to sink the entire position: pandas
+        # sorts NaN last, so it landed on or past the replacement rank, was
+        # read as the replacement player, and `proj_points - NaN` NaN'd every
+        # player at that position -- while the NaN row itself came out as
+        # tier 1.0, i.e. an unprojectable player at the TOP of a tier-sorted
+        # board. Replacement level and tiers are therefore computed over
+        # projected players only; unprojected rows keep the NaN vor/tier this
+        # function already documents for positions it cannot value.
+        valid = group[group["proj_points"].notna()]
+        if valid.empty:
+            continue
+        replacement_points = _replacement_points(valid, level)
+        position_vor = valid["proj_points"] - replacement_points
+        vor.loc[valid.index] = position_vor
+        tier.loc[valid.index] = _assign_tiers(position_vor).astype(float)
 
     out["vor"] = vor
     out["tier"] = tier
