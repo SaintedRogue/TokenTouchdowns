@@ -34,6 +34,24 @@ def compare_baselines(
     filtering the history too would let a player's own excluded weeks bias
     their own trailing average, which is a different (and wrong) measurement
     from "can the model rank players who are actually playable this week."
+
+    THE TRAP: do NOT try to get a "starter-relevant" slice by pre-filtering
+    ``df`` before it is passed in here (e.g. ``compare_baselines(df[df["points"]
+    >= 5], ...)``). That looks equivalent but is not -- it restricts a
+    player's trailing history to their own high-scoring weeks before any
+    prediction is made, so the baseline ends up predicting a good week from
+    an average of that player's *other good weeks*. That is lookahead bias:
+    using knowledge correlated with the outcome to build the predictor, the
+    exact failure mode `features.prior_weeks`'s point-in-time guard exists to
+    prevent elsewhere in this codebase. This is not hypothetical -- it is
+    exactly how the original (pre-`min_actual`) starter-relevant figure in
+    the design doc was produced. In that case a history built only from a
+    player's own good weeks turned out to be a *worse* predictor of the next
+    good week than their full history, so the bias happened to make the
+    baseline look weaker than it should have -- but the direction of the
+    error is not something to rely on; the point is that it measured the
+    wrong thing. Always pass the full, unfiltered frame and use
+    `min_actual` to filter what gets scored, never what gets predicted from.
     """
     subset = df[df["season"].isin(seasons)]
     results: dict[str, list[tuple[float, float]]] = {f"last_{n}": [] for n in n_values}

@@ -151,17 +151,51 @@ time?). A model that improves MAE while mis-calibrating is worse for lineup
 decisions than one that does the reverse.
 
 **Measured baseline results** (2024-2025 regular season, QB/RB/WR/TE,
-`start_week=5`, half-PPR points):
+`start_week=5`, half-PPR points). Reproducible from committed code:
+
+```
+cd analytics && .venv/bin/python -c "
+from pathlib import Path
+from tt.ingest import load_seasons
+from tt.scoring import score_frame
+from tt.studies.baselines import compare_baselines
+df = load_seasons('stats_player', [2024, 2025], Path('data'))
+df = df[(df['season_type']=='REG') & df['position'].isin(['QB','RB','WR','TE'])].copy()
+df['points'] = score_frame(df)
+print(compare_baselines(df, seasons=(2024,2025), start_week=5).to_string(index=False))
+print(compare_baselines(df, seasons=(2024,2025), start_week=5, min_actual=5.0).to_string(index=False))
+"
+```
 
 ```
 FULL POOL (n=10,241)
   last_3   MAE 4.266   RMSE 6.140   Spearman 0.653
   last_8   MAE 4.080   RMSE 5.827   Spearman 0.673
 
-STARTER-RELEVANT, weeks where the player scored >= 5 (n=4,454)
-  last_3   MAE 5.290   RMSE 6.954   Spearman 0.348
-  last_8   MAE 5.062   RMSE 6.593   Spearman 0.372
+STARTER-RELEVANT, weeks where the player scored >= 5 (n=4,675)
+  last_3   MAE 5.987   RMSE 7.744   Spearman 0.400
+  last_8   MAE 5.617   RMSE 7.367   Spearman 0.425
 ```
+
+**Correction (2026-08-31):** the starter-relevant figures above replace an
+earlier published version (`last_8` MAE 5.062 / RMSE 6.593 / Spearman 0.372,
+n=4,454) that was wrong. That earlier number was produced by an ad hoc script
+that filtered the *input frame* by `points >= 5` before handing it to the
+baseline comparison — i.e. `compare_baselines(df[df['points'] >= 5], ...)`.
+That pre-filtering restricted each player's trailing history to their own
+high-scoring weeks, so the trailing-average baseline was built, in part, from
+knowledge of which weeks were good — lookahead bias, the same failure mode
+`features.prior_weeks`'s point-in-time guard exists to prevent everywhere
+else in this codebase, introduced here because this measurement sat outside
+that guard, in a one-off script that was never committed. In this instance
+the bias happened to make the baseline look *better* (a history of
+only-good-weeks understated how volatile a real starter's next week is), not
+worse, so it did not read as suspicious on its face. The corrected numbers
+above come from `compare_baselines(df, ..., min_actual=5.0)`, which restricts
+only the *actuals being scored* to `points >= 5` and always predicts from a
+player's complete, unfiltered trailing history — see the `min_actual`
+docstring in `analytics/src/tt/studies/baselines.py` for the mechanism and an
+explicit warning against repeating the pre-filtering mistake.
 
 `last_8` beats `last_3` on every metric in both pools, so it is the baseline a
 model must clear. This measurement covers 2024-2025 only, with no 2023 data
@@ -176,10 +210,10 @@ bench players whose near-zero trailing average trivially predicts their
 near-zero output — "predict ~0, get ~0" is a free win that pulls MAE down and
 inflates Spearman without reflecting any real skill at ordering players who
 are actually in play. Restricting to weeks the player scored >= 5 strips that
-out, and Spearman roughly halves (0.673 -> 0.372).
+out, and Spearman drops accordingly (0.673 -> 0.425).
 
 Future models are judged on **both** pools. The full-pool numbers are the
-literal bar; the starter-relevant Spearman of 0.372 is the meaningful one,
+literal bar; the starter-relevant Spearman of 0.425 is the meaningful one,
 because judging on the full pool alone would understate real progress and
 could cause a genuinely good model to be rejected for failing to also nail
 bench players nobody would start.
