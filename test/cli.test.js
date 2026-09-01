@@ -890,41 +890,57 @@ test('sync labels which ADP board it cached', async () => {
 
 import { leagueConfig } from '../src/cli.js';
 
+const leagueFixture = () => normalize(JSON.parse(readFileSync(
+  new URL('./fixtures/league-settings.json', import.meta.url), 'utf8'))).league;
+
+/** The scoring entry for a given stat_id, or undefined if none exists. */
+const statEntry = (scoring, statId) => scoring.find((e) => e.statId === statId);
+
 test('leagueConfig derives starter slots and scoring from league settings', () => {
-  const league = normalize(JSON.parse(readFileSync(
-    new URL('./fixtures/league-settings.json', import.meta.url), 'utf8'))).league;
-  const cfg = leagueConfig(league);
+  const cfg = leagueConfig(leagueFixture());
 
   assert.equal(cfg.numTeams, 4);
   assert.equal(cfg.maxTeams, 10);
   // Starters only -- BN and IR are not lineup slots.
   assert.deepEqual(cfg.rosterSlots,
     { QB: 1, RB: 2, WR: 2, TE: 1, 'W/R/T': 1, K: 1, DEF: 1 });
-  // Scoring comes from stat_modifiers joined to stat_categories, not a constant.
-  assert.equal(cfg.scoring.Rec, 0.5);
-  assert.equal(cfg.scoring['Rush Yds'], 0.1);
-  assert.equal(cfg.scoring['Pass TD'], 4);
+  // Scoring comes from stat_modifiers joined to stat_categories by stat_id,
+  // not a constant and not a name (display_name is not unique -- see the
+  // collision test below).
+  assert.equal(statEntry(cfg.scoring, 11).value, 0.5); // Rec
+  assert.equal(statEntry(cfg.scoring, 9).value, 0.1); // Rush Yds
+  assert.equal(statEntry(cfg.scoring, 5).value, 4); // Pass TD
 });
 
 test('leagueConfig omits bench and IR from roster slots', () => {
-  const league = normalize(JSON.parse(readFileSync(
-    new URL('./fixtures/league-settings.json', import.meta.url), 'utf8'))).league;
-  const cfg = leagueConfig(league);
+  const cfg = leagueConfig(leagueFixture());
   assert.equal(cfg.rosterSlots.BN, undefined);
   assert.equal(cfg.rosterSlots.IR, undefined);
 });
 
-test('leagueConfig keeps the individual-player stat when two categories share a display name', () => {
+test('leagueConfig keeps both stats when two categories share a display name', () => {
   // Yahoo's own settings define BOTH stat_id 6 ("Interceptions", passing,
   // an individual QB's thrown picks, modifier -1) and stat_id 33
   // ("Interception", def_turnovers, a defense's takeaways, modifier +2)
-  // under the identical display_name "Int". A join keyed purely by name
-  // silently drops one -- and dropping the QB penalty in favour of the
-  // defensive bonus scores every QB backwards.
-  const league = normalize(JSON.parse(readFileSync(
-    new URL('./fixtures/league-settings.json', import.meta.url), 'utf8'))).league;
-  const cfg = leagueConfig(league);
-  assert.equal(cfg.scoring.Int, -1);
+  // under the identical display_name "Int". display_name is NOT a unique
+  // key -- keying the export by stat_id (which Yahoo does treat as unique)
+  // is what lets both survive, rather than one silently overwriting the
+  // other and scoring every QB backwards.
+  const cfg = leagueConfig(leagueFixture());
+  const passingInt = statEntry(cfg.scoring, 6);
+  const defensiveInt = statEntry(cfg.scoring, 33);
+  assert.equal(passingInt.value, -1);
+  assert.equal(passingInt.name, 'Int');
+  assert.equal(defensiveInt.value, 2);
+  assert.equal(defensiveInt.name, 'Int');
+});
+
+test('leagueConfig scoring entries never share a statId', () => {
+  // The export's uniqueness invariant: a downstream reader keying off
+  // statId must never find two entries claiming the same id.
+  const cfg = leagueConfig(leagueFixture());
+  const ids = cfg.scoring.map((e) => e.statId);
+  assert.equal(ids.length, new Set(ids).size);
 });
 
 test('league export writes JSON a downstream tool can read', async () => {

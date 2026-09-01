@@ -341,21 +341,30 @@ export function leagueConfig(league) {
       slots[p.position] = Number(p.count);
     }
   }
-  // stat_modifiers carries values keyed by stat_id; stat_categories carries the
-  // human names. Neither is useful without the other.
-  const names = Object.fromEntries(
-    (s.stat_categories?.stats ?? []).map((c) => [String(c.stat_id), c.display_name]));
-  // Yahoo also reuses a display_name across an individual stat and a
-  // defense/team stat with the same label but a different id and modifier
-  // (e.g. stat_id 6 "Interceptions", an individual QB's picks thrown, -1;
-  // and stat_id 33 "Interception", a defense's takeaways, +2 -- both "Int").
-  // stat_ids run lowest-to-highest by individual offensive stats first, so
-  // keeping the first name seen keeps the individual-player value; keeping
-  // the last would silently swap a QB's turnover penalty for a bonus.
-  const scoring = {};
+  // stat_modifiers carries values keyed by stat_id; stat_categories carries
+  // the human name and group. Neither is useful without the other -- and the
+  // join key MUST be stat_id, not display_name: Yahoo reuses display names
+  // across unrelated stats (e.g. stat_id 6 "Interceptions"/passing, an
+  // individual QB's picks thrown, modifier -1; and stat_id 33
+  // "Interception"/def_turnovers, a defense's takeaways, modifier +2 -- both
+  // display as "Int"). A name-keyed dict can only hold one of a colliding
+  // pair and silently drops or overwrites the other; stat_id is the field
+  // Yahoo itself treats as unique, so keying the export by it keeps both.
+  // `name`/`group` ride along for human readability only, never as keys.
+  // Every modifier with a matching category is emitted -- filtering to a
+  // subset (e.g. offense-only) is a downstream concern, not this export's.
+  const categories = new Map(
+    (s.stat_categories?.stats ?? []).map((c) => [String(c.stat_id), c]));
+  const scoring = [];
   for (const m of s.stat_modifiers?.stats ?? []) {
-    const name = names[String(m.stat_id)];
-    if (name && !(name in scoring)) scoring[name] = Number(m.value);
+    const category = categories.get(String(m.stat_id));
+    if (!category) continue; // a modifier with no matching category can't be labelled
+    scoring.push({
+      statId: Number(m.stat_id),
+      name: category.display_name,
+      group: category.group,
+      value: Number(m.value),
+    });
   }
   return {
     leagueKey: league.league_key,
@@ -552,11 +561,11 @@ export async function runCommand(
           throw new UsageError(
             `Unknown league subcommand "${sub ?? ''}". Usage: league export [league_key] [--out=PATH]`);
         }
-        // `myLeagues` (unlike `resolveLeagueKey`) returns [] rather than
-        // throwing when none are found, so an account with no discoverable
-        // leagues still reaches the settings request below and surfaces
-        // Yahoo's own error for a missing key, instead of a resolution step
-        // masking it with a less specific one.
+        // Deliberately `myLeagues` directly, not `resolveLeagueKey`: the
+        // latter throws when none are found, so an account with no
+        // discoverable leagues still reaches the settings request below and
+        // surfaces Yahoo's own error for a missing key, instead of a
+        // resolution step masking it with a less specific one.
         const key = flags.league ?? args[1] ?? (await myLeagues(client))[0]?.league_key;
         const { league } = await client.get(`league/${key}/settings`);
         const cfg = leagueConfig(league);
