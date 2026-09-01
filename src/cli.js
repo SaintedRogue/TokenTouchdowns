@@ -35,6 +35,7 @@ export function formatTable(rows, columns) {
   ].join('\n');
 }
 
+import { writeFile } from 'node:fs/promises';
 import { SessionExpiredError, YahooApiError } from './client.js';
 import {
   SOURCES, sourcesProviding, recordsOf, metaOf, feedVariantLabel,
@@ -68,6 +69,7 @@ Commands:
   players [league_key]   Browse the player pool
   sync                   Refresh cached external data (ADP, injury, ...)
   sources                List registered external data sources
+  league export [key]    Export scoring/roster settings for the draft engine
   help                   Show this message
 
 Player filters:
@@ -84,6 +86,9 @@ Sync flags:
   ADP is published per scoring format and league size; the two flags above
   select which board --with=adp shows, and the format is labelled in the
   footer so an unlabelled number can never be read as the wrong one.
+
+League export flags:
+  --out=PATH   Write the config to a file instead of stdout
 
 Omitted keys are resolved from your own leagues and team.`;
 
@@ -318,6 +323,51 @@ async function tryEnrich(players, caps, { cacheDir, err }) {
   }
 }
 
+/** Roster entries that are not lineup slots. */
+const NON_STARTING_SLOTS = new Set(['BN', 'IR']);
+
+/**
+ * Derive the parameters a draft engine needs from a league's own settings.
+ *
+ * Reading these rather than hardcoding them is what keeps the engine usable in
+ * any league -- and replacement level, which every VOR number depends on, is a
+ * direct function of `rosterSlots` and `numTeams`.
+ */
+export function leagueConfig(league) {
+  const s = league.settings;
+  const slots = {};
+  for (const p of s.roster_positions ?? []) {
+    if (p.is_starting_position === 1 && !NON_STARTING_SLOTS.has(p.position)) {
+      slots[p.position] = Number(p.count);
+    }
+  }
+  // stat_modifiers carries values keyed by stat_id; stat_categories carries the
+  // human names. Neither is useful without the other.
+  const names = Object.fromEntries(
+    (s.stat_categories?.stats ?? []).map((c) => [String(c.stat_id), c.display_name]));
+  // Yahoo also reuses a display_name across an individual stat and a
+  // defense/team stat with the same label but a different id and modifier
+  // (e.g. stat_id 6 "Interceptions", an individual QB's picks thrown, -1;
+  // and stat_id 33 "Interception", a defense's takeaways, +2 -- both "Int").
+  // stat_ids run lowest-to-highest by individual offensive stats first, so
+  // keeping the first name seen keeps the individual-player value; keeping
+  // the last would silently swap a QB's turnover penalty for a bonus.
+  const scoring = {};
+  for (const m of s.stat_modifiers?.stats ?? []) {
+    const name = names[String(m.stat_id)];
+    if (name && !(name in scoring)) scoring[name] = Number(m.value);
+  }
+  return {
+    leagueKey: league.league_key,
+    name: league.name,
+    numTeams: Number(league.num_teams),
+    maxTeams: Number(league.max_teams),
+    draftStatus: league.draft_status,
+    rosterSlots: slots,
+    scoring,
+  };
+}
+
 /** The team the logged-in user owns in a league. */
 async function myTeamKey(client, leagueKey) {
   const { league } = await client.get(`league/${leagueKey}/teams`);
@@ -493,6 +543,30 @@ export async function runCommand(
           { key: 'variant', label: 'VARIANT' },
           { key: 'documented', label: 'DOCUMENTED' },
         ]);
+        return 0;
+      }
+
+      case 'league': {
+        const sub = args[0];
+        if (sub !== 'export') {
+          throw new UsageError(
+            `Unknown league subcommand "${sub ?? ''}". Usage: league export [league_key] [--out=PATH]`);
+        }
+        // `myLeagues` (unlike `resolveLeagueKey`) returns [] rather than
+        // throwing when none are found, so an account with no discoverable
+        // leagues still reaches the settings request below and surfaces
+        // Yahoo's own error for a missing key, instead of a resolution step
+        // masking it with a less specific one.
+        const key = flags.league ?? args[1] ?? (await myLeagues(client))[0]?.league_key;
+        const { league } = await client.get(`league/${key}/settings`);
+        const cfg = leagueConfig(league);
+        const json = `${JSON.stringify(cfg, null, 2)}\n`;
+        if (flags.out && flags.out !== true) {
+          await writeFile(flags.out, json);
+          out.write(`Wrote ${flags.out}\n`);
+        } else {
+          out.write(json);
+        }
         return 0;
       }
 

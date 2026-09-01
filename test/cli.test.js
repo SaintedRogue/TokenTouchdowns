@@ -885,3 +885,56 @@ test('sync labels which ADP board it cached', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- Task 1: league export --------------------------------------------
+
+import { leagueConfig } from '../src/cli.js';
+
+test('leagueConfig derives starter slots and scoring from league settings', () => {
+  const league = normalize(JSON.parse(readFileSync(
+    new URL('./fixtures/league-settings.json', import.meta.url), 'utf8'))).league;
+  const cfg = leagueConfig(league);
+
+  assert.equal(cfg.numTeams, 4);
+  assert.equal(cfg.maxTeams, 10);
+  // Starters only -- BN and IR are not lineup slots.
+  assert.deepEqual(cfg.rosterSlots,
+    { QB: 1, RB: 2, WR: 2, TE: 1, 'W/R/T': 1, K: 1, DEF: 1 });
+  // Scoring comes from stat_modifiers joined to stat_categories, not a constant.
+  assert.equal(cfg.scoring.Rec, 0.5);
+  assert.equal(cfg.scoring['Rush Yds'], 0.1);
+  assert.equal(cfg.scoring['Pass TD'], 4);
+});
+
+test('leagueConfig omits bench and IR from roster slots', () => {
+  const league = normalize(JSON.parse(readFileSync(
+    new URL('./fixtures/league-settings.json', import.meta.url), 'utf8'))).league;
+  const cfg = leagueConfig(league);
+  assert.equal(cfg.rosterSlots.BN, undefined);
+  assert.equal(cfg.rosterSlots.IR, undefined);
+});
+
+test('leagueConfig keeps the individual-player stat when two categories share a display name', () => {
+  // Yahoo's own settings define BOTH stat_id 6 ("Interceptions", passing,
+  // an individual QB's thrown picks, modifier -1) and stat_id 33
+  // ("Interception", def_turnovers, a defense's takeaways, modifier +2)
+  // under the identical display_name "Int". A join keyed purely by name
+  // silently drops one -- and dropping the QB penalty in favour of the
+  // defensive bonus scores every QB backwards.
+  const league = normalize(JSON.parse(readFileSync(
+    new URL('./fixtures/league-settings.json', import.meta.url), 'utf8'))).league;
+  const cfg = leagueConfig(league);
+  assert.equal(cfg.scoring.Int, -1);
+});
+
+test('league export writes JSON a downstream tool can read', async () => {
+  const out = capture();
+  const client = { async get() {
+    return normalize(JSON.parse(readFileSync(
+      new URL('./fixtures/league-settings.json', import.meta.url), 'utf8'))); } };
+  const code = await runCommand({ command: 'league', args: ['export'], flags: { json: true } },
+    { client, out });
+  assert.equal(code, 0);
+  const cfg = JSON.parse(out.text());
+  assert.equal(cfg.rosterSlots.RB, 2);
+});
