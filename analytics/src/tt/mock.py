@@ -125,6 +125,13 @@ _FALLBACK_LEAGUE_CONFIG = load_config_from_dict({
 # a genuine (if tiny) preference -- see strategy_vor_survival.
 _EXPECTED_LOSS_EPSILON = 1e-9
 
+# `strategy_vor_survival`'s fallback for "how many rounds are left" when its
+# `rounds` factory argument is omitted -- see `_rounds_remaining`. Large
+# enough that `draft.recommend`'s F11 need-urgency boost sits at its ~1.0
+# floor regardless of `need`, i.e. "no information about the draft's total
+# length" degrades to the pre-F11 behaviour rather than a false emergency.
+_UNKNOWN_ROUNDS_REMAINING = 1_000
+
 
 def _round_order(teams: int, round_index: int) -> list[int]:
     """Pick order (0-indexed team slots) within one round, 0-indexed
@@ -210,9 +217,27 @@ def _need_discount(candidates: pd.DataFrame, roster: list[dict], config: LeagueC
     )
 
 
-def strategy_vor_survival(config: LeagueConfig, n: int = 5, conditional: bool = False) -> Strategy:
+def _rounds_remaining(pick: int, teams: int, rounds: int | None) -> int:
+    """How many rounds -- INCLUDING the one `pick` falls in -- are left in a
+    `rounds`-round snake draft, for `draft.recommend`'s `rounds_remaining`
+    (see F11 in fix-round-1-brief.md). `rounds` is None when the caller
+    (`strategy_vor_survival`'s own factory argument) doesn't know the
+    draft's total length; that degrades to `_UNKNOWN_ROUNDS_REMAINING`
+    rather than guessing, the same "no information, no false alarm"
+    reasoning `survival.py`'s own missing-adp convention uses."""
+    if rounds is None:
+        return _UNKNOWN_ROUNDS_REMAINING
+    current_round = (pick - 1) // teams + 1
+    return max(rounds - current_round + 1, 0)
+
+
+def strategy_vor_survival(
+    config: LeagueConfig, n: int = 5, conditional: bool = False, rounds: int | None = None,
+) -> Strategy:
     """Build a strategy that ranks by `draft.recommend`'s expected-loss
-    rule (`vor * P(gone before my next pick)`, roster-need discounted).
+    rule (`vor * P(gone before my next pick)`, roster-need discounted, and
+    -- since F11 -- need-urgency boosted for a still-unfilled mandatory
+    slot as the draft runs out of rounds).
 
     A FACTORY, not a bare strategy: `recommend` needs a `LeagueConfig` (for
     `roster_need`) that has nowhere to come from in the small, deliberately
@@ -225,6 +250,12 @@ def strategy_vor_survival(config: LeagueConfig, n: int = 5, conditional: bool = 
     conditional and unconditional survival forms under this same
     recommender by constructing two strategies, without editing this
     module (see `survival.py`'s own docstring for what the flag means).
+    `rounds` (default None) is likewise bound at construction time and fed
+    to `recommend`'s now-mandatory `rounds_remaining` via `_rounds_remaining`
+    -- a caller that knows how deep this draft goes (i.e. whatever `rounds`
+    it is about to pass to `simulate_draft`/`compare_strategies`) should
+    pass the SAME value here so the need-urgency mechanism actually sees a
+    real horizon instead of degrading to "no pressure."
 
     THE ALL-ZERO FALLBACK (see module docstring's "ALL-ZERO SURVIVAL
     DEGENERATE CASE"). `recommend` is asked for a full ranking (`n=` the
@@ -264,7 +295,11 @@ def strategy_vor_survival(config: LeagueConfig, n: int = 5, conditional: bool = 
         if board.empty:
             raise ValueError("strategy_vor_survival: no players remain on the board")
         decorated = add_survival(board, pick, next_pick, conditional=conditional)
-        ranked = recommend(decorated, pick, next_pick, roster, config, teams, n=len(decorated) + 1)
+        rounds_remaining = _rounds_remaining(pick, teams, rounds)
+        ranked = recommend(
+            decorated, pick, next_pick, roster, config, teams, rounds_remaining,
+            n=len(decorated) + 1,
+        )
         if ranked.empty:
             raise ValueError("strategy_vor_survival: no draftable candidate (every vor is NaN)")
 
