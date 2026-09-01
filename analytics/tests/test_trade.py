@@ -579,15 +579,27 @@ def test_find_trades_finds_a_trade_that_helps_both_sides_of_the_qb_hoard():
     assert best["get_names"] == best["gets"][0].upper()
 
 
-def test_the_best_trade_for_me_gives_away_a_quarterback_that_never_plays():
-    # A's second QB contributes exactly nothing to A's lineup, so giving
-    # him away must cost A exactly nothing in weekly points -- the trade is
-    # a pure gain for A even before the counterparty's side is considered.
+def test_the_best_trade_for_me_at_the_default_is_the_exhaustive_search_s_best():
+    # A's spare QBs contribute exactly nothing to A's lineup, so giving one
+    # away is FREE -- and that is not the same as best. A's best trade is
+    # giving away a STARTER the arriving player immediately replaces
+    # (a_rb2, whose slot b_rb1 fills): it costs A nothing in points either,
+    # and unlike the free quarterback it hands B nothing. The additive
+    # screen scored that candidate +6 against +13 for the QB give -- it
+    # charged A the full 7 points of the departing back while crediting the
+    # arrival against a roster that still held him -- and so never
+    # simulated it. The pairwise screen scores it at its true +13, and the
+    # default now returns exactly what an exhaustive search returns.
     rosters, schedule = _pathology_league()
     best = _search(rosters, schedule).iloc[0]
-    assert _position(rosters, "A", best["gives"][0]) == "QB"
-    assert best["gives"][0] != "a_qb1", "A must not give away the QB it actually starts"
+    exhaustive_best = _search(rosters, schedule, screen_top=None).iloc[0]
+    assert (best["their_team"], best["gives"], best["gets"]) == ("B", ("a_rb2",), ("b_rb1",))
+    assert best["my_delta"] == exhaustive_best["my_delta"]
     assert best["my_exp_points_delta"] > 0.0
+    # And the screen that used to be the default cannot reach it.
+    additive_best = _search(rosters, schedule, screen_mode="additive").iloc[0]
+    assert additive_best["my_delta"] < best["my_delta"]
+    assert _position(rosters, "A", additive_best["gives"][0]) == "QB"
 
 
 def test_find_trades_reports_exactly_the_same_delta_as_evaluate_trade():
@@ -665,17 +677,51 @@ def test_the_screen_keeps_the_top_of_both_ranking_keys_not_just_one():
     assert found.attrs["screen_top"] == 2
 
 
-def test_the_screen_never_overstates_a_one_for_one_trade():
-    # `my_add` measures an arriving player against a roster that still
-    # holds the departing one, and lineup value is submodular, so the
-    # screen score is a LOWER bound on the true change in weekly starting
-    # points for a one-for-one. Asserted for every simulated candidate.
+def test_the_default_screen_scores_a_one_for_one_exactly():
+    # THE PROPERTY THE PAIRWISE SCREEN BUYS. `_pair_table` asks the real
+    # optimiser `mu(R - d + g) - mu(R)`, which IS the one-for-one trade, so
+    # stage 1's score for such a candidate is not a bound on the simulated
+    # change in weekly starting points -- it is that number, to the last
+    # digit. Asserted with `==` on every one of the 108 candidates, so any
+    # surrogate arithmetic creeping back in fails here.
     rosters, schedule = _pathology_league()
     found = _search(rosters, schedule, screen_top=None, n=200)
+    assert len(found) == 6 * 6 * 3
+    assert (found["screen_score"] == found["my_exp_points_delta"]).all()
+
+
+def test_the_additive_screen_never_overstates_a_one_for_one_trade():
+    # The cheaper screen's saving grace, and the reason it is safe to keep
+    # as an option: `my_add` measures an arriving player against a roster
+    # that still holds the departing one, and lineup value is submodular,
+    # so its score is a LOWER bound on the true change in weekly starting
+    # points. It can only demote a good trade -- which is exactly what it
+    # does, hard enough on this fixture to under-rate a candidate by 7
+    # points and hand back a different "best" trade entirely.
+    rosters, schedule = _pathology_league()
+    found = _search(rosters, schedule, screen_top=None, n=200, screen_mode="additive")
     assert len(found) == 6 * 6 * 3
     assert (found["screen_score"] <= found["my_exp_points_delta"] + 1e-9).all()
     assert (found["screen_score"] < found["my_exp_points_delta"] - 1e-9).any(), \
         "fixture must contain a candidate the screen genuinely under-rates"
+
+
+def test_the_pairwise_screen_never_scores_below_the_additive_one():
+    # Leaving a pair unmatched is always an option in `_package_value`, so
+    # the pairwise score is the additive score's maximum with the exact
+    # swap decompositions: it can only ever PROMOTE what the additive
+    # screen demoted, never the reverse. Checked candidate by candidate
+    # over a whole 2-for-2 enumeration, not just on the best row.
+    rosters, schedule = _pathology_league()
+    common = dict(their_teams=["B"], max_give=2, max_get=2, screen_top=None, n=200)
+    pairwise = _search(rosters, schedule, **common)
+    additive = _search(rosters, schedule, screen_mode="additive", **common)
+    key = ["their_team", "gives", "gets"]
+    joined = pairwise.merge(additive, on=key, suffixes=("_pair", "_add"))
+    assert len(joined) == len(pairwise) == (6 + 15) ** 2
+    assert (joined["screen_score_pair"] >= joined["screen_score_add"] - 1e-9).all()
+    assert (joined["screen_score_pair"] > joined["screen_score_add"] + 1e-9).any(), \
+        "fixture must contain a package the additive screen under-rates"
 
 
 def test_every_candidate_respects_the_package_size_caps():
@@ -752,6 +798,76 @@ def test_find_trades_rejects_trading_with_yourself():
     # only way to tell the two checks apart.
     with pytest.raises(ValueError, match="their_teams names"):
         _search(rosters, schedule, their_teams=["A"])
+
+
+def test_find_trades_rejects_an_unknown_screen_mode():
+    rosters, schedule = _pathology_league()
+    with pytest.raises(ValueError, match="screen_mode"):
+        _search(rosters, schedule, screen_mode="pairwise-ish")
+
+
+def test_find_trades_records_which_screen_produced_the_answer():
+    # The screen is a heuristic and the two modes give different answers,
+    # so which one ran is part of the result, not a detail of the call.
+    rosters, schedule = _pathology_league()
+    assert _search(rosters, schedule).attrs["screen_mode"] == "pairwise"
+    assert _search(rosters, schedule, screen_mode="additive").attrs["screen_mode"] == "additive"
+
+
+def test_the_package_score_takes_the_best_pairing_not_the_first_one():
+    # `_package_value`'s arithmetic, on a hand-built table so every branch
+    # has a checkable answer -- and RIGGED SO THE OBVIOUS PAIRING IS THE
+    # WRONG ONE. Matching d1 to g1 and d2 to g2 in enumeration order is
+    # worth 1.0; crossing them over is worth 8.0. A screen that took the
+    # first legal matching rather than the best would report 1.0 and demote
+    # the trade -- which is this whole defect one level down, so the
+    # fixture has to be able to see it. (It could not, at first: the
+    # mutation "take the first matching" survived an earlier version of
+    # this test where the first matching happened to be the best.)
+    from tt.trade import _package_value
+    drop = {"d1": 10.0, "d2": 1.0}
+    add = {"g1": 2.0, "g2": 0.5}
+    pair = {("d1", "g1"): 1.0, ("d1", "g2"): 5.0,
+            ("d2", "g1"): 3.0, ("d2", "g2"): 0.0}
+    assert _package_value(("d1", "d2"), ("g1", "g2"), drop, add, pair) == 8.0
+    # A departure with no partner costs its solo `drop`: d1 takes the only
+    # arrival for 1.0 and d2 leaves for -1.0.
+    assert _package_value(("d1", "d2"), ("g1",), drop, add, pair) == 0.0
+    # An arrival with no partner earns its solo `add`: d1 pairs with g2 for
+    # 5.0 and g1 is credited on its own for 2.0.
+    assert _package_value(("d1",), ("g1", "g2"), drop, add, pair) == 7.0
+    # A one-for-one is the pair value outright, never the additive bound.
+    assert _package_value(("d1",), ("g1",), drop, add, pair) == 1.0
+    # And with no pair table at all, the additive surrogate.
+    assert _package_value(("d1", "d2"), ("g1", "g2"), drop, add, {}) == -8.5
+
+
+def test_the_screen_prices_the_counterpartys_side_of_a_package_exactly():
+    # THE DEFECT, AT ITS SOURCE. The screen scores both sides, and it was
+    # the COUNTERPARTY's score that broke: on the real drafted rosters the
+    # additive screen valued their half of the best mutual 2-for-2 at MINUS
+    # 0.77 points a week when it is worth PLUS 0.68 -- the wrong sign,
+    # because it charged them the full loss of a receiver the incoming one
+    # replaces. Here the same mechanism is hand-checkable: the trade is
+    # worth exactly +2.0 to A and +1.0 to B (asserted against the simulator
+    # in the test above), the pairwise screen says exactly that, and the
+    # additive screen says -4.0 and 0.0 -- A's half demoted by six points
+    # and B's half flattened onto the same score as doing nothing.
+    from tt.trade import _package_value, _prepare, _screen_tables
+    rosters, _ = _interacting_package_league()
+    prepared = _prepare(rosters, None, True, "proj_points", "sd")
+    give, get = ("a_rb1", "a_qb2"), ("b_rb2", "b_rb3")
+    scored = {}
+    for mode in ("pairwise", "additive"):
+        tables = _screen_tables(
+            prepared, "A", "B", _QB_RB, mode, "proj_points", "sd", "player_id"
+        )
+        scored[mode] = (
+            _package_value(give, get, tables.my_drop, tables.my_add, tables.my_pair),
+            _package_value(get, give, tables.their_drop, tables.their_add, tables.their_pair),
+        )
+    assert scored["pairwise"] == (2.0, 1.0)
+    assert scored["additive"] == (-4.0, 0.0)
 
 
 def test_find_trades_rejects_a_package_size_below_one():
@@ -899,32 +1015,33 @@ def _interacting_package_league() -> tuple[dict[str, pd.DataFrame], pd.DataFrame
     return rosters, round_robin_schedule(list(rosters), weeks=9)
 
 
-def test_the_screen_can_miss_a_mutually_beneficial_package_that_the_exhaustive_search_finds():
-    # THE HEURISTIC'S COST, PINNED RATHER THAN ASSERTED AWAY. This is not a
-    # hypothetical weakness: on this project's real drafted rosters the
-    # screened 2-for-2 search reports zero mutually beneficial trades where
-    # an exhaustive one finds 49. The fixture reproduces the mechanism at a
-    # size a test can assert exactly.
+def test_the_default_screen_finds_the_mutual_package_the_additive_screen_missed():
+    # THE DEFECT THIS TEST USED TO PIN, NOW INVERTED. It previously asserted
+    # the miss as known-bad: the screened 2-for-2 search reported ZERO
+    # mutually beneficial trades where the exhaustive one found 8 here (and
+    # 0 against 49 on the project's real drafted rosters). That default was
+    # a silent wrong answer to this function's headline question, so the
+    # screen is now pairwise-exact and the same fixture asserts the FIX --
+    # the default finds every mutual trade the exhaustive search finds.
     rosters, schedule = _interacting_package_league()
     common = dict(my_team="A", max_give=2, max_get=2, their_teams=["B"],
                   playoff_start_week=10, end_week=11, n=8_000, seed=404)
-    screened = find_trades(rosters, schedule, _QB_RB, screen_top=4, **common)
+    screened = find_trades(rosters, schedule, _QB_RB, screen_top=12, **common)
     exhaustive = find_trades(rosters, schedule, _QB_RB, screen_top=None, **common)
 
-    assert screened.attrs["candidates_simulated"] == 8
     assert exhaustive.attrs["candidates_simulated"] == 225
-    # The screen finds NONE of them; the exhaustive search finds them.
-    assert int(screened["mutual"].sum()) == 0
     assert int(exhaustive["mutual"].sum()) == 8
+    # THE FIX: at the default screen, on a fraction of the simulations.
+    assert screened.attrs["candidates_simulated"] < 30
+    assert int(screened["mutual"].sum()) == 8
+    assert set(zip(screened.loc[screened["mutual"], "gives"],
+                   screened.loc[screened["mutual"], "gets"])) == \
+        set(zip(exhaustive.loc[exhaustive["mutual"], "gives"],
+                exhaustive.loc[exhaustive["mutual"], "gets"]))
 
-    best = exhaustive[exhaustive["mutual"]].iloc[0]
+    best = screened[screened["mutual"]].iloc[0]
     # Levels: +2.0 and +1.0 points a week, exactly as the fixture is built.
     assert best["my_exp_points_delta"] == 2.0
     assert best["their_exp_points_delta"] == 1.0
     assert best["my_delta_ci_low"] > 0.0
     assert best["their_delta_ci_low"] > 0.0
-    # And the reason it was missed: the screen scored a +2.0-point trade
-    # NEGATIVE, which is the lower-bound property being very loose rather
-    # than the bound being violated.
-    assert best["screen_score"] < 0.0
-    assert best["screen_score"] < best["my_exp_points_delta"]

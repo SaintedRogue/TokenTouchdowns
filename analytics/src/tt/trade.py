@@ -179,6 +179,14 @@ _SIDE_COLUMNS = [
     "p_seed_1_before", "p_seed_1_after", "p_seed_1_delta",
 ]
 
+# Stage 1's two screens. "pairwise" prices every (drop, get) PAIR with the
+# real optimiser and is exact on a one-for-one; "additive" prices players
+# one at a time against the roster as it stands, which is linear rather than
+# quadratic and which MISSES mutually beneficial packages (see
+# `find_trades`). The default is "pairwise" because the cheap screen's
+# failure mode is a confident "no trades available" when dozens exist.
+_SCREEN_MODES = ("pairwise", "additive")
+
 _FIND_COLUMNS = [
     "their_team", "gives", "gets", "give_names", "get_names",
     "my_delta", "my_delta_se", "my_delta_ci_low", "my_delta_ci_high", "my_significant",
@@ -678,7 +686,11 @@ def _marginal_tables(
       `their_add[p]`  what THEIR lineup gains if p (mine) joins theirs
 
     That is 2 * (my roster + their roster) optimiser calls per counterparty
-    -- linear, not combinatorial, which is the entire point.
+    -- linear in roster size. These four numbers alone are what the
+    ADDITIVE screen is built from, and combining them additively is what
+    made it miss package trades (see `find_trades`); the default screen
+    uses them only for the players a package leaves unmatched, and prices
+    the matched ones exactly with `_pair_table`.
     """
     mine, theirs = prepared[my_team], prepared[their_team]
     base_mine = _swap_value(mine, theirs, [], [], config, points_column, sd_column, id_column)
@@ -704,6 +716,136 @@ def _marginal_tables(
     return my_drop, my_add, their_drop, their_add
 
 
+def _pair_table(
+    prepared: pd.DataFrame, donor: pd.DataFrame,
+    out_ids: Sequence[str], in_ids: Sequence[str],
+    config: LeagueConfig, points_column: str, sd_column: str, id_column: str,
+) -> dict[tuple[str, str], float]:
+    """`mu(R - d + g) - mu(R)` for EVERY (drop, get) PAIR, from the real
+    optimiser -- the exact value of that one-for-one swap, not an estimate
+    of it.
+
+    This is the whole fix. `_marginal_tables` asks what one player is worth
+    ARRIVING AT or LEAVING a roster that still holds everyone else, and no
+    arithmetic on those four numbers can know that an arriving wide
+    receiver steps into the slot the departing one vacated. Asking the
+    optimiser the two-player question instead costs
+    `len(out_ids) * len(in_ids)` calls -- quadratic in roster size where
+    `_marginal_tables` is linear (about 8 ms a call, so ~1.4 s per side per
+    counterparty on a 13-man roster) -- and it gets the answer right by
+    construction rather than by bound.
+    """
+    base = _swap_value(prepared, donor, [], [], config, points_column, sd_column, id_column)
+    return {
+        (out_id, in_id): _swap_value(
+            prepared, donor, [out_id], [in_id],
+            config, points_column, sd_column, id_column,
+        ) - base
+        for out_id in out_ids
+        for in_id in in_ids
+    }
+
+
+class _ScreenTables(NamedTuple):
+    """Everything stage 1 needs to score any candidate against ONE
+    counterparty. `my_pair` / `their_pair` are empty in the additive mode,
+    which is exactly what `_package_value` switches on.
+    """
+    my_drop: dict[str, float]
+    my_add: dict[str, float]
+    their_drop: dict[str, float]
+    their_add: dict[str, float]
+    my_pair: dict[tuple[str, str], float]
+    their_pair: dict[tuple[str, str], float]
+
+
+def _screen_tables(
+    prepared: Mapping[str, pd.DataFrame], my_team: str, their_team: str,
+    config: LeagueConfig, screen_mode: str,
+    points_column: str, sd_column: str, id_column: str,
+) -> _ScreenTables:
+    mine, theirs = prepared[my_team], prepared[their_team]
+    my_ids = list(mine[id_column])
+    their_ids = list(theirs[id_column])
+    my_drop, my_add, their_drop, their_add = _marginal_tables(
+        prepared, my_team, their_team, config, points_column, sd_column, id_column,
+    )
+    if screen_mode == "additive":
+        return _ScreenTables(my_drop, my_add, their_drop, their_add, {}, {})
+    return _ScreenTables(
+        my_drop, my_add, their_drop, their_add,
+        _pair_table(mine, theirs, my_ids, their_ids,
+                    config, points_column, sd_column, id_column),
+        _pair_table(theirs, mine, their_ids, my_ids,
+                    config, points_column, sd_column, id_column),
+    )
+
+
+def _best_decomposition(
+    outs: Sequence[str], ins: Sequence[str],
+    drop: Mapping[str, float], add: Mapping[str, float],
+    pair: Mapping[tuple[str, str], float],
+    index: int = 0, used: int = 0,
+) -> float:
+    """Best total over every way of MATCHING departing players to arriving
+    ones, relative to a roster that has already been credited `sum(add)`.
+
+    Each departing player is either matched to a still-unmatched arrival --
+    worth `pair[out, in] - add[in]`, i.e. the exact swap value in place of
+    the arrival's already-counted solo value -- or left unmatched, worth
+    `-drop[out]`. An arrival nobody is matched to keeps its solo `add`.
+    `used` is a bitmask over `ins`, so a package of p for q explores
+    `sum_k C(p,k) C(q,k) k!` combinations: 7 for a 2-for-2, 34 for a
+    3-for-3. Exponential in package size and irrelevant beside one season
+    simulation.
+
+    Leaving a pair unmatched is always an option, so this is never below the
+    additive score -- the pairwise screen can only ever PROMOTE what the
+    additive one demoted, which is the property `find_trades` needs.
+    """
+    if index == len(outs):
+        return 0.0
+    out_id = outs[index]
+    best = -drop[out_id] + _best_decomposition(
+        outs, ins, drop, add, pair, index + 1, used
+    )
+    for position, in_id in enumerate(ins):
+        bit = 1 << position
+        if used & bit:
+            continue
+        value = pair[out_id, in_id] - add[in_id] + _best_decomposition(
+            outs, ins, drop, add, pair, index + 1, used | bit
+        )
+        best = max(best, value)
+    return best
+
+
+def _package_value(
+    outs: Sequence[str], ins: Sequence[str],
+    drop: Mapping[str, float], add: Mapping[str, float],
+    pair: Mapping[tuple[str, str], float],
+) -> float:
+    """One side's stage-1 score for sending `outs` and receiving `ins`.
+
+    With no pair table (the additive mode) this is the old surrogate,
+    `sum(add) - sum(drop)`: every player priced against the roster as it
+    stands, which charges the full loss of a starter even when an arrival
+    replaces him.
+
+    With one, it is the best decomposition of the package into EXACT
+    one-for-one swaps plus unmatched solo moves. A one-for-one is then
+    exact outright -- `pair[d, g]` IS the trade -- and a package is exact
+    whenever its parts pair off cleanly, which is the case the additive
+    screen got wrong by a whole starter's worth of points.
+    """
+    additive = sum(add[in_id] for in_id in ins) - sum(drop[out_id] for out_id in outs)
+    if not pair:
+        return additive
+    if len(outs) == 1 and len(ins) == 1:
+        return max(additive, pair[outs[0], ins[0]])
+    return sum(add[in_id] for in_id in ins) + _best_decomposition(outs, ins, drop, add, pair)
+
+
 def find_trades(
     rosters: Mapping[str, pd.DataFrame],
     schedule: pd.DataFrame,
@@ -722,6 +864,7 @@ def find_trades(
     n: int = DEFAULT_N,
     seed: int | None = None,
     screen_top: int | None = 40,
+    screen_mode: str = "pairwise",
     points_column: str = "proj_points",
     sd_column: str = "sd",
     id_column: str = "player_id",
@@ -740,70 +883,93 @@ def find_trades(
     search is therefore a two-stage funnel, and BOTH stages are stated
     here because a silent heuristic is worse than a bad one.
 
-    STAGE 1 -- AN ADDITIVE LINEUP-VALUE SCREEN, free per candidate.
-    `_marginal_tables` asks the real optimiser four one-player questions
-    per player (what my lineup loses if he leaves, what it gains if he
-    arrives, and the same for the counterparty) -- 2 * (13 + 13) = 52
-    optimiser calls per counterparty, LINEAR in roster size. A candidate's
-    screen score is then pure arithmetic:
+    STAGE 1 -- A PAIRWISE-EXACT LINEUP-VALUE SCREEN (`screen_mode`
+    "pairwise", the default). `_pair_table` asks the real optimiser the
+    TWO-player question for every (departing, arriving) PAIR:
+    `mu(R - d + g) - mu(R)`, which IS the value of that one-for-one swap,
+    not an estimate of it. `_marginal_tables` supplies the one-player
+    values for whatever a package leaves unmatched. A candidate's score is
+    then the best decomposition of the package into those exact swaps
+    (`_package_value`):
 
-        my_hat    = sum(my_add[got])    - sum(my_drop[given])
-        their_hat = sum(their_add[given]) - sum(their_drop[got])
+        my_hat    = max over matchings of (my exact swaps + unmatched solos)
+        their_hat = the same from the counterparty's side
 
+    so a ONE-FOR-ONE IS SCORED EXACTLY -- `screen_score` equals the
+    simulated `my_exp_points_delta` to the last digit -- and a package is
+    scored exactly whenever its parts pair off cleanly, which is the case
+    the old additive screen got wrong by a whole starter's worth of points.
     Candidates are ranked twice -- by `my_hat` (best for me) and by
     `min(my_hat, their_hat)` (best mutual) -- and the top `screen_top` of
     EACH list is kept, so a lopsided trade that is merely good for me and a
-    balanced one that is good for both are both carried forward. Note the
-    screen never looks at a position label: it is lineup value throughout,
-    so it does not double-count the positional-scarcity effect the
-    optimiser already prices.
+    balanced one that is good for both are both carried forward. The screen
+    never looks at a position label: it is lineup value throughout, so it
+    does not double-count the positional-scarcity effect the optimiser
+    already prices.
 
-    THREE WAYS IT CAN MISS THE OPTIMUM, all real, the first MEASURED:
-      1. THE SCREEN IS ADDITIVE AND LINEUP VALUE IS NOT. Each of the four
-         one-player values is measured against the roster as it stands, so
-         a package whose parts INTERACT is mis-scored: the cost of giving
-         up a starter is charged in full even when an arriving player
-         replaces him, and an arrival is credited only against the roster
-         that still holds the departing player.
-         BOTH SIDES' SCORES ARE THEREFORE LOWER BOUNDS on the true change
-         in weekly starting points -- lineup value is submodular (it is a
-         top-k selection, where each further player is worth less than the
-         last), so `mu(R+g) - mu(R) <= mu(R-d+g) - mu(R-d)`. The screen can
-         only ever DEMOTE a good trade, never promote a bad one. But it can
-         demote one very hard, and the bound is loosest exactly where
-         package trades live. `test_the_screen_never_overstates_a_one_for_
-         one_trade` pins the direction; `test_the_screen_can_miss_a_
-         mutually_beneficial_package_that_the_exhaustive_search_finds` pins
-         the size of the miss.
-         MEASURED, on this project's four real drafted rosters: the best
-         mutually beneficial 2-for-2 available to the QB-hoarding team is
-         worth +0.94 points a week to it and +0.68 to the counterparty, and
-         the screen scores those +0.92 and MINUS 0.77 -- the counterparty's
-         score has the WRONG SIGN, because it charges the full loss of a
-         wide receiver whom the incoming one replaces. That candidate ranks
-         1503rd of 8281 on the mutual key, so `screen_top=40` never sees
-         it, and the screened search reports ZERO mutually beneficial
-         trades where an exhaustive one finds 49.
-         SO, PLAINLY: FOR MUTUAL-TRADE DISCOVERY OVER MULTI-PLAYER
-         PACKAGES, RUN WITH `screen_top=None`. The screen is a sound speed
-         dial for "what helps me most" -- on the same rosters its bound was
-         tight enough to cost nothing there, screened best equalling
-         exhaustive best over the entire one-for-one space -- and it is NOT
-         trustworthy for "what would they accept" once packages are
-         involved. One-for-one search is small enough (13 x 13 x 3 = 507
-         candidates, 17 s at n = 20000) to run exhaustively always.
+    THE COST is `2 * len(mine) * len(theirs)` optimiser calls per
+    counterparty -- QUADRATIC in roster size where the additive screen is
+    linear. Measured on this project's 13-man rosters at about 8 ms a call:
+    ~2.8 s per counterparty, so ~8 s of stage 1 for the real four-team
+    league and ~25 s for a ten-team one (`max_teams` is 10). That is the
+    price of the screen telling the truth about a package, and it is paid
+    once per counterparty however many candidates there are.
+
+    WHY THE DEFAULT IS NOT THE CHEAPER SCREEN. `screen_mode="additive"`
+    keeps the old surrogate -- 2 * (13 + 13) = 52 calls per counterparty,
+    linear -- which scores each player against the roster AS IT STANDS:
+
+        my_hat    = sum(my_add[got])      - sum(my_drop[given])
+        their_hat = sum(their_add[given]) - sum(their_drop[got])
+
+    Lineup value is submodular, so both those scores are LOWER BOUNDS on
+    the true change in weekly starting points: the screen can only DEMOTE a
+    good trade, never promote a bad one. But it demotes packages very hard,
+    because it charges the full loss of a starter even when an arriving
+    player steps into the slot he vacated. MEASURED, on this project's four
+    real drafted rosters: the best mutually beneficial 2-for-2 available to
+    the QB-hoarding team is worth +0.94 points a week to it and +0.68 to
+    the counterparty; the additive screen scores those +0.92 and MINUS
+    0.77 -- the counterparty's score has the WRONG SIGN -- ranking the
+    trade 1503rd of 8281 on the mutual key, so `screen_top=40` never saw
+    it and the search reported ZERO mutually beneficial trades where an
+    exhaustive one finds 49. THAT WAS A SILENT WRONG ANSWER TO THIS
+    FUNCTION'S HEADLINE QUESTION, which is why it is no longer the
+    default. The pairwise screen scores the same trade at exactly
+    +0.94 / +0.68 and finds the mutual set.
+    `test_the_default_screen_finds_the_mutual_package_the_additive_screen_
+    missed` pins both halves of that on a hand-built fixture.
+    `screen_mode="additive"` remains available for a league large enough
+    that the quadratic table hurts, and it is the wrong tool for mutual
+    discovery over packages whenever it is used.
+
+    WHAT THE PAIRWISE SCREEN STILL CANNOT SEE, all real:
+      1. IT IS EXACT ON SWAPS, NOT ON PACKAGES. A package is scored by its
+         best pairing, so it is exact when the parts pair off and only
+         approximate when they do not -- two arrivals competing for one
+         slot are each credited with displacing the same incumbent
+         (overstated), and two departures freeing one slot likewise. Unlike
+         the additive screen it is NOT a bound in either direction; it is
+         an estimate that is exact on the one-for-one case and, on the real
+         rosters, on the package it exists to find. Overstating merely
+         spends a simulation, which stage 2 then reports correctly.
       2. IT IS A MEAN-ONLY SCREEN. `playoff.py` documents that variance
          helps an underdog: a trade that lowers your weekly mean while
          raising your spread can raise a weak team's title odds, and this
          screen would never simulate it. Trades that win through variance
-         are invisible to stage 1.
+         are invisible to stage 1, in either mode.
       3. IT PRICES NO DEPTH, because nothing in this module does (see the
          module docstring).
 
-    THE ESCAPE HATCH IS REAL: `screen_top=None` disables stage 1 entirely
-    and simulates every enumerated candidate. That is exact, it is the way
-    to measure what the heuristic costs on a given league, and
-    `test_disabling_the_screen_is_never_worse_than_using_it` uses it.
+    THE ESCAPE HATCH IS REAL: `screen_top=None` disables stage 1's
+    selection entirely and simulates EVERY enumerated candidate. That is
+    exact whatever the rosters look like, it is the way to measure what the
+    heuristic costs on a given league (it is how the failure above was
+    measured), and it is what to reach for when the answer has to be
+    complete rather than fast -- 812 s for the real league's 24843
+    two-for-two candidates at n = 20000, against 11 s at the default. The
+    screen score is still computed and reported in that mode, so a caller
+    can always compare stage 1 against the simulated truth.
 
     STAGE 2 -- the survivors get the full paired treatment: one season
     simulation per candidate, on the SAME worlds as the baseline and as
@@ -820,6 +986,13 @@ def find_trades(
       `n`                     the accuracy/speed dial, passed straight
                               through. Cost is roughly
                               `candidates * n * weeks * teams` flops.
+      `screen_top`            how many candidates survive stage 1 on EACH
+                              of its two ranking keys, per counterparty.
+                              `None` disables the selection and simulates
+                              everything (above).
+      `screen_mode`           "pairwise" (default, exact on one-for-ones)
+                              or "additive" (cheaper, linear, and unsound
+                              for mutual discovery over packages -- above).
 
     RETURNS one row per SIMULATED candidate, best-for-me first, with
     `my_delta` / `their_delta` and their paired standard errors and
@@ -836,6 +1009,10 @@ def find_trades(
         raise ValueError("max_give and max_get must be at least 1")
     if screen_top is not None and screen_top < 1:
         raise ValueError("screen_top must be at least 1, or None to disable the screen")
+    if screen_mode not in _SCREEN_MODES:
+        raise ValueError(
+            f"screen_mode {screen_mode!r} must be one of {sorted(_SCREEN_MODES)}"
+        )
 
     teams = list(rosters)
     opponents = [team for team in teams if team != my_team] if their_teams is None \
@@ -867,16 +1044,19 @@ def find_trades(
         gives = _subsets(my_ids, max_give)
         gets = _subsets(their_ids, max_get)
         enumerated += len(gives) * len(gets)
-        my_drop, my_add, their_drop, their_add = _marginal_tables(
-            prepared, my_team, opponent, config, points_column, sd_column, id_column,
+        tables = _screen_tables(
+            prepared, my_team, opponent, config, screen_mode,
+            points_column, sd_column, id_column,
         )
         scored = []
         for give in gives:
-            give_cost = sum(my_drop[pid] for pid in give)
-            give_value = sum(their_add[pid] for pid in give)
             for get in gets:
-                my_hat = sum(my_add[pid] for pid in get) - give_cost
-                their_hat = give_value - sum(their_drop[pid] for pid in get)
+                my_hat = _package_value(
+                    give, get, tables.my_drop, tables.my_add, tables.my_pair
+                )
+                their_hat = _package_value(
+                    get, give, tables.their_drop, tables.their_add, tables.their_pair
+                )
                 scored.append((opponent, give, get, my_hat, min(my_hat, their_hat)))
         candidates.extend(_screen(scored, screen_top))
 
@@ -929,7 +1109,7 @@ def find_trades(
         "monte_carlo_se": 0.5 / math.sqrt(n),
         "my_team": my_team, "their_teams": tuple(opponents),
         "max_give": max_give, "max_get": max_get,
-        "screen_top": screen_top,
+        "screen_top": screen_top, "screen_mode": screen_mode,
         "candidates_enumerated": enumerated,
         "candidates_simulated": len(rows),
     })
