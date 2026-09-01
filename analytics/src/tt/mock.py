@@ -384,6 +384,14 @@ def simulate_draft(
         working["_effective_adp"] = working["adp"].to_numpy() + noise
 
     available = working
+    # C-3 (fix-round-2-brief.md): maintained incrementally alongside
+    # `available` (one `.discard` per pick) instead of rebuilt from scratch
+    # every pick via `set(available["player_id"])` -- that rebuild was O(n)
+    # over a ~1,600-row board on every one of 150 picks x 200 trials x 4
+    # arms x 12 cells, and dominated the real backtest's wall time. Kept in
+    # lockstep with `available`'s own filtering below so membership checks
+    # never diverge from what the DataFrame actually contains.
+    available_ids = set(working["player_id"])
     rosters: dict[int, list[dict]] = {slot: [] for slot in range(teams)}
     log: list[dict] = []
 
@@ -396,7 +404,7 @@ def simulate_draft(
         acting = strategy if (opponent_strategy is None or slot == my_slot) else opponent_strategy
         chosen = acting(available, rosters[slot], pick_number, next_pick_number, teams)
         chosen_id = chosen.get("player_id")
-        if chosen_id is None or chosen_id not in set(available["player_id"]):
+        if chosen_id is None or chosen_id not in available_ids:
             raise ValueError(
                 f"strategy returned a player_id ({chosen_id!r}) not currently on the "
                 "board -- a strategy must choose from its `board` argument"
@@ -404,6 +412,7 @@ def simulate_draft(
 
         rosters[slot].append(chosen)
         available = available[available["player_id"] != chosen_id]
+        available_ids.discard(chosen_id)
         if return_all:
             log.append({**chosen, "pick_number": pick_number, "round_number": round_index + 1, "slot": slot})
 
