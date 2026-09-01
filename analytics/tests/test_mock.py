@@ -414,16 +414,78 @@ def test_compare_strategies_rounds_defaults_to_a_full_draft():
 
 
 def test_optimal_lineup_score_sums_only_the_top_starters_per_position():
-    # RB target here is round(2.5) == 2 -> only the top 2 RBs by
-    # proj_points count; the 3rd RB (bench) must NOT be included.
+    # CONFIG's fixed slots are RB=2, WR=2, plus a single "W/R" flex (RB/WR
+    # eligible). 3 RBs + 3 WRs -> fixed slots take the top 2 of each
+    # (rb1/rb2, wr1/wr2), leaving {rb3=5.0, wr3=3.0}; the flex must go to
+    # the BEST of what's left (rb3), and the true bench player (wr3, worse
+    # than everyone including the flex leftover) must NOT be included.
     roster = pd.DataFrame([
         {"player_id": "rb1", "position": "RB", "proj_points": 20.0},
         {"player_id": "rb2", "position": "RB", "proj_points": 15.0},
-        {"player_id": "rb3", "position": "RB", "proj_points": 5.0},  # bench: worse than rb1/rb2, excluded
+        {"player_id": "rb3", "position": "RB", "proj_points": 5.0},  # picked up by the flex
         {"player_id": "wr1", "position": "WR", "proj_points": 10.0},
+        {"player_id": "wr2", "position": "WR", "proj_points": 8.0},
+        {"player_id": "wr3", "position": "WR", "proj_points": 3.0},  # bench: worse than the flex leftover
     ])
     score = optimal_lineup_score(CONFIG_OBJ)(roster)
-    assert score == pytest.approx(20.0 + 15.0 + 10.0)
+    assert score == pytest.approx(20.0 + 15.0 + 10.0 + 8.0 + 5.0)
+
+
+# --- M-4 (fix-round-2-brief.md): the flex slot must not be rounded away ---
+
+
+_REAL_SHAPE_CONFIG = load_config_from_dict({
+    "leagueKey": "x", "name": "x", "numTeams": 10, "maxTeams": 10,
+    "draftStatus": "predraft",
+    # The REAL league's own roster shape (3-way W/R/T flex) -- see
+    # docs/draft-engine-design.md's methodology section. 9 total starting
+    # slots: 1 QB, 2 RB, 2 WR, 1 TE, 1 FLEX, 1 K, 1 DEF.
+    "rosterSlots": {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "W/R/T": 1, "K": 1, "DEF": 1},
+    "scoring": [],
+})
+
+
+def test_optimal_lineup_score_awards_the_flex_to_the_best_remaining_eligible_player():
+    # MUTATION GUARD (M-4). Old (buggy) behaviour: starters_per_team spreads
+    # the flex fractionally (RB 2.333/WR 2.333/TE 1.333), each independently
+    # rounded DOWN to 2/2/1 -- 8 starters, and the flex slot contributes
+    # NOTHING for any roster, no matter how good the leftover player is. A
+    # third WR far better than any bench alternative must now be started.
+    roster = pd.DataFrame([
+        {"player_id": "qb1", "position": "QB", "proj_points": 1.0},
+        {"player_id": "rb1", "position": "RB", "proj_points": 1.0},
+        {"player_id": "rb2", "position": "RB", "proj_points": 1.0},
+        {"player_id": "wr1", "position": "WR", "proj_points": 1.0},
+        {"player_id": "wr2", "position": "WR", "proj_points": 1.0},
+        {"player_id": "te1", "position": "TE", "proj_points": 1.0},
+        {"player_id": "k1", "position": "K", "proj_points": 1.0},
+        {"player_id": "def1", "position": "DEF", "proj_points": 1.0},
+        # A 3rd WR, worth far more than anything else on the bench --
+        # the flex slot's whole reason for existing.
+        {"player_id": "wr3", "position": "WR", "proj_points": 5.0},
+    ])
+    score = optimal_lineup_score(_REAL_SHAPE_CONFIG)(roster)
+    assert score == pytest.approx(8 * 1.0 + 5.0)  # 8 fixed starters + wr3 in the flex
+
+
+def test_optimal_lineup_score_starts_exactly_the_leagues_real_starter_count():
+    # MUTATION GUARD (M-4): the OLD `round()`-per-position implementation
+    # started 8 players against this league's real 9 (1+2+2+1+1+1+1, flex
+    # included) -- see review-final.md M-4. Every roster player is worth
+    # exactly 1.0 point here, comfortably deep at every flex-eligible
+    # position, so the total score IS the starter count: if this comes back
+    # 8.0 instead of 9.0, the flex slot is being dropped again.
+    roster = pd.DataFrame(
+        [{"player_id": "qb1", "position": "QB", "proj_points": 1.0}]
+        + [{"player_id": f"rb{i}", "position": "RB", "proj_points": 1.0} for i in range(4)]
+        + [{"player_id": f"wr{i}", "position": "WR", "proj_points": 1.0} for i in range(4)]
+        + [{"player_id": "te1", "position": "TE", "proj_points": 1.0},
+           {"player_id": "te2", "position": "TE", "proj_points": 1.0},
+           {"player_id": "k1", "position": "K", "proj_points": 1.0},
+           {"player_id": "def1", "position": "DEF", "proj_points": 1.0}]
+    )
+    score = optimal_lineup_score(_REAL_SHAPE_CONFIG)(roster)
+    assert score == pytest.approx(9.0)
 
 
 def test_optimal_lineup_score_has_a_usable_default_when_no_config_is_given():

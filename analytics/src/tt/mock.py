@@ -86,7 +86,7 @@ import numpy as np
 import pandas as pd
 
 from .draft import FILLED_POSITION_DISCOUNT, recommend, roster_need
-from .league import LeagueConfig, load_config_from_dict, starters_per_team
+from .league import FLEX_ELIGIBLE, LeagueConfig, load_config_from_dict
 from .survival import add_survival
 
 # A strategy: given the currently available board, the drafting team's own
@@ -414,17 +414,36 @@ def simulate_draft(
 
 def optimal_lineup_score(config: LeagueConfig | None = None) -> Callable[[pd.DataFrame], float]:
     """Build a `score_roster` callable: sum of `proj_points` for the
-    OPTIMAL starting lineup within a drafted roster -- for each position,
-    the top `round(starters_per_team(config)[position])` players by
-    `proj_points`, summed; anyone past that (bench) contributes nothing.
-    Rounding mirrors `draft.roster_need`'s own `round()` on the same
-    quantity, for the same reason: "how many starters" has no fractional
-    meaning once counting one drafted roster rather than a whole league's
-    replacement rank.
+    OPTIMAL starting lineup within a drafted roster.
 
-    THIS IS THE CIRCULAR DEFAULT the module docstring's CRITICAL section
-    warns about -- proj_points is exactly what `vor` is built from, so a
-    VOR-maximising strategy scores well here BY CONSTRUCTION. It exists
+    FIX (M-4, fix-round-2-brief.md): this used to route every roster slot --
+    including flex -- through `league.starters_per_team`, which SPREADS a
+    flex slot fractionally across its eligible positions (e.g. a single
+    3-way RB/WR/TE flex becomes RB 2.333/WR 2.333/TE 1.333) and then
+    `round()`ed each position independently. `round(2.333) == 2` for every
+    one of RB/WR/TE, so the flex slot's own point of value -- "start a THIRD
+    good RB/WR/TE, whichever is best" -- was rounded away entirely: a league
+    with 9 real starting slots (1 QB, 2 RB, 2 WR, 1 TE, 1 FLEX, 1 K, 1 DEF)
+    scored only 8, and no strategy ever got credit for stashing a strong
+    flex-eligible player. This function now scores a genuine lineup instead:
+    every NON-flex `config.roster_slots` entry (a plain position, not a key
+    in `league.FLEX_ELIGIBLE`) is filled first, top-`count` by `proj_points`
+    at that exact position; every remaining, not-yet-used player is then
+    considered for each flex slot (in `roster_slots`' own iteration order),
+    taking the top-`count` by `proj_points` among that slot's
+    `FLEX_ELIGIBLE` positions -- "fill the fixed slots, then award the flex
+    to the best remaining flex-eligible player," per the brief. This is a
+    greedy two-pass lineup, not a full assignment-problem optimum across
+    every slot type simultaneously; the real league (and every test fixture
+    in this project) has exactly one flex slot type, for which greedy
+    fixed-then-flex IS the optimum (a flex-eligible player can only ever
+    improve on displacing the single flex slot's own current occupant, never
+    a fixed slot that already took the best available player at its own
+    position).
+
+    THIS IS STILL THE CIRCULAR DEFAULT the module docstring's CRITICAL
+    section warns about -- proj_points is exactly what `vor` is built from,
+    so a VOR-maximising strategy scores well here BY CONSTRUCTION. It exists
     only so this module's own tests (and `compare_strategies`' bare
     `score_roster=None` default) work without external data. Real analysis
     must pass a `score_roster` built from something this project's own
@@ -440,15 +459,38 @@ def optimal_lineup_score(config: LeagueConfig | None = None) -> Callable[[pd.Dat
     relying on this stand-in.
     """
     cfg = config if config is not None else _FALLBACK_LEAGUE_CONFIG
-    targets = {position: round(count) for position, count in starters_per_team(cfg).items()}
+    fixed_targets: dict[str, int] = {}
+    flex_slots: list[tuple[str, tuple[str, ...], int]] = []
+    for slot, count in cfg.roster_slots.items():
+        eligible = FLEX_ELIGIBLE.get(slot)
+        if eligible:
+            flex_slots.append((slot, eligible, int(count)))
+        else:
+            fixed_targets[slot] = fixed_targets.get(slot, 0) + int(count)
 
     def _score(roster: pd.DataFrame) -> float:
+        if roster.empty:
+            return 0.0
         total = 0.0
-        for position, target in targets.items():
-            if target <= 0 or roster.empty:
+        used_index: set = set()
+        for position, target in fixed_targets.items():
+            if target <= 0:
                 continue
             pool = roster[roster["position"] == position].sort_values("proj_points", ascending=False)
-            total += float(pool["proj_points"].head(target).sum())
+            top = pool.head(target)
+            total += float(top["proj_points"].sum())
+            used_index.update(top.index)
+        remaining = roster.drop(index=used_index, errors="ignore")
+        for _slot, eligible, target in flex_slots:
+            if target <= 0:
+                continue
+            pool = remaining[remaining["position"].isin(eligible)].sort_values(
+                "proj_points", ascending=False
+            )
+            top = pool.head(target)
+            total += float(top["proj_points"].sum())
+            used_index.update(top.index)
+            remaining = remaining.drop(index=top.index)
         return total
 
     return _score
