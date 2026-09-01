@@ -1,14 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   myPicks,
   nextPick,
   parseDraftResults,
+  clockFromPending,
   createState,
   applyPicks,
   markTaken,
   undo,
 } from '../src/draft-state.js';
+import { normalize } from '../src/normalize.js';
+
+const fixture = (n) =>
+  JSON.parse(readFileSync(new URL(`./fixtures/${n}.json`, import.meta.url), 'utf8'));
 
 // --- myPicks: snake order ---------------------------------------------------
 //
@@ -102,15 +108,32 @@ test('parseDraftResults coerces a numeric-string pick number rather than rejecti
   assert.deepEqual(malformed, []);
 });
 
-test('parseDraftResults puts an entry missing player_key into malformed, not silently dropped', () => {
+test('parseDraftResults puts an entry missing player_key into pending (a future pick slot), NOT malformed -- the defect this module exists to fix', () => {
+  // Verified live against a real 14-team Yahoo mock draft
+  // (docs/draft-room-design.md 4.2): draft_results publishes every pick
+  // slot for the WHOLE draft up front, and a slot nobody has drafted into
+  // yet is entirely normal, not a shape mismatch. Getting this wrong means
+  // the very first poll of a real draft reports 1 pick and 209 malformed
+  // entries and never stops raising the banner -- see the module comment
+  // above parseDraftResults for the full story.
   const payload = [
     { pick: 1, team_key: '470.l.1.t.1', player_key: '470.p.100' },
-    { pick: 2, team_key: '470.l.1.t.2' }, // no player_key
+    { pick: 2, team_key: '470.l.1.t.2' }, // no player_key -- a future slot, not garbage
   ];
-  const { picks, malformed } = parseDraftResults(payload);
+  const { picks, pending, malformed } = parseDraftResults(payload);
   assert.deepEqual(picks, [{ pick: 1, teamKey: '470.l.1.t.1', playerKey: '470.p.100' }]);
-  assert.equal(malformed.length, 1);
-  assert.deepEqual(malformed[0], { pick: 2, team_key: '470.l.1.t.2' });
+  assert.deepEqual(pending, [{ pick: 2, teamKey: '470.l.1.t.2' }]);
+  assert.deepEqual(malformed, [], 'a pending slot must never raise the malformed-entry banner');
+});
+
+test('parseDraftResults carries `round` through onto both picks and pending entries when Yahoo supplies it', () => {
+  const payload = [
+    { pick: 1, round: 1, team_key: '470.l.1.t.1', player_key: '470.p.100' },
+    { pick: 15, round: 2, team_key: '470.l.1.t.14' }, // pending
+  ];
+  const { picks, pending } = parseDraftResults(payload);
+  assert.deepEqual(picks, [{ pick: 1, teamKey: '470.l.1.t.1', round: 1, playerKey: '470.p.100' }]);
+  assert.deepEqual(pending, [{ pick: 15, teamKey: '470.l.1.t.14', round: 2 }]);
 });
 
 test('parseDraftResults puts an entry missing team_key into malformed', () => {
@@ -141,13 +164,13 @@ test('parseDraftResults never throws on a bare garbage top-level payload', () =>
   assert.doesNotThrow(() => parseDraftResults(true));
 });
 
-test('parseDraftResults returns empty picks and malformed for null/undefined payload (no draft yet)', () => {
-  assert.deepEqual(parseDraftResults(null), { picks: [], malformed: [] });
-  assert.deepEqual(parseDraftResults(undefined), { picks: [], malformed: [] });
+test('parseDraftResults returns empty picks/pending/malformed for null/undefined payload (no draft yet)', () => {
+  assert.deepEqual(parseDraftResults(null), { picks: [], pending: [], malformed: [] });
+  assert.deepEqual(parseDraftResults(undefined), { picks: [], pending: [], malformed: [] });
 });
 
-test('parseDraftResults returns empty picks and malformed for an empty array', () => {
-  assert.deepEqual(parseDraftResults([]), { picks: [], malformed: [] });
+test('parseDraftResults returns empty picks/pending/malformed for an empty array', () => {
+  assert.deepEqual(parseDraftResults([]), { picks: [], pending: [], malformed: [] });
 });
 
 test('parseDraftResults accepts the raw count-keyed collection shape too, defensively', () => {
@@ -212,6 +235,161 @@ test('applyPicks derives currentPick from the count of distinct picks, not the m
   ];
   const next = applyPicks(state, picks, { myTeamKey: '470.l.1.t.4' });
   assert.equal(next.currentPick, 3, 'two distinct picks known -> currentPick is 3, not 6');
+});
+
+// --- currentPick precedence: Yahoo's published order beats our count -------
+//
+// These prove the derive-from-Yahoo path is actually EXERCISED, not just
+// coincidentally equal to the fallback: pick 4 is still pending while pick
+// 5 is already made (a poll caught picks out of order -- see applyPicks's
+// own docstring), so the count-based fallback (drafted.size+1 = 5) and the
+// pending-based Yahoo answer (the lowest pending pick = 4) genuinely
+// disagree. If the code silently fell through to the count-based fallback
+// this test would see 5, not 4, and fail.
+
+test('applyPicks prefers the lowest pending pick over drafted.size+1 when draft_results supplies `pending` (Yahoo out-of-order delivery)', () => {
+  const state = baseState();
+  const picks = [
+    { pick: 1, teamKey: '470.l.1.t.1', playerKey: '470.p.100' },
+    { pick: 2, teamKey: '470.l.1.t.2', playerKey: '470.p.200' },
+    { pick: 3, teamKey: '470.l.1.t.3', playerKey: '470.p.300' },
+    { pick: 5, teamKey: '470.l.1.t.1', playerKey: '470.p.400' }, // pick 4 not yet made
+  ];
+  const pending = [
+    { pick: 4, teamKey: '470.l.1.t.4' },
+    { pick: 6, teamKey: '470.l.1.t.2' },
+  ];
+  const next = applyPicks(state, picks, { myTeamKey: '470.l.1.t.4', pending });
+  assert.equal(next.currentPick, 4, 'the lowest PENDING pick (4) wins, not drafted.size+1 (5)');
+});
+
+test('applyPicks falls back to drafted.size+1 when `pending` is empty or not supplied', () => {
+  const state = baseState();
+  const picks = [{ pick: 1, teamKey: '470.l.1.t.1', playerKey: '470.p.100' }];
+  const withoutPending = applyPicks(state, picks, { myTeamKey: '470.l.1.t.4' });
+  assert.equal(withoutPending.currentPick, 2);
+  const withEmptyPending = applyPicks(state, picks, { myTeamKey: '470.l.1.t.4', pending: [] });
+  assert.equal(withEmptyPending.currentPick, 2);
+});
+
+test('applyPicks stores `pending` on the returned state so callers (draft-room.js) can derive the clock from it', () => {
+  const state = baseState();
+  const pending = [{ pick: 2, teamKey: '470.l.1.t.2' }];
+  const next = applyPicks(state, [], { myTeamKey: '470.l.1.t.4', pending });
+  assert.deepEqual(next.pending, pending);
+});
+
+// --- clockFromPending: deriving onTheClock/myNextPick from Yahoo's order ---
+
+test('clockFromPending returns null (the fall-back-to-snake-math signal) for empty or missing pending', () => {
+  assert.equal(clockFromPending([], '470.l.1.t.4'), null);
+  assert.equal(clockFromPending(null, '470.l.1.t.4'), null);
+  assert.equal(clockFromPending(undefined, '470.l.1.t.4'), null);
+});
+
+test('clockFromPending picks the lowest pending pick as onTheClock/currentRound, regardless of array order', () => {
+  const pending = [
+    { pick: 20, teamKey: '470.l.1.t.9', round: 2 },
+    { pick: 15, teamKey: '470.l.1.t.14', round: 2 }, // lowest -- out of order in the array on purpose
+    { pick: 21, teamKey: '470.l.1.t.8', round: 2 },
+  ];
+  const clock = clockFromPending(pending, '470.l.1.t.4');
+  assert.equal(clock.currentPick, 15);
+  assert.equal(clock.currentRound, 2);
+  assert.equal(clock.onTheClock, '470.l.1.t.14');
+});
+
+test('clockFromPending finds the lowest pending pick that belongs to myTeamKey specifically, not just the lowest overall', () => {
+  const pending = [
+    { pick: 15, teamKey: '470.l.1.t.14', round: 2 },
+    { pick: 20, teamKey: '470.l.1.t.4', round: 2 }, // mine, but not the overall-lowest
+    { pick: 34, teamKey: '470.l.1.t.4', round: 3 }, // mine, but not my NEXT one
+  ];
+  const clock = clockFromPending(pending, '470.l.1.t.4');
+  assert.equal(clock.onTheClock, '470.l.1.t.14', 'someone else is on the clock right now');
+  assert.equal(clock.myNextPick, 20, 'my own lowest pending pick, not the overall lowest');
+  assert.equal(clock.myNextPickRound, 2);
+});
+
+test('clockFromPending returns myNextPick null when none of the pending slots belong to myTeamKey (my draft is over)', () => {
+  const pending = [{ pick: 15, teamKey: '470.l.1.t.14', round: 2 }];
+  const clock = clockFromPending(pending, '470.l.1.t.4');
+  assert.equal(clock.myNextPick, null);
+  assert.equal(clock.myNextPickRound, null);
+  assert.equal(clock.onTheClock, '470.l.1.t.14', 'other teams can still be mid-draft after mine ends');
+});
+
+// --- the real captured payload: mid-draft, some made, mostly pending -------
+//
+// Verified live against a real 14-team, 15-round Yahoo mock draft
+// (scrubbed per this repo's standing rule -- see tools/capture-fixtures.mjs
+// -- league id and name replaced with neutral placeholders; player keys are
+// public Yahoo ids and are left as captured). This is the exact shape that
+// broke parseDraftResults before this fix: 210 entries from the very first
+// poll, most of them pending. Run through normalize() first, exactly as
+// src/client.js does before draft-room.js ever sees the response, so this
+// exercises the REAL pipeline end to end, not a hand-shaped stand-in.
+
+test('the real captured mid-draft payload: 8 made, 202 pending, ZERO malformed', () => {
+  const { league } = normalize(fixture('league-draftresults-mid'));
+  const { picks, pending, malformed } = parseDraftResults(league.draft_results);
+  assert.equal(picks.length, 8);
+  assert.equal(pending.length, 202);
+  assert.deepEqual(malformed, [], 'a real, fully-pending-heavy draft must never trip the malformed banner');
+});
+
+test('the real captured mid-draft payload: applyPicks + clockFromPending derive the correct on-the-clock team and my next pick', () => {
+  const { league } = normalize(fixture('league-draftresults-mid'));
+  const { picks, pending } = parseDraftResults(league.draft_results);
+  const state = applyPicks(createState([]), picks, { myTeamKey: '470.l.1433972.t.5', pending });
+
+  // 8 picks made -> pick 9 is next; round 2 starts reversing at pick 15
+  // (verified against the capture: p15:t14 p16:t13 ... p28:t1).
+  assert.equal(state.currentPick, 9);
+  const clock = clockFromPending(state.pending, '470.l.1433972.t.5');
+  assert.equal(clock.currentPick, 9);
+  assert.equal(clock.currentRound, 1);
+  assert.equal(clock.onTheClock, '470.l.1433972.t.9', 'pick 9, round 1 belongs to team 9');
+  // Team 5 picked 1st-round pick 5 already (made); its next is round 2's
+  // mirrored slot -- pick (15 + (14 - 5)) = 24 by the verified reversal.
+  assert.equal(clock.myNextPick, 24);
+  assert.equal(clock.myNextPickRound, 2);
+});
+
+// --- the real captured payload, further along (131/210 picks made) ---------
+//
+// A second, later capture of the SAME live mock draft, well past round 9 --
+// the fuller companion fixture the task asks for when a later capture is
+// available. Exercises the identical pick/pending split at a very different
+// point in the draft (mid-round, not a clean round boundary), and confirms
+// `myNextPick` correctly differs per team depending on where each team's
+// upcoming picks fall relative to the current one.
+
+test('the real captured LATE-draft payload (131 made / 79 pending): still zero malformed, and onTheClock/myNextPick derive correctly for several different teams', () => {
+  const { league } = normalize(fixture('league-draftresults-late'));
+  const { picks, pending, malformed } = parseDraftResults(league.draft_results);
+  assert.equal(picks.length, 131);
+  assert.equal(pending.length, 79);
+  assert.deepEqual(malformed, []);
+
+  // Team 9 is on the clock at pick 132 (round 10) -- verified directly
+  // against the capture. Each other team's myNextPick is its own soonest
+  // still-pending slot, which differs team to team.
+  for (const [teamNum, expected] of [
+    [1, { myNextPick: 140, myNextPickRound: 10 }],
+    [5, { myNextPick: 136, myNextPickRound: 10 }],
+    [9, { myNextPick: 132, myNextPickRound: 10 }], // on the clock right now
+    [14, { myNextPick: 154, myNextPickRound: 11 }],
+  ]) {
+    const myTeamKey = `470.l.1433972.t.${teamNum}`;
+    const state = applyPicks(createState([]), picks, { myTeamKey, pending });
+    assert.equal(state.currentPick, 132, `currentPick is the same for every team (team ${teamNum})`);
+    const clock = clockFromPending(state.pending, myTeamKey);
+    assert.equal(clock.currentRound, 10);
+    assert.equal(clock.onTheClock, '470.l.1433972.t.9');
+    assert.equal(clock.myNextPick, expected.myNextPick, `team ${teamNum} myNextPick`);
+    assert.equal(clock.myNextPickRound, expected.myNextPickRound, `team ${teamNum} myNextPickRound`);
+  }
 });
 
 test('applyPicks builds myRoster from picks belonging to myTeamKey, in pick order', () => {

@@ -43,7 +43,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  myPicks, nextPick, parseDraftResults, createState, applyPicks, markTaken as markTakenState, undo as undoState,
+  myPicks, nextPick, parseDraftResults, clockFromPending, createState, applyPicks,
+  markTaken as markTakenState, undo as undoState,
 } from './draft-state.js';
 import { SessionExpiredError, YahooApiError } from './client.js';
 import { buildCrosswalk, lookupByYahooKey } from './identity.js';
@@ -177,8 +178,42 @@ export async function createDraftRoom({
   let recomputeCache = { board: boardRecords, recommendations: [] };
   let recomputeErrorMessage = null;
 
+  /**
+   * The live clock: who's on it, and my next pick -- with round, for
+   * display (design doc 4.1/4.2 update). PRECEDENCE, made explicit: Yahoo's
+   * `draft_results` publishes the WHOLE draft order up front, made or
+   * pending, from the very first poll -- that is authoritative (it is
+   * correct for custom draft order, third-round reversal, or any league
+   * setting we don't model) and beats our own `myPicks`/`nextPick` snake
+   * math outright. `clockFromPending` (src/draft-state.js) is tried FIRST;
+   * `myPicks`/`nextPick` are kept only as the FALLBACK for when
+   * `draft_results` is empty or unavailable (predraft, before the first
+   * successful poll) -- see that function's own docstring for why it
+   * returns null exactly in that case.
+   */
+  function deriveClock() {
+    const fromYahoo = clockFromPending(draftState.pending, myTeamKeyValue);
+    if (fromYahoo) {
+      return {
+        currentRound: fromYahoo.currentRound,
+        onTheClock: fromYahoo.onTheClock,
+        myNextPick: fromYahoo.myNextPick,
+        myNextPickRound: fromYahoo.myNextPickRound,
+      };
+    }
+    // FALLBACK: our own model of the snake order (design doc 4.1).
+    const myNext = nextPick(teams, slot, draftState.currentPick, rounds);
+    const isMyTurn = myNext !== null && draftState.currentPick === myNext;
+    return {
+      currentRound: Math.floor((draftState.currentPick - 1) / teams) + 1,
+      onTheClock: isMyTurn ? myTeamKeyValue : null,
+      myNextPick: myNext,
+      myNextPickRound: myNext === null ? null : Math.floor((myNext - 1) / teams) + 1,
+    };
+  }
+
   function myNextPickNow() {
-    return nextPick(teams, slot, draftState.currentPick, rounds);
+    return deriveClock().myNextPick;
   }
 
   /**
@@ -236,12 +271,14 @@ export async function createDraftRoom({
    * advances the pick count and `currentPick` (applyPicks records it in
    * `drafted` regardless), it just can never match a board row -- an
    * identity gap degrades the recommendation, never the pool. */
-  function resolveAndApply(picks) {
+  function resolveAndApply(picks, pending) {
     const resolved = picks.map((p) => {
       const xw = lookupByYahooKey(crosswalk, p.playerKey);
       return xw?.gsisId ? { ...p, playerKey: xw.gsisId } : p;
     });
-    draftState = applyPicks(draftState, resolved, { myTeamKey: myTeamKeyValue });
+    // `pending` entries have no player_key, so there's nothing to resolve
+    // through the crosswalk -- they're only ever team_key/pick/round.
+    draftState = applyPicks(draftState, resolved, { myTeamKey: myTeamKeyValue, pending });
   }
 
   /**
@@ -273,7 +310,7 @@ export async function createDraftRoom({
       }
 
       const raw = body?.league?.draft_results ?? body?.draft_results ?? [];
-      const { picks, malformed } = parseDraftResults(raw);
+      const { picks, pending, malformed } = parseDraftResults(raw);
 
       if (malformed.length > 0) {
         lastPollOk = false;
@@ -283,11 +320,11 @@ export async function createDraftRoom({
             + 'draft_results shape may have changed. Showing the last known board; use manual '
             + 'override below.',
         };
-        return; // NOTHING from this response is trusted, not even the well-formed picks
+        return; // NOTHING from this response is trusted, not even the well-formed picks/pending
       }
 
       const changed = picks.length > 0;
-      resolveAndApply(picks);
+      resolveAndApply(picks, pending);
       pollBanner = null;
       lastPollOk = true;
       lastPollAt = now();
@@ -368,18 +405,20 @@ export async function createDraftRoom({
   }
 
   function buildStatus() {
-    const myNext = myNextPickNow();
-    const isMyTurn = myNext !== null && draftState.currentPick === myNext;
+    const clock = deriveClock();
+    const isMyTurn = clock.myNextPick !== null && draftState.currentPick === clock.myNextPick;
     let draftStatus;
     if (draftState.drafted.size === 0 && draftState.manualMarks.length === 0) draftStatus = 'predraft';
-    else if (myNext === null) draftStatus = 'postdraft';
+    else if (clock.myNextPick === null) draftStatus = 'postdraft';
     else draftStatus = 'drafting';
     return {
       draftStatus,
       picksMade: draftState.drafted.size,
       currentPick: draftState.currentPick,
-      myNextPick: myNext,
-      onTheClock: isMyTurn ? myTeamKeyValue : null,
+      currentRound: clock.currentRound,
+      myNextPick: clock.myNextPick,
+      myNextPickRound: clock.myNextPickRound,
+      onTheClock: clock.onTheClock,
       isMyTurn,
       lastPollAt: lastPollAt === null ? null : new Date(lastPollAt).toISOString(),
       lastPollOk,

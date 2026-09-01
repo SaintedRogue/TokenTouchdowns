@@ -1,11 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDraftRoom, startDraftRoomServer } from '../src/draft-room.js';
 import { AnalyticsError } from '../src/analytics.js';
 import { SessionExpiredError, YahooApiError } from '../src/client.js';
+import { normalize } from '../src/normalize.js';
+
+const fixture = async (n) =>
+  normalize(JSON.parse(await readFile(new URL(`./fixtures/${n}.json`, import.meta.url), 'utf8')));
 
 // --- fixtures ----------------------------------------------------------------
 //
@@ -400,6 +404,125 @@ test('isMyTurn and onTheClock reflect whose pick it currently is', async () => {
   assert.equal(view.status.myNextPick, 2);
   assert.equal(view.status.isMyTurn, true);
   assert.equal(view.status.onTheClock, '470.l.1.t.2');
+});
+
+// --- Yahoo's published draft order beats our own snake model (design doc ---
+// --- 4.1/4.2 update): currentPick/onTheClock/myNextPick derive from
+// --- draft_results' `pending` group whenever it's non-empty; the snake math
+// --- (myPicks/nextPick) is only the fallback. These prove the room's OWN
+// --- wiring (poll -> resolveAndApply -> applyPicks -> buildStatus) actually
+// --- takes that path end to end, not just src/draft-state.js in isolation.
+
+test('the room prefers Yahoo\'s pending-derived clock over the count-based fallback when they disagree (out-of-order poll)', async () => {
+  // Pick 4 is still pending while pick 5 is already made (a slow poll
+  // caught two picks in one response, out of order). The count-based
+  // fallback would say currentPick=5/onTheClock unknown; Yahoo's own order
+  // says pick 4 -- team 4 -- is still on the clock. If the room silently
+  // fell through to the fallback here, onTheClock/currentPick below would
+  // be wrong (or the snake fallback's onTheClock, which can only ever be
+  // null or MY team, could never even report team 4 at all).
+  const { room } = await baseRoom({
+    draftResultsScript: [{
+      league: {
+        draft_results: [
+          { pick: 1, round: 1, team_key: '470.l.1.t.1', player_key: '470.p.1' },
+          { pick: 2, round: 1, team_key: '470.l.1.t.2', player_key: '470.p.2' },
+          { pick: 3, round: 1, team_key: '470.l.1.t.3', player_key: '470.p.3' },
+          { pick: 5, round: 1, team_key: '470.l.1.t.1', player_key: '470.p.5' }, // pick 4 skipped
+          { pick: 4, round: 1, team_key: '470.l.1.t.4' }, // pending -- no player_key
+          { pick: 6, round: 2, team_key: '470.l.1.t.2' }, // pending
+          { pick: 7, round: 2, team_key: '470.l.1.t.3' }, // pending
+        ],
+      },
+    }],
+    crosswalk: new Map(),
+  });
+  await room.poll();
+  const view = room.getViewModel();
+  assert.equal(view.status.picksMade, 4, 'four made picks (1,2,3,5)');
+  assert.equal(view.status.currentPick, 4, 'the lowest PENDING pick (4) wins, not drafted.size+1 (5)');
+  assert.equal(view.status.currentRound, 1);
+  assert.equal(view.status.onTheClock, '470.l.1.t.4', 'Yahoo names team 4 directly -- impossible via the snake fallback alone');
+});
+
+test('the room surfaces round alongside pick numbers when Yahoo supplies it (currentRound / myNextPickRound)', async () => {
+  const { room } = await baseRoom({
+    draftResultsScript: [{
+      league: {
+        draft_results: [
+          { pick: 1, round: 1, team_key: '470.l.1.t.1', player_key: '470.p.1' },
+          { pick: 2, round: 1, team_key: '470.l.1.t.2' }, // pending, mine (myTeamKey is 470.l.1.t.2)
+          { pick: 3, round: 1, team_key: '470.l.1.t.3' }, // pending
+        ],
+      },
+    }],
+    crosswalk: new Map(),
+  });
+  await room.poll();
+  const { status } = room.getViewModel();
+  assert.equal(status.currentPick, 2);
+  assert.equal(status.currentRound, 1);
+  assert.equal(status.myNextPick, 2);
+  assert.equal(status.myNextPickRound, 1);
+});
+
+test('the room falls back to snake-derived currentRound when draft_results carries no round (or is empty/unavailable)', async () => {
+  // Predraft (design doc's FALLBACK case): pending is empty because no poll
+  // has ever produced a draft_results entry at all yet.
+  const { room } = await baseRoom(); // default: empty draft_results, teams=4
+  const { status } = room.getViewModel();
+  assert.equal(status.currentPick, 1);
+  assert.equal(status.currentRound, 1, 'round 1 of a 4-team snake, computed from teams -- not Yahoo');
+});
+
+// --- the real captured payload, through the whole room, not just draft-state
+// --- .js in isolation: this is DEFECT 1 (209-false-malformed) and DEFECT 2
+// --- (derive order from Yahoo) exercised end to end, exactly as they'd hit
+// --- production on draft day.
+
+test('a real captured mid-draft poll (8 made / 202 pending, 14 teams) never raises the malformed banner and derives the correct on-the-clock team/round', async () => {
+  const { league } = await fixture('league-draftresults-mid');
+  const client = {
+    calls: [],
+    async get(resource) {
+      this.calls.push(resource);
+      if (resource.startsWith('league/470.l.1433972/teams')) {
+        return {
+          league: {
+            teams: Array.from({ length: 14 }, (_, i) => ({
+              team_key: `470.l.1433972.t.${i + 1}`,
+              name: `Team ${i + 1}`,
+              is_owned_by_current_login: i + 1 === 5 ? 1 : 0,
+            })),
+          },
+        };
+      }
+      if (resource.startsWith('league/470.l.1433972/draftresults')) {
+        return { league: { draft_results: league.draft_results } };
+      }
+      throw new Error(`unscripted resource: ${resource}`);
+    },
+  };
+  const analytics = fakeAnalytics();
+  const room = await createDraftRoom({
+    teams: 14, slot: 5, rounds: 15, league: '470.l.1433972',
+    client, analytics, leagueConfig: LEAGUE_CONFIG, crosswalk: new Map(),
+  });
+  await room.poll();
+  const { status } = room.getViewModel();
+
+  assert.equal(status.banner, null, 'a real fully-pending-heavy draft must never trip the malformed banner');
+  assert.equal(status.lastPollOk, true);
+  assert.equal(status.picksMade, 8);
+  // Verified directly against the capture (round 1: p1:t1 ... p14:t14):
+  // pick 9 belongs to team 9, and team 5's round-1 pick (5) is already
+  // made, so its next is round 2's mirrored slot, pick 24 (round 2 reverses:
+  // p15:t14 p16:t13 ... p28:t1 -- team 5 sits at p24).
+  assert.equal(status.currentPick, 9);
+  assert.equal(status.currentRound, 1);
+  assert.equal(status.onTheClock, '470.l.1433972.t.9');
+  assert.equal(status.myNextPick, 24);
+  assert.equal(status.myNextPickRound, 2);
 });
 
 // --- HTTP layer: binds to 127.0.0.1, serves the documented routes ----------

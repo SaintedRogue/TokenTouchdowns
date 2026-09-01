@@ -49,27 +49,47 @@ export function nextPick(teams, slot, currentPick, rounds) {
   return null;
 }
 
-// --- parseDraftResults: the risky, shape-unverified surface -----------------
+// --- parseDraftResults: pick / pending / malformed ---------------------------
 //
-// league/{key}/draftresults is confirmed reachable, but the account behind
-// this repo has never completed a draft, so the shape of one entry is
-// UNVERIFIED until draft day (docs/draft-room-design.md 4.2). src/normalize.js
-// exists precisely because Yahoo's v2 JSON is irregular -- collections can
-// arrive as a count-keyed numeric-key object, as a bare array of
-// single-key-wrapped items, or spliced into the parent under numeric keys
+// Verified live against a real 14-team, 15-round Yahoo mock draft
+// (docs/draft-room-design.md 4.2): `draft_results` is published in full from
+// the very first poll -- one entry per pick slot for the WHOLE draft (210 of
+// them for 14 teams x 15 rounds), every one carrying `pick`, `round`, and
+// `team_key`. Only the slots that have actually happened also carry a
+// `player_key`; every future slot is present too, just without one:
+//
+//   made:    {"pick":1,"round":1,"team_key":"470.l.10417423.t.1","player_key":"470.p.40059"}
+//   pending: {"pick":2,"round":1,"team_key":"470.l.10417423.t.2"}          <- no player_key
+//
+// A pending slot is a NORMAL, EXPECTED state -- not a malformation. Treating
+// it as malformed (as this function used to) means the very first poll of a
+// real draft reports 1 pick and 209 malformed entries, which raises the loud
+// banner design section 4.2/5 require -- and then keeps raising it for the
+// entire draft, since every poll re-delivers the same ~209 still-pending
+// slots. An alarm that fires from the first second and never stops is worse
+// than no alarm: it trains the user to ignore the one signal that means
+// "your board is lying to you". So this function returns THREE groups, not
+// two -- `{picks, pending, malformed}`:
+//
+//   - `picks`     entries with a player_key: a pick that has happened
+//   - `pending`   entries with a pick + team_key but no player_key: a slot
+//                 nobody has drafted into yet
+//   - `malformed` entries that don't even yield a pick number and a team
+//                 key -- genuinely unusable, and the ONLY thing allowed to
+//                 raise the banner
+//
+// src/normalize.js exists precisely because Yahoo's v2 JSON is irregular --
+// collections can arrive as a count-keyed numeric-key object, as a bare array
+// of single-key-wrapped items, or spliced into the parent under numeric keys
 // alongside real attributes. A draft_results collection with exactly one
-// pick is the sharpest edge of that irregularity: normalize()'s own
+// entry is the sharpest edge of that irregularity: normalize()'s own
 // collection-unwrap logic only fires for a `count`-bearing object or a
-// repeated-key array of 2+ items, so a single pick can legitimately reach
+// repeated-key array of 2+ items, so a single entry can legitimately reach
 // this function either bare (`{pick, team_key, player_key}`) or still
 // sitting under a wrapper key (`{draft_result: {...}}`).
 //
-// The response to all of that is the same: never guess wrong, never throw,
-// never drop. An entry that cannot be resolved to all three of
-// (pick, teamKey, playerKey) is returned in `malformed`, not silently
-// skipped -- that is what lets the caller raise the loud banner design
-// section 4.2 and section 5 both require, instead of quietly drafting on a
-// board that no longer matches Yahoo.
+// The response to all of that irregularity is the same as ever: never guess
+// wrong, never throw, never drop.
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
@@ -142,38 +162,88 @@ function asNonEmptyString(v) {
 }
 
 /**
- * Pull {pick, teamKey, playerKey} out of one unwrapped entry. Field names
- * are unverified (see module docstring above), so a couple of plausible
- * spellings are accepted alongside Yahoo's documented `pick` / `team_key` /
- * `player_key` convention. Returns null -- never throws -- when any of the
- * three required fields cannot be found or coerced.
+ * Pull one entry apart into either a `pick` (pick + teamKey + playerKey) or
+ * a `pending` slot (pick + teamKey, no playerKey). Field names for pick/
+ * team_key/player_key accept a couple of plausible spellings, kept from
+ * before this shape was verified; `round` is Yahoo's one verified spelling,
+ * so no aliases for it. `round` is carried along when present but is never
+ * required -- a missing or unparsable round does not make an otherwise-good
+ * entry malformed, it just means the caller can't show one. Returns null --
+ * never throws -- only when `pick` or `teamKey` (the two things needed to
+ * place this entry in the draft order at all) cannot be found or coerced.
  */
 function extractEntry(entry) {
   const pick = asPositiveInt(entry.pick ?? entry.pick_number ?? entry.pickNumber);
   const teamKey = asNonEmptyString(entry.team_key ?? entry.teamKey);
+  if (pick === null || teamKey === null) return null;
+
   const playerKey = asNonEmptyString(entry.player_key ?? entry.playerKey);
-  if (pick === null || teamKey === null || playerKey === null) return null;
-  return { pick, teamKey, playerKey };
+  const round = asPositiveInt(entry.round);
+  const base = round === null ? { pick, teamKey } : { pick, teamKey, round };
+
+  return playerKey === null
+    ? { kind: 'pending', value: base }
+    : { kind: 'pick', value: { ...base, playerKey } };
 }
 
 /**
- * Normalise a draft_results payload into `{picks, malformed}`. Accepts an
- * array of entries, a single entry not wrapped in a list, an entry still
- * sitting under a wrapper key, or the raw count-keyed collection shape.
- * Never throws: garbage in must not crash a draft-day server, so anything
- * that cannot be resolved to a full pick is reported in `malformed` rather
- * than thrown or dropped.
+ * Normalise a draft_results payload into `{picks, pending, malformed}` (see
+ * the module comment above for what each group means and why pending is not
+ * malformed). Accepts an array of entries, a single entry not wrapped in a
+ * list, an entry still sitting under a wrapper key, or the raw count-keyed
+ * collection shape. Never throws: garbage in must not crash a draft-day
+ * server, so anything that cannot be resolved to at least a pick number and
+ * a team key is reported in `malformed` rather than thrown or dropped.
  */
 export function parseDraftResults(payload) {
   const picks = [];
+  const pending = [];
   const malformed = [];
   for (const raw of toEntryArray(payload)) {
     const unwrapped = unwrapSingleKeyObject(raw);
     const parsed = isPlainObject(unwrapped) ? extractEntry(unwrapped) : null;
-    if (parsed) picks.push(parsed);
-    else malformed.push(raw);
+    if (!parsed) { malformed.push(raw); continue; }
+    (parsed.kind === 'pending' ? pending : picks).push(parsed.value);
   }
-  return { picks, malformed };
+  return { picks, pending, malformed };
+}
+
+/**
+ * Yahoo's draft_results lists every pick slot for the WHOLE draft from the
+ * very first poll, made or pending (see module comment above) -- which means
+ * Yahoo is already telling us, authoritatively, who is on the clock and
+ * which pick is mine next. That is strictly better than deriving it
+ * ourselves via `myPicks`/`nextPick` above: it is correct for a custom draft
+ * order, third-round reversal, or any other league setting this module does
+ * not model, and it needs no `teams`/`slot` at all.
+ *
+ * PRECEDENCE: this wins outright over the snake math whenever `pending` is
+ * non-empty -- callers (src/draft-room.js's `deriveClock`) must try this
+ * FIRST and only fall back to `myPicks`/`nextPick` when it returns null.
+ * Returns null -- one unambiguous signal, never a partial answer -- when
+ * `pending` is empty: predraft (draft_results not polled yet) or, from a
+ * team's own perspective once none of its future picks remain pending, that
+ * team's draft is over. Either way the caller has nothing to derive from
+ * Yahoo's order and must fall back.
+ */
+export function clockFromPending(pending, myTeamKey) {
+  if (!pending || pending.length === 0) return null;
+
+  let onClock = pending[0];
+  for (const p of pending) if (p.pick < onClock.pick) onClock = p;
+
+  let mine = null;
+  for (const p of pending) {
+    if (p.teamKey === myTeamKey && (mine === null || p.pick < mine.pick)) mine = p;
+  }
+
+  return {
+    currentPick: onClock.pick,
+    currentRound: onClock.round ?? null,
+    onTheClock: onClock.teamKey,
+    myNextPick: mine ? mine.pick : null,
+    myNextPickRound: mine ? (mine.round ?? null) : null,
+  };
 }
 
 // --- state -------------------------------------------------------------------
@@ -193,6 +263,10 @@ export function createState(playerIds) {
     // `undo` can never reach a real Yahoo pick -- see `undo` below.
     manualMarks: [],
     myTeamKey: null,
+    // The `pending` group from the most recent parseDraftResults call (see
+    // above) -- every pick slot Yahoo knows about that nobody has drafted
+    // into yet. Empty predraft, or if a caller never supplies it.
+    pending: [],
   };
 }
 
@@ -207,12 +281,16 @@ export function createState(playerIds) {
  * "did I already push this to myRoster" bookkeeping to get wrong, because
  * myRoster is always freshly derived from `drafted`.
  *
- * `currentPick` is `drafted.size + 1` -- the COUNT of distinct picks
- * recorded -- rather than `(max pick number seen) + 1`. Yahoo may deliver
- * picks out of order (a slow poll catching two picks in one response, or a
- * retry racing a newer request), and a max-based counter would report the
- * wrong "on the clock" pick if a lower-numbered pick becomes known after a
- * higher-numbered one already is.
+ * `currentPick`: when Yahoo's `pending` group is supplied and non-empty, the
+ * lowest pending pick number IS the true current pick -- Yahoo's own
+ * authoritative order (see `clockFromPending` above), which is preferred
+ * outright. Only when `pending` is empty (predraft, or a caller that hasn't
+ * supplied it) does this fall back to `drafted.size + 1` -- the COUNT of
+ * distinct picks recorded, rather than `(max pick number seen) + 1`,
+ * because Yahoo may deliver picks out of order (a slow poll catching two
+ * picks in one response, or a retry racing a newer request), and a
+ * max-based counter would report the wrong "on the clock" pick if a
+ * lower-numbered pick becomes known after a higher-numbered one already is.
  *
  * Reconciliation: a Yahoo pick for a player already manually marked (see
  * markTaken) drops that player's manual mark instead of layering a second
@@ -220,11 +298,12 @@ export function createState(playerIds) {
  * player is recorded exactly once, in `drafted`, and is no longer reachable
  * by `undo` -- exactly as a real pick should be.
  */
-export function applyPicks(state, picks, { myTeamKey } = {}) {
+export function applyPicks(state, picks, { myTeamKey, pending } = {}) {
   const drafted = new Map(state.drafted);
   const manualMarks = [...state.manualMarks];
   const available = new Set(state.available);
   const resolvedMyTeamKey = myTeamKey ?? state.myTeamKey ?? null;
+  const resolvedPending = (pending ?? []).filter((p) => p && typeof p.pick === 'number' && p.teamKey);
 
   for (const p of picks ?? []) {
     if (!p || typeof p.pick !== 'number' || !p.playerKey || !p.teamKey) continue;
@@ -241,14 +320,18 @@ export function applyPicks(state, picks, { myTeamKey } = {}) {
     drafted.set(p.pick, { playerId: p.playerKey, teamKey: p.teamKey, pick: p.pick });
   }
 
-  const currentPick = drafted.size + 1;
+  // PRECEDENCE: Yahoo's published order (the lowest still-pending pick)
+  // beats our own count-based model of it -- see this function's docstring.
+  const currentPick = resolvedPending.length > 0
+    ? Math.min(...resolvedPending.map((p) => p.pick))
+    : drafted.size + 1;
   const myRoster = [...drafted.values()]
     .filter((d) => resolvedMyTeamKey && d.teamKey === resolvedMyTeamKey)
     .sort((a, b) => a.pick - b.pick)
     .map((d) => d.playerId);
 
   return {
-    ...state, available, drafted, manualMarks, currentPick, myRoster, myTeamKey: resolvedMyTeamKey,
+    ...state, available, drafted, manualMarks, currentPick, myRoster, myTeamKey: resolvedMyTeamKey, pending: resolvedPending,
   };
 }
 

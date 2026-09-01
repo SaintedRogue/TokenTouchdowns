@@ -240,6 +240,14 @@
     render(next);
   }
 
+  // "Round R, Pick N" reads far better at a glance than a bare pick number
+  // -- draft_results carries `round` (design doc 4.1/4.2), so show it
+  // whenever we have it; a bare pick number is still a fine fallback.
+  function pickLabel(pick, round) {
+    if (pick === null || pick === undefined) return '-';
+    return round ? ('Round ' + round + ', Pick ' + pick) : ('Pick ' + pick);
+  }
+
   function renderClock(status) {
     var clock = document.getElementById('clock');
     var nextPick = document.getElementById('nextPick');
@@ -253,10 +261,11 @@
       clock.textContent = 'Predraft';
       clock.classList.remove('my-turn');
     } else {
-      clock.textContent = 'Pick ' + status.currentPick;
+      clock.textContent = pickLabel(status.currentPick, status.currentRound);
       clock.classList.remove('my-turn');
     }
-    nextPick.textContent = status.myNextPick === null ? '(done)' : '#' + status.myNextPick;
+    nextPick.textContent = status.myNextPick === null ? '(done)'
+      : (status.myNextPickRound ? ('Round ' + status.myNextPickRound + ', #' + status.myNextPick) : ('#' + status.myNextPick));
   }
 
   function renderBanner(banner) {
