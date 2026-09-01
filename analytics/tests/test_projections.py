@@ -107,13 +107,16 @@ def negative_rushing_history():
     shrinkage alone cannot pull the estimate positive -- reproducing the real
     crash this fixture guards against: an unclamped negative shrunk
     yards-per-carry rate reaching simulate_components as a negative Gamma
-    scale (ValueError: scale < 0).
+    scale (ValueError: scale < 0). Position is "RB" (a PROJECTABLE_POSITIONS
+    member), not the fullback slot fantasy rosters actually use for this
+    archetype -- FB isn't projected at all since fix round 3, and this
+    fixture's whole point is a projectable player with negative efficiency.
     """
     rows = []
     for season in (2024, 2025):
         for week in range(1, 18):
             rows.append({"player_id": "C", "season": season, "week": week,
-                         "position": "FB", "carries": 5, "targets": 0,
+                         "position": "RB", "carries": 5, "targets": 0,
                          "receptions": 0, "rushing_yards": -10, "receiving_yards": 0,
                          "rushing_tds": 0.0, "receiving_tds": 0.0})
     return pd.DataFrame(rows)
@@ -229,3 +232,88 @@ def overplayed_history():
 def test_proj_games_never_exceeds_the_real_season_length():
     out = season_volume(overplayed_history(), seasons=(2025,))
     assert out.set_index("player_id").loc["D", "proj_games"] <= 17.0
+
+
+def fumble_prone_history():
+    """A player with a high, sole-occupant-of-position fumble rate -- like
+    negative_rushing_history, the positional prior equals their own rate,
+    guaranteeing a meaningfully positive shrunk fumble rate regardless of
+    strength.
+    """
+    rows = []
+    for season in (2024, 2025):
+        for week in range(1, 18):
+            rows.append({"player_id": "FUMBLER", "season": season, "week": week,
+                         "position": "RB", "carries": 20, "targets": 0, "receptions": 0,
+                         "rushing_yards": 80, "receiving_yards": 0,
+                         "rushing_tds": 0.3, "receiving_tds": 0.0,
+                         "rushing_fumbles_lost": 1.0, "receiving_fumbles_lost": 0.0,
+                         "sack_fumbles_lost": 0.0})
+    return pd.DataFrame(rows)
+
+
+def test_project_players_scores_fumbles_lost_from_league_weights():
+    # THE fumbles regression guard: league.scoring_weights() has always
+    # correctly derived rushing/receiving/sack_fumbles_lost weights (Fum Lost
+    # = -2 in this league); the point formula previously never looked at
+    # them, so every projection was silently overstated by the player's
+    # fumble rate. A league that scores fumbles at -2 must project this
+    # fumble-prone player LOWER than the same league scoring them at 0.
+    scored = project_players(fumble_prone_history(), CONFIG_OBJ, seasons=(2024, 2025))
+    no_fumble_penalty_cfg = replace_scoring(CONFIG_OBJ, {"Fum Lost": 0.0})
+    unscored = project_players(fumble_prone_history(), no_fumble_penalty_cfg, seasons=(2024, 2025))
+    assert scored.set_index("player_id").loc["FUMBLER", "proj_points"] < \
+           unscored.set_index("player_id").loc["FUMBLER", "proj_points"]
+
+
+def test_project_players_raises_when_league_scores_a_stat_it_cannot_simulate(monkeypatch):
+    # Fail loud, not silent: this is the general guard the fumbles bug
+    # motivated. scoring_weights() itself only ever emits the closed set of
+    # columns projections.py now simulates (all 11), so this patches it to
+    # simulate what happens if league.py's STAT_COLUMNS ever grows a stat
+    # this module hasn't been taught to project -- exercising the real,
+    # shipped `project_players` code path rather than a private helper in
+    # isolation.
+    import tt.projections as projections_module
+    monkeypatch.setattr(
+        projections_module, "scoring_weights", lambda config: {"made_up_stat": 3.0}
+    )
+    with pytest.raises(ValueError, match="made_up_stat"):
+        project_players(history(), CONFIG_OBJ, seasons=(2024, 2025))
+
+
+def kicker_and_defense_history():
+    """A kicker and a team defense mixed in alongside a normal skill-position
+    player -- project_players must exclude both from its output rather than
+    fabricate a projection from their (meaningless, for these positions)
+    offensive columns."""
+    rows = []
+    for season in (2024, 2025):
+        for week in range(1, 18):
+            rows.append({"player_id": "A", "season": season, "week": week,
+                         "position": "RB", "carries": 18, "targets": 3,
+                         "receptions": 2, "rushing_yards": 80, "receiving_yards": 15,
+                         "rushing_tds": 0.5, "receiving_tds": 0.0})
+            rows.append({"player_id": "KICKER", "season": season, "week": week,
+                         "position": "K", "carries": 0, "targets": 0, "receptions": 0,
+                         "rushing_yards": 0, "receiving_yards": 0,
+                         "rushing_tds": 0.0, "receiving_tds": 0.0})
+            rows.append({"player_id": "TEAMDEF", "season": season, "week": week,
+                         "position": "DEF", "carries": 0, "targets": 0, "receptions": 0,
+                         "rushing_yards": 0, "receiving_yards": 0,
+                         "rushing_tds": 0.0, "receiving_tds": 0.0})
+    return pd.DataFrame(rows)
+
+
+def test_project_players_excludes_kickers_and_team_defenses():
+    out = project_players(kicker_and_defense_history(), CONFIG_OBJ, seasons=(2024, 2025))
+    assert "KICKER" not in set(out["player_id"])
+    assert "TEAMDEF" not in set(out["player_id"])
+    assert set(out["position"]) <= {"QB", "RB", "WR", "TE"}
+
+
+def test_projectable_positions_names_the_excluded_positions_deliberately():
+    from tt.projections import PROJECTABLE_POSITIONS
+    assert PROJECTABLE_POSITIONS == {"QB", "RB", "WR", "TE"}
+    assert "K" not in PROJECTABLE_POSITIONS
+    assert "DEF" not in PROJECTABLE_POSITIONS

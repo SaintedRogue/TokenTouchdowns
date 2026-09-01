@@ -64,6 +64,23 @@ problem at once (the career backup, the injury-prone starter, the rookie with
 no history, the barely-used committee back), not just the one name that
 happened to surface it -- a filter on "no recent games" would only have
 caught that one case and silently mis-ranked the rest.
+
+THE POINT SUM IS DRIVEN FROM `scoring_weights(config)`, NOT A HARDCODED TERM
+LIST. An earlier version summed eight named terms directly, which meant a
+scored stat this module had a weight for but no line of code for (fumbles
+lost, in the real league's own scoring) was silently worth zero in every
+projection -- the same shape of bug as the passing/defensive-interception
+stat-id collision `league.scoring_weights` itself exists to prevent (see its
+module docstring). `_validate_scoring_is_simulated` checks, once, that every
+key `scoring_weights` can produce has a simulated component to be weighted;
+if a league scores something this module genuinely cannot simulate, it
+raises rather than quietly dropping that rule from every player's number.
+
+ONLY QB/RB/WR/TE (`PROJECTABLE_POSITIONS`) ARE PROJECTED. Kicker and team
+defense scoring comes from columns this pipeline never ingests (field goals
+by distance, points allowed, sacks, forced turnovers); deriving a number for
+either from offensive columns would look like a real projection and not be
+one. See that constant's own comment for the full reasoning.
 """
 from __future__ import annotations
 
@@ -100,6 +117,17 @@ PASS_EFF_STRENGTH = 1000.0
 PASS_TD_STRENGTH = 600.0
 PASS_INT_STRENGTH = 600.0
 
+# Fumbles lost are rarer and noisier than even touchdowns -- a player who
+# fumbled twice in twenty carries is not a 10%-per-touch fumbler -- so these
+# sit at the high end of the strength range, comparable to the passing
+# constants above. sack_fumbles_lost is shrunk per PASS ATTEMPT (not a
+# dedicated sack/dropback count, which this module has no volume model for
+# at all): attempts is the closest available proxy for "how many passing
+# plays put this player at sack risk".
+RUSH_FUMBLE_STRENGTH = 400.0
+REC_FUMBLE_STRENGTH = 400.0
+SACK_FUMBLE_STRENGTH = 600.0
+
 # Expected games played per season: NOT a rate over opportunities like the
 # constants above, but the same shrinkage mechanics apply directly if it's
 # framed as one -- "games per season", shrunk toward a positional prior, with
@@ -118,22 +146,80 @@ GAMES_STRENGTH = 4.0
 # and any data quirk (extra logged weeks) in the input.
 SEASON_LENGTH = 17.0
 
+# This module projects offensive skill-position volume (carries, targets,
+# pass attempts) and the rates that convert them to points. Kicker and team
+# defense scoring is built from an entirely different set of columns this
+# pipeline never ingests at all -- field goals made by distance, points
+# allowed, sacks, forced turnovers -- so there is no volume/efficiency model
+# here that could honestly project them. Deriving a K or DEF number from
+# offensive columns anyway is exactly the bug this constant fixes: a KICKER
+# projected off an apparent trick-play rushing/receiving line, a number that
+# LOOKS like a real projection and is not. Both positions are drafted in the
+# final rounds by convention and their value-over-replacement spread is
+# nearly flat there regardless -- an honest absence from this module's
+# output serves a draft board better than a fabricated ranking. Framed as an
+# ALLOWLIST (not a K/DEF denylist) so every other non-skill position
+# nflverse's per-player stats happen to include (offensive line, individual
+# defensive players, punters, long-snappers) is excluded the same way,
+# without having to name each one.
+PROJECTABLE_POSITIONS = frozenset({"QB", "RB", "WR", "TE"})
+
 # Every stat column this module reads. A `history` frame that doesn't track a
 # stream at all (e.g. a skill-position-only fixture with no passing columns)
 # is filled to zero for the columns it's missing, rather than raising --
 # see `_with_required_columns`.
 _REQUIRED_STAT_COLUMNS = (
-    "carries", "rushing_yards", "rushing_tds",
-    "targets", "receiving_yards", "receiving_tds", "receptions",
-    "attempts", "passing_yards", "passing_tds", "passing_interceptions",
+    "carries", "rushing_yards", "rushing_tds", "rushing_fumbles_lost",
+    "targets", "receiving_yards", "receiving_tds", "receptions", "receiving_fumbles_lost",
+    "attempts", "passing_yards", "passing_tds", "passing_interceptions", "sack_fumbles_lost",
 )
 _TOTAL_COLUMNS = _REQUIRED_STAT_COLUMNS
 
-_EMPTY_PRIOR = pd.Series({
-    "rush_eff": 0.0, "rush_td_rate": 0.0,
-    "rec_eff": 0.0, "rec_td_rate": 0.0, "catch_rate": 0.0,
-    "pass_eff": 0.0, "pass_td_rate": 0.0, "pass_int_rate": 0.0,
+# The full, fixed set of nflverse stat columns this module ever simulates a
+# points component for -- i.e. every key `points` (in project_players) can
+# legally weight. Checked against `scoring_weights(config)` up front (see
+# `_validate_scoring_is_simulated`) so a league scoring a column outside this
+# set fails loudly instead of that rule being silently dropped from every
+# projection, which is exactly how the fumbles-lost bug this constant fixes
+# happened: `league.scoring_weights()` correctly derived
+# rushing/receiving/sack_fumbles_lost weights, and the point formula simply
+# never looked at them.
+_SIMULATED_COMPONENTS = frozenset({
+    "rushing_yards", "rushing_tds", "rushing_fumbles_lost",
+    "receiving_yards", "receiving_tds", "receptions", "receiving_fumbles_lost",
+    "passing_yards", "passing_tds", "passing_interceptions", "sack_fumbles_lost",
 })
+
+_EMPTY_PRIOR = pd.Series({
+    "rush_eff": 0.0, "rush_td_rate": 0.0, "rush_fumble_rate": 0.0,
+    "rec_eff": 0.0, "rec_td_rate": 0.0, "catch_rate": 0.0, "rec_fumble_rate": 0.0,
+    "pass_eff": 0.0, "pass_td_rate": 0.0, "pass_int_rate": 0.0, "sack_fumble_rate": 0.0,
+})
+
+
+def _validate_scoring_is_simulated(weights: dict[str, float]) -> None:
+    """Fail loudly if the league scores a stat this module cannot simulate.
+
+    scoring_weights(config) is trusted as the league's real scoring, per this
+    module's own docstring ("never the hardcoded HALF_PPR") -- but trusting
+    it as an INPUT does not mean every key it can ever emit is actually wired
+    into the point formula below. That gap is exactly how the fumbles-lost
+    bug happened: `scoring_weights` correctly returned
+    rushing_fumbles_lost/receiving_fumbles_lost/sack_fumbles_lost weights,
+    and the point formula, hardcoded to eight named terms, simply never
+    looked at them. Checked once here, against `_SIMULATED_COMPONENTS` --
+    the full, fixed set of stats this module ever simulates a component for
+    -- rather than per player, since which stats are simulated is a property
+    of this module's code, not of any one player's history.
+    """
+    unmapped = sorted(set(weights) - _SIMULATED_COMPONENTS)
+    if unmapped:
+        raise ValueError(
+            f"league scoring includes {unmapped}, which projections.py has no "
+            "simulated component for -- add a stream/shrinkage for it rather "
+            "than silently dropping it from every projection (see "
+            "_SIMULATED_COMPONENTS)."
+        )
 
 
 def _with_required_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -292,12 +378,15 @@ def _positional_priors(subset: pd.DataFrame) -> pd.DataFrame:
             "position": position,
             "rush_eff": _rate(group["rushing_yards"], group["carries"]),
             "rush_td_rate": _rate(group["rushing_tds"], group["carries"]),
+            "rush_fumble_rate": _rate(group["rushing_fumbles_lost"], group["carries"]),
             "rec_eff": _rate(group["receiving_yards"], group["targets"]),
             "rec_td_rate": _rate(group["receiving_tds"], group["targets"]),
             "catch_rate": _rate(group["receptions"], group["targets"]),
+            "rec_fumble_rate": _rate(group["receiving_fumbles_lost"], group["targets"]),
             "pass_eff": _rate(group["passing_yards"], group["attempts"]),
             "pass_td_rate": _rate(group["passing_tds"], group["attempts"]),
             "pass_int_rate": _rate(group["passing_interceptions"], group["attempts"]),
+            "sack_fumble_rate": _rate(group["sack_fumbles_lost"], group["attempts"]),
         })
     return pd.DataFrame(rows).set_index("position")
 
@@ -339,6 +428,9 @@ def project_players(
     """Full season projection per player: volume x shrunk rate, composed.
 
     Columns: player_id, position, proj_points, p10, p50, p90, sd, proj_games.
+    Only `PROJECTABLE_POSITIONS` (QB/RB/WR/TE) appear in the output -- see
+    that constant's comment for why kickers and team defenses are
+    deliberately excluded rather than mismodelled.
 
     `games` defaults to None, meaning: use each player's own projected games
     (`season_volume`'s `proj_games` -- see its docstring for why this exists
@@ -351,7 +443,10 @@ def project_players(
     """
     seasons = tuple(seasons)
     weights = scoring_weights(config)
+    _validate_scoring_is_simulated(weights)
+
     history = _with_required_columns(history)
+    history = history[history["position"].isin(PROJECTABLE_POSITIONS)]
     volume = season_volume(history, seasons)
 
     subset = history[history["season"].isin(seasons)]
@@ -375,12 +470,15 @@ def project_players(
         # forward at all, not merely an implementation constraint.
         rush_eff = max(shrunk_rate(row["rushing_yards"], row["carries"], prior["rush_eff"], RUSH_EFF_STRENGTH), 0.0)
         rush_td = shrunk_rate(row["rushing_tds"], row["carries"], prior["rush_td_rate"], RUSH_TD_STRENGTH)
+        rush_fumble = shrunk_rate(row["rushing_fumbles_lost"], row["carries"], prior["rush_fumble_rate"], RUSH_FUMBLE_STRENGTH)
         rec_eff = max(shrunk_rate(row["receiving_yards"], row["targets"], prior["rec_eff"], REC_EFF_STRENGTH), 0.0)
         rec_td = shrunk_rate(row["receiving_tds"], row["targets"], prior["rec_td_rate"], REC_TD_STRENGTH)
         catch_rate = shrunk_rate(row["receptions"], row["targets"], prior["catch_rate"], CATCH_RATE_STRENGTH)
+        rec_fumble = shrunk_rate(row["receiving_fumbles_lost"], row["targets"], prior["rec_fumble_rate"], REC_FUMBLE_STRENGTH)
         pass_eff = max(shrunk_rate(row["passing_yards"], row["attempts"], prior["pass_eff"], PASS_EFF_STRENGTH), 0.0)
         pass_td = shrunk_rate(row["passing_tds"], row["attempts"], prior["pass_td_rate"], PASS_TD_STRENGTH)
         pass_int = shrunk_rate(row["passing_interceptions"], row["attempts"], prior["pass_int_rate"], PASS_INT_STRENGTH)
+        sack_fumble = shrunk_rate(row["sack_fumbles_lost"], row["attempts"], prior["sack_fumble_rate"], SACK_FUMBLE_STRENGTH)
 
         # `games` explicit overrides the per-player projection for every
         # player (existing games=1/games=17-style callers); otherwise each
@@ -407,36 +505,56 @@ def project_players(
         catch_seed = base_seed + _stable_seed(player_id, 2)
         pass_seed = base_seed + _stable_seed(player_id, 3)
         int_seed = base_seed + _stable_seed(player_id, 4)
+        rush_fumble_seed = base_seed + _stable_seed(player_id, 5)
+        rec_fumble_seed = base_seed + _stable_seed(player_id, 6)
+        sack_fumble_seed = base_seed + _stable_seed(player_id, 7)
 
-        _, rush_yards, rush_tds = simulate_components(rush_volume, rush_eff, rush_td, n=n, seed=rush_seed)
+        rush_opportunities, rush_yards, rush_tds = simulate_components(rush_volume, rush_eff, rush_td, n=n, seed=rush_seed)
         rec_opportunities, rec_yards, rec_tds = simulate_components(rec_volume, rec_eff, rec_td, n=n, seed=rec_seed)
         pass_opportunities, pass_yards, pass_tds = simulate_components(pass_volume, pass_eff, pass_td, n=n, seed=pass_seed)
 
-        # Receptions and interceptions: not modelled by simulate_components
-        # at all (it only knows yards and touchdowns), yet this league scores
-        # both explicitly (positively and negatively respectively). Each is
-        # drawn from the opportunity count simulate_components handed back
-        # for its own stream -- not reconstructed or re-derived -- so a
-        # big-target-share (or big-attempts) sample also gets more receptions
-        # (or interceptions), not an uncorrelated count; only the catch/pick
-        # outcome itself gets its own independent randomness.
+        # Receptions, interceptions and fumbles-lost: not modelled by
+        # simulate_components at all (it only knows yards and touchdowns),
+        # yet this league scores all of them explicitly. Each is drawn from
+        # the opportunity count simulate_components handed back for its own
+        # stream -- not reconstructed or re-derived -- so a big-target-share
+        # (or big-attempts) sample also gets more receptions/turnovers, not
+        # an uncorrelated count; only the event outcome itself gets its own
+        # independent randomness.
         receptions = np.random.default_rng(catch_seed).binomial(
             rec_opportunities, min(max(catch_rate, 0.0), 1.0)
         )
         interceptions = np.random.default_rng(int_seed).binomial(
             pass_opportunities, min(max(pass_int, 0.0), 1.0)
         )
-
-        points = (
-            rush_yards * weights.get("rushing_yards", 0.0)
-            + rush_tds * weights.get("rushing_tds", 0.0)
-            + rec_yards * weights.get("receiving_yards", 0.0)
-            + rec_tds * weights.get("receiving_tds", 0.0)
-            + receptions * weights.get("receptions", 0.0)
-            + pass_yards * weights.get("passing_yards", 0.0)
-            + pass_tds * weights.get("passing_tds", 0.0)
-            + interceptions * weights.get("passing_interceptions", 0.0)
+        rush_fumbles = np.random.default_rng(rush_fumble_seed).binomial(
+            rush_opportunities, min(max(rush_fumble, 0.0), 1.0)
         )
+        rec_fumbles = np.random.default_rng(rec_fumble_seed).binomial(
+            rec_opportunities, min(max(rec_fumble, 0.0), 1.0)
+        )
+        sack_fumbles = np.random.default_rng(sack_fumble_seed).binomial(
+            pass_opportunities, min(max(sack_fumble, 0.0), 1.0)
+        )
+
+        # Driven FROM the league's own scoring_weights, not a hardcoded list
+        # of terms -- see _validate_scoring_is_simulated's docstring for why
+        # a fixed term list is exactly the bug this replaced (fumbles-lost
+        # weights existed and were silently never summed). `components`
+        # covers every key `_SIMULATED_COMPONENTS` promises; every key in
+        # `weights` is guaranteed (by the validation above) to be one of
+        # them, so this can never KeyError, and a stat the league doesn't
+        # score simply never gets added, same as the old `.get(..., 0.0)`.
+        components = {
+            "rushing_yards": rush_yards, "rushing_tds": rush_tds, "rushing_fumbles_lost": rush_fumbles,
+            "receiving_yards": rec_yards, "receiving_tds": rec_tds, "receptions": receptions,
+            "receiving_fumbles_lost": rec_fumbles,
+            "passing_yards": pass_yards, "passing_tds": pass_tds,
+            "passing_interceptions": interceptions, "sack_fumbles_lost": sack_fumbles,
+        }
+        points = np.zeros(n)
+        for stat, weight in weights.items():
+            points = points + components[stat] * weight
         summary = summarise(points)
         rows.append({
             "player_id": player_id,
