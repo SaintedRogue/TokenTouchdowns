@@ -49,7 +49,8 @@ def fetch_season(
     """Download one season to `data_dir`, returning its path.
 
     Writes to a temporary file and renames, so an interrupted download can never
-    leave a truncated file that later runs would trust.
+    leave a truncated file that later runs would trust. Validates the payload
+    before caching to reject CDN hiccups or error pages.
     """
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -59,16 +60,36 @@ def fetch_season(
         return target
 
     payload = fetch(nflverse_url(dataset, filename))
+    if not payload:
+        raise ValueError(f"{dataset} {season}: empty payload, refusing to cache")
+    if target.suffix == ".parquet" and not (
+        payload.startswith(b"PAR1") and payload.endswith(b"PAR1")
+    ):
+        raise ValueError(f"{dataset} {season}: payload is not parquet, refusing to cache")
+
     tmp = target.with_suffix(target.suffix + ".part")
-    tmp.write_bytes(payload)
-    tmp.replace(target)
+    try:
+        tmp.write_bytes(payload)
+        tmp.replace(target)
+    except Exception:
+        # Clean up the .part file on any write/rename failure.
+        tmp.unlink(missing_ok=True)
+        raise
     return target
 
 
-def load_seasons(dataset: str, seasons: Iterable[int], data_dir: Path) -> pd.DataFrame:
+def load_seasons(
+    dataset: str,
+    seasons: Iterable[int],
+    data_dir: Path,
+    fetch: Callable[[str], bytes] = _http_get,
+) -> pd.DataFrame:
     """Concatenate cached seasons into one frame. Fetches anything missing."""
+    season_list = list(seasons)
+    if not season_list:
+        raise ValueError(f"{dataset}: no seasons to load")
     frames = [
-        pd.read_parquet(fetch_season(dataset, season, data_dir))
-        for season in seasons
+        pd.read_parquet(fetch_season(dataset, season, data_dir, fetch=fetch))
+        for season in season_list
     ]
     return pd.concat(frames, ignore_index=True)
