@@ -63,3 +63,38 @@ def test_evaluate_on_a_synthetic_series_with_a_known_answer():
     assert out["mae"] == pytest.approx(1.0)
     assert out["rmse"] == pytest.approx(1.0)
     assert out["spearman"] == pytest.approx(1.0)
+
+
+def test_mae_uses_absolute_error_not_signed_error():
+    # Errors that cancel: mean(diff) is 0.0 but mae must be 1.0. Catches a
+    # regression that drops abs().
+    pred, actual = np.array([1.0, -1.0]), np.array([0.0, 0.0])
+    assert mae(pred, actual) == pytest.approx(1.0)
+
+
+def test_rmse_takes_the_square_root_of_the_mean_squared_error():
+    # diff of 2 -> MSE 4, RMSE 2. Any fixture with |diff| == 1 cannot tell
+    # these apart, which is why the known-answer test does not catch it.
+    pred, actual = np.array([2.0, 2.0]), np.array([0.0, 0.0])
+    assert rmse(pred, actual) == pytest.approx(2.0)
+
+
+def test_spearman_is_rank_based_not_linear():
+    # Monotonic but strongly non-linear: Spearman is exactly 1.0 while Pearson
+    # is not. Catches spearmanr being swapped for pearsonr.
+    pred, actual = np.array([1.0, 4.0, 9.0, 16.0]), np.array([10.0, 20.0, 30.0, 40.0])
+    assert spearman(pred, actual) == pytest.approx(1.0)
+    from scipy import stats
+    assert stats.pearsonr(pred, actual).statistic < 0.99
+
+
+def test_spearman_is_nan_on_constant_prediction_not_zero():
+    # Constant predictions carry no ordering information, so the correlation
+    # is genuinely undefined -- a documented NaN, never a fabricated 0.0.
+    out = spearman(np.array([5.0, 5.0, 5.0]), np.array([1.0, 2.0, 3.0]))
+    assert np.isnan(out)
+
+
+def test_spearman_is_nan_for_a_single_sample():
+    # n == 1 has no ordering to correlate either; same documented contract.
+    assert np.isnan(spearman(np.array([5.0]), np.array([1.0])))

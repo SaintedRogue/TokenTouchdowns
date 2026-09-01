@@ -19,8 +19,24 @@ def split_half_reliability(
     """Correlate each defence's points allowed in weeks 1..split_week against
     the rest of the season. A high r means the signal persists; a low or
     negative r means published points-allowed tables mostly measure schedule.
+
+    A position with fewer than two teams having both halves present yields an
+    undefined correlation (r = NaN, via pandas' own Series.corr): reported
+    ``teams`` is what makes that shrunken sample visible to the caller, rather
+    than the NaN silently looking like a normal result.
     """
+    empty_result = pd.DataFrame(columns=["position", "teams", "r"])
+
+    # A wholly empty frame (no rows, possibly no columns at all) has no
+    # "position" column to index -- guard before touching it rather than
+    # letting a bare df["position"] raise KeyError.
+    if df.empty or "position" not in df.columns:
+        return empty_result
+
     subset = df[df["position"].isin(positions)].copy()
+    if subset.empty:
+        return empty_result
+
     subset["half"] = (subset["week"] > split_week).map({False: "h1", True: "h2"})
 
     halves = (
@@ -31,7 +47,15 @@ def split_half_reliability(
     wide = halves.pivot_table(
         index=["opponent_team", "position"], columns="half", values=value_column
     ).reset_index()
+    # A position present in `positions` but absent from the data (or one that
+    # never has rows on both sides of split_week) produces a pivot with no
+    # h1/h2 columns at all -- dropna(subset=[...]) on missing columns raises
+    # KeyError rather than just yielding zero rows, so guard first.
+    if "h1" not in wide.columns or "h2" not in wide.columns:
+        return empty_result
     wide = wide.dropna(subset=["h1", "h2"])
+    if wide.empty:
+        return empty_result
 
     out = []
     for position, group in wide.groupby("position"):

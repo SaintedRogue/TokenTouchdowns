@@ -6,6 +6,7 @@ hand, and should not ship.
 """
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterator
 
 import numpy as np
@@ -55,8 +56,18 @@ def rmse(pred: np.ndarray, actual: np.ndarray) -> float:
 
 
 def spearman(pred: np.ndarray, actual: np.ndarray) -> float:
-    """Rank correlation. For lineup decisions, order matters more than level."""
-    return float(stats.spearmanr(pred, actual).statistic)
+    """Rank correlation. For lineup decisions, order matters more than level.
+
+    Undefined when there is no ordering information to correlate: constant
+    ``pred`` or ``actual`` (every rank ties), or fewer than two samples. Both
+    cases return ``float("nan")`` explicitly -- a documented "this fold has no
+    signal", not a fabricated 0.0. Callers, including ``evaluate()``, MUST
+    check for and handle NaN themselves (e.g. drop it before averaging across
+    folds) rather than assuming every call returns a usable number.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", stats.ConstantInputWarning)
+        return float(stats.spearmanr(pred, actual).statistic)
 
 
 def evaluate(pred: np.ndarray, actual: np.ndarray) -> dict[str, float]:

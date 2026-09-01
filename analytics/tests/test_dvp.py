@@ -35,3 +35,24 @@ def test_split_half_reliability_is_negative_when_halves_invert():
 def test_split_half_reliability_reports_the_team_count():
     out = split_half_reliability(synthetic(consistent=True), positions=("RB",))
     assert out.set_index("position").loc["RB", "teams"] == 32
+
+
+def test_split_half_reliability_returns_empty_for_a_position_absent_from_the_data():
+    # Only RB rows exist; asking for WR must not crash on the pivot_table
+    # producing no h1/h2 columns at all (KeyError at dropna).
+    out = split_half_reliability(synthetic(consistent=True), positions=("WR",))
+    assert out.empty
+    assert list(out.columns) == ["position", "teams", "r"]
+
+
+def test_split_half_reliability_returns_empty_for_an_entirely_empty_frame():
+    empty = pd.DataFrame(columns=["opponent_team", "position", "week", "points"])
+    out = split_half_reliability(empty, positions=("RB",))
+    assert out.empty
+    assert list(out.columns) == ["position", "teams", "r"]
+
+
+def test_split_half_reliability_returns_empty_for_a_columnless_empty_frame():
+    out = split_half_reliability(pd.DataFrame(), positions=("RB",))
+    assert out.empty
+    assert list(out.columns) == ["position", "teams", "r"]
