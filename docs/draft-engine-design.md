@@ -132,95 +132,123 @@ tt playoff [--week N] [--opponent T]      variance-aware lineup
 ## Measured strategy comparison
 
 Backtested 2026-09-01. **Every number below is out-of-sample and graded on points players
-actually scored** — not on this engine's own projections.
+actually scored** — never on this engine's own projections.
+
+An earlier version of this section reported a larger edge (+45.1, 10/12 cells) for
+VOR-with-survival. Those numbers were produced before three confirmed defects were fixed
+(retired players on the board, a flex slot that was silently rounded away, and unseeded boards
+that made the run irreproducible). They are superseded by the table below, which is smaller and
+less favourable. Nothing was tuned in either direction.
 
 ### Methodology
 
 Three independent backtest seasons (2023, 2024, 2025). For each:
 
-1. **Projections fit on seasons strictly before S** (2015..S-1). Drafting 2024 with a fit that has
-   seen 2024 is lookahead bias, and would make the whole exercise circular.
-2. **Drafted on season S's own preseason ADP** from Fantasy Football Calculator
-   (`year=S`; 4,576 / 906 / 718 drafts respectively) — never the current board.
-3. **Graded on actual season-S fantasy points**, computed from nflverse weekly stats under this
-   league's own scoring weights, restricted to `season_type == 'REG'`. Postseason weeks are
-   excluded: counting them rewards players on deep playoff runs, which is unrelated to draft skill.
-4. **A drafted player with no stats that season scores ZERO**, not NaN and not excluded. Dropping
+1. **Projections fit on seasons strictly before S** (2015..S-1). Verified, not assumed: projecting
+   2024 from full 2015-2025 history versus history truncated to `< 2024` gives a maximum
+   `|delta proj_points|` of **0.0** across all 1,609 rows.
+2. **Drafted on season S's own preseason ADP** from Fantasy Football Calculator (`year=S`;
+   4,576 / 906 / 718 drafts) — never the current board.
+3. **Board restricted to players with at least one regular-season game in S-1.** Without this the
+   board carried retired players and the VOR arm actually drafted Tom Brady and Rob Gronkowski in
+   the 2024 backtest. S-1 is legitimately preseason information, so this introduces no lookahead.
+4. **Graded on actual season-S fantasy points** from nflverse weekly stats under this league's own
+   scoring weights, restricted to `season_type == 'REG'`. Verified by hand: Lamar Jackson's 2024
+   recomputes to 432.38 REG points, versus 474.54 if postseason had leaked in.
+5. **A drafted player with no stats that season scores ZERO**, not NaN and not excluded. Dropping
    busts would flatter precisely the strategies that reach for them.
-5. Optimal starting lineup per `league.starters_per_team`; bench players do not score.
-6. 200 trials per cell, 15 rounds, `my_slot = teams // 2`, opponents drafting ADP-with-noise.
+6. **Optimal starting lineup**: every fixed slot filled first, then the flex awarded to the best
+   remaining flex-eligible player — 9 starters, not 8. Bench players do not score.
+7. 200 trials per cell, 15 rounds, `my_slot = teams // 2`, opponents drafting ADP-with-noise.
+   Boards are built exactly once per cell with a fixed seed, so the run is reproducible.
 
-Player identity is resolved through the tested crosswalk (FFC --fuzzy name+position-->
-Sleeper --`gsis_id`--> nflverse), matching **91-93% of the ADP board** per season. An earlier
-exact-name join matched only 16%, which starved the survival signal on 60% of picks and made every
-comparison before this one uninterpretable.
+Player identity resolves through the tested crosswalk (FFC --fuzzy name+position--> Sleeper
+--`gsis_id`--> nflverse), matching **91-93%** of each ADP board. An earlier exact-name join matched
+only 16%, starving the survival signal on 60% of picks.
 
 ### Results — mean delta vs consensus ADP (actual points)
 
 | season | teams | pure VOR | VOR x survival (uncond.) | VOR x survival (cond.) |
 |--------|-------|----------|--------------------------|------------------------|
-| 2023 | 4  | -75.1 **sig** | +30.8 ns | +20.1 ns |
-| 2023 | 6  | -174.2 **sig** | +9.5 ns | +14.1 ns |
-| 2023 | 8  | -94.4 **sig** | +55.1 **sig** | +49.7 **sig** |
-| 2023 | 10 | -178.2 **sig** | +8.5 ns | -4.2 ns |
-| 2024 | 4  | -68.7 **sig** | +62.2 **sig** | +61.9 **sig** |
-| 2024 | 6  | -93.1 **sig** | +97.4 **sig** | +102.4 **sig** |
-| 2024 | 8  | -182.1 **sig** | +113.4 **sig** | +115.2 **sig** |
-| 2024 | 10 | -321.0 **sig** | +124.7 **sig** | +118.2 **sig** |
-| 2025 | 4  | -232.6 **sig** | +51.8 **sig** | +58.9 **sig** |
-| 2025 | 6  | -309.3 **sig** | **-89.3 sig** | **-80.4 sig** |
-| 2025 | 8  | -287.6 **sig** | -30.5 ns | -23.1 ns |
-| 2025 | 10 | -301.3 **sig** | +107.4 **sig** | +109.6 **sig** |
+| 2023 | 4  | -120.5 **sig** | -10.8 ns | -29.1 ns |
+| 2023 | 6  | -215.0 **sig** | +4.6 ns | +21.2 ns |
+| 2023 | 8  | -232.0 **sig** | +22.3 ns | +20.9 ns |
+| 2023 | 10 | -238.5 **sig** | +6.7 ns | -4.3 ns |
+| 2024 | 4  | -125.3 **sig** | +55.0 **sig** | +58.5 **sig** |
+| 2024 | 6  | -160.3 **sig** | +99.7 **sig** | +100.0 **sig** |
+| 2024 | 8  | -355.2 **sig** | +71.3 **sig** | +81.6 **sig** |
+| 2024 | 10 | -325.1 **sig** | +106.8 **sig** | +107.9 **sig** |
+| 2025 | 4  | -328.6 **sig** | +12.8 ns | +16.0 ns |
+| 2025 | 6  | -352.3 **sig** | **-91.8 sig** | **-79.8 sig** |
+| 2025 | 8  | -314.2 **sig** | -21.4 ns | -18.4 ns |
+| 2025 | 10 | -366.0 **sig** | +37.2 ns | +39.2 ns |
 
-"sig" = the strategy's 95% CI does not overlap ADP's. Baseline ADP scores 1283 / 1343 / 1319
-points per season, so +45 is roughly a 3.4% edge.
+"sig" = the strategy's 95% CI does not overlap ADP's. ADP scores 1482 / 1548 / 1526 points per
+season, so +24 is about a 1.6% difference.
 
 | strategy | mean delta | beat ADP | significant wins | significant losses |
 |----------|-----------|----------|------------------|--------------------|
-| pure VOR | **-193.1** | **0/12** | 0 | **12** |
-| VOR x survival (uncond.) | +45.1 | 10/12 | 7 | 1 |
-| VOR x survival (cond.) | +45.2 | 9/12 | 7 | 1 |
+| pure VOR | **-261.1** | **0/12** | 0 | **12** |
+| VOR x survival (uncond.) | +24.4 | 9/12 | 4 | 1 |
+| VOR x survival (cond.) | +26.2 | 8/12 | 4 | 1 |
 
 ### What this establishes
 
-**Pure VOR is worse than doing nothing clever.** It lost every one of the twelve cells, all
-significantly, by an average of 193 points. Drafting the value-over-replacement board directly is
-materially worse than simply following consensus ADP. This is the single most actionable finding
-here, and it is the opposite of what an in-sample comparison graded on `proj_points` reported.
+**Pure VOR is unusable — this is the finding.** It lost every one of the twelve cells,
+significantly, by an average of 261 points. It also survived every attempt to break it: it loses
+at every draft slot (-145 to -368), at every opponent-noise setting (-129 to -393), against a
+heterogeneous field, and after retirees are removed. Each independent methodology fix made it
+*worse*, which is how a real effect behaves. **Do not ship a VOR-ranked board.**
 
-**The survival term is what carries the signal.** The only difference between the two rows is the
-`x P(gone before my next pick)` factor, and it is worth ~238 points. VOR supplies magnitude;
-survival supplies urgency. Optimising value while ignoring opportunity cost underperforms the
-market; combining them beats it.
-
-**The bust rate explains the mechanism.** Share of drafted players who scored zero:
+**The mechanism is bust rate.** Share of drafted players who scored zero, across all 36,000 picks:
 
 | strategy | bust rate |
 |----------|-----------|
-| ADP | 2.2% |
-| pure VOR | 11.7% |
-| VOR x survival | 6.1% |
+| ADP | 0.9% |
+| pure VOR | 4.4% |
+| VOR x survival | 3.6-3.9% |
 
-Pure VOR drafts non-appearing players at **5x** the ADP rate. Consensus ADP embeds injury and
-depth-chart information our projections do not model; ignoring it means repeatedly reaching for
-players who never take a snap.
+Pure VOR drafts non-appearing players at nearly **5x** the ADP rate. Consensus ADP embeds injury
+and depth-chart information these projections do not model, so ranking on projected value alone
+means repeatedly reaching for players who never take a snap.
 
-**Conditional vs unconditional survival does not matter.** Head to head, conditional won 7/12 with
-**every** confidence interval overlapping, and the two means differ by 0.1 points (+45.2 vs +45.1).
-The statistically-correct conditional form (the board only holds players observed available, so
-`P(X>next | X>pick)`) is not measurably better than the simpler marginal one. The default stays
-`conditional=False` on grounds of numerical stability, not performance. This settles a question
-that had been argued from theory in both directions.
+**Conditional vs unconditional survival does not matter.** The two differ by 1.8 points on average
+and every head-to-head confidence interval overlaps. The statistically-correct conditional form
+(the board only holds players observed still available, so `P(X>next | X>pick)`) is not measurably
+better than the simpler marginal one. The default stays `conditional=False` for numerical
+stability, not performance.
 
 ### What this does NOT establish
 
-- **The edge is not reliable per-league.** VOR-with-survival lost significantly in 2025/6-team and
-  was flat in 2025/8-team. 2024 was uniformly strong (+62 to +125, all significant); 2023 was
-  positive but mostly insignificant; 2025 was genuinely mixed. Expect an edge on average, not in
-  any particular draft.
-- **Opponents here draft ADP-with-noise.** A strategy exploiting the knowledge that everyone else
-  follows consensus may transfer poorly to a league of heterogeneous or adversarial drafters.
-- **One draft slot per cell** (`teams // 2`). Slot sensitivity is untested.
-- **Kickers and team defenses are not projected at all**, and `Ret TD` / `2-PT` are unmodelled
-  (surfaced as a warning, per `league.missing_scored_columns`).
-- Three seasons is a small sample for a claim about seasons.
+**VOR-with-survival does not reliably beat consensus ADP.** The +24 average is carried entirely by
+one season:
+
+| season | mean delta | significant |
+|--------|-----------|-------------|
+| 2023 | +5.7 | 0/4 |
+| 2024 | **+83.2** | **4/4 wins** |
+| 2025 | -15.8 | 1/4 **losses** |
+
+2024 is a strong, consistent win. 2023 is indistinguishable from ADP. 2025 is negative and
+includes a significant loss. On this evidence the honest claim is that the survival-weighted board
+**roughly matches consensus ADP**, with an edge that appears in some seasons and not others. It is
+not a reliable per-draft advantage.
+
+Further limits, each measured rather than asserted:
+
+- **Draft slot matters more than the effect does.** 2023/10 by slot spans -37.0 to +72.2;
+  2024/10 spans +9.6 to +154.8 — a 110-145 point range against a +24 headline, with the reported
+  slot (`teams // 2`) at the favourable end in both cells sampled.
+- **The edge flips sign on an unfitted constant.** With `ADP_NOISE_DEFAULT = 6.0`, 2023/10 gives
+  +41.3; at noise 2 it is **-18.6**, at noise 15 it is +82.8, and against a heterogeneous top-3
+  field it is **-15.1**. Opponents also share a single noise vector, so they deviate in perfect
+  correlation, and the strategy under test models exactly the simulator's data-generating process.
+  Pure VOR loses under every one of these settings.
+- **The survival arm's advantage is partly hygiene, not insight.** Players absent from the ADP feed
+  get `p_gone = 0`, so the survival arm automatically avoids them — which is how it dodged the
+  retirees that pure VOR drafted.
+- **The significance rule is conservative.** Non-overlapping CIs is roughly a 2x stricter test than
+  a paired comparison on the same trials; the paired test would call additional cells significant.
+  This under-claims rather than over-claims.
+- One draft slot per cell; K and DEF are not projected at all; `Ret TD` and `2-PT` are unmodelled
+  (surfaced as a warning via `league.missing_scored_columns`); three seasons is a small sample.
