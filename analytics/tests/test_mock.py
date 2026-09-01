@@ -313,6 +313,27 @@ def test_strategy_vor_survival_fallback_still_applies_the_roster_need_discount()
     assert chosen["player_id"] == "te"
 
 
+def test_strategy_vor_survival_fallback_scans_the_full_candidate_pool_not_a_truncated_top_n():
+    # MUTATION GUARD (mutant #20 in review-final.md): `recommend` is called
+    # with `n=len(decorated)+1` specifically so the all-zero fallback can
+    # see the TRUE best expected_loss/vor -- not whatever `recommend`'s own
+    # default n=5 already truncated to. Six candidates here, all
+    # ADP-invisible (expected_loss == 0 for every one of them, so the
+    # fallback path always runs), with the single highest-VOR one placed
+    # LAST in board order -- confirmed empirically that pandas'
+    # `sort_values(..., ascending=False).head(5)` on an all-tied column
+    # preserves insertion order, so a naive `n=n` (n=5 default) call would
+    # silently drop exactly this player before the fallback ever sees him.
+    board_ = pd.DataFrame([
+        {"player_id": f"p{i}", "position": "RB", "proj_points": float(i), "vor": float(i),
+         "adp": float("nan"), "stdev": float("nan")}
+        for i in range(6)
+    ])
+    strategy = strategy_vor_survival(CONFIG_OBJ)  # default n=5
+    chosen = strategy(board_, roster=[], pick=140, next_pick=150, teams=10)
+    assert chosen["player_id"] == "p5"  # true highest VOR, not the head(5) survivor
+
+
 def test_a_full_draft_survives_running_out_of_adp_covered_players():
     # Integration-level check: strategy_vor_survival must not crash once
     # the real board's bottom 40 (no adp at all -- see board()'s docstring)

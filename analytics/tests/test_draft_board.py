@@ -270,6 +270,23 @@ def test_build_board_attaches_vor_and_adp():
     assert pd.isna(row.loc["B", "adp"])
 
 
+def test_build_board_vor_depends_on_the_teams_argument_not_hardcoded():
+    # MUTATION GUARD (mutant #23 in review-final.md): `build_board` must
+    # thread its own `teams` argument into `add_vor`, not a hardcoded 10 --
+    # otherwise the entire 4/6/8/10-team-count sweep this study exists to
+    # run collapses to a single replacement level no matter what `teams` a
+    # caller asks for. Uses `_big_history`/`_big_ffc_from` (defined below)
+    # for a pool deep enough that replacement rank genuinely differs
+    # between a 4-team and a 10-team league.
+    history = _big_history()
+    ffc = _big_ffc_from(history)
+    board_4 = build_board(history, CONFIG_OBJ, season=2021, ffc=ffc, teams=4, seed=1)
+    board_10 = build_board(history, CONFIG_OBJ, season=2021, ffc=ffc, teams=10, seed=1)
+    vor_4 = board_4.set_index("player_id")["vor"].sort_index()
+    vor_10 = board_10.set_index("player_id")["vor"].sort_index()
+    assert not vor_4.equals(vor_10)
+
+
 # ---------------------------------------------------------------------------
 # actual_points_by_player: REG only, real league scoring, missing == absent
 # ---------------------------------------------------------------------------
@@ -399,6 +416,67 @@ def test_strategies_for_returns_all_four_arms():
     }
 
 
+def test_strategies_for_wires_conditional_flag_correctly_not_swapped():
+    # MUTATION GUARD (mutant #5 in review-final.md): `strategies_for` must
+    # bind conditional=False to "vor_survival_unconditional" and
+    # conditional=True to "vor_survival_conditional" -- swapped, this would
+    # silently hand the study a free (wrong) answer to "conditional vs
+    # unconditional survival," the exact question Task 8 exists to settle
+    # empirically. THE CONTROLLER ALREADY VERIFIED this wiring is correct
+    # today (see fix-round-2-brief.md) -- this test PINS that, it does not
+    # change behaviour. Verified BEHAVIOURALLY, via a full simulated draft,
+    # not by introspecting the closure (which hides `conditional` entirely).
+    history = _big_history()
+    ffc = _big_ffc_from(history)
+    board = build_board(history, CONFIG_OBJ, season=2021, ffc=ffc, teams=10, seed=1)
+
+    reference_false = strategy_vor_survival(CONFIG_OBJ, rounds=6, conditional=False)
+    reference_true = strategy_vor_survival(CONFIG_OBJ, rounds=6, conditional=True)
+
+    roster_false = simulate_draft(board, teams=10, rounds=6, my_slot=3,
+                                   strategy=reference_false, seed=1)
+    roster_true = simulate_draft(board, teams=10, rounds=6, my_slot=3,
+                                  strategy=reference_true, seed=1)
+    # Sanity: the two conditioning forms must actually diverge on this
+    # board/seed, or the equality checks below would pass vacuously.
+    assert list(roster_false["player_id"]) != list(roster_true["player_id"])
+
+    arms = strategies_for(CONFIG_OBJ, rounds=6)
+    got_unconditional = simulate_draft(board, teams=10, rounds=6, my_slot=3,
+                                        strategy=arms["vor_survival_unconditional"], seed=1)
+    got_conditional = simulate_draft(board, teams=10, rounds=6, my_slot=3,
+                                      strategy=arms["vor_survival_conditional"], seed=1)
+
+    assert list(got_unconditional["player_id"]) == list(roster_false["player_id"])
+    assert list(got_conditional["player_id"]) == list(roster_true["player_id"])
+
+
+def test_strategies_for_threads_rounds_so_f11_need_urgency_actually_fires():
+    # MUTATION GUARDS (mutants #6 and #21 in review-final.md): if
+    # `strategies_for` stopped passing `rounds` into `strategy_vor_survival`,
+    # or if `_rounds_remaining` ignored its argument and always returned the
+    # "unknown" constant, F11's need-urgency boost would silently never fire
+    # inside this study -- the exact mechanism Task 8 (F11) was built to
+    # gate integration-tested, not just unit-tested. Mirrors test_draft.py's
+    # own `test_an_empty_mandatory_slot_is_prioritised_as_rounds_run_out`,
+    # exercised end-to-end through strategies_for's own wiring instead of a
+    # direct `recommend` call.
+    rounds = 15
+    board = pd.DataFrame([
+        {"player_id": "rb4", "position": "RB", "vor": 40.0, "adp": 145.0, "stdev": 5.0},
+        {"player_id": "te1", "position": "TE", "vor": 15.0, "adp": 145.0, "stdev": 5.0},
+    ])
+    roster = [{"player_id": f"r{i}", "position": "RB"} for i in range(3)]
+    strategy = strategies_for(CONFIG_OBJ, rounds=rounds)["vor_survival_unconditional"]
+    # pick=141 -> _rounds_remaining(141, teams=10, rounds=15) == 1 (last
+    # round): RB is filled (discount 0.5, no urgency) but TE has need=1 and
+    # zero slack -- without F11 actually firing, RB's higher raw vor wins;
+    # with it, TE's urgency multiplier overcomes both the vor gap and the
+    # discount.
+    chosen = strategy(board, roster=roster, pick=141, next_pick=150, teams=10)
+    assert chosen["player_id"] == "te1"
+
+
 def _big_history():
     """Enough players (well past replacement at every position, at teams=10)
     for a real 10-team x small-rounds draft to run without exhausting the
@@ -456,6 +534,38 @@ def test_run_backtest_cell_returns_one_row_per_strategy_with_season_and_teams():
     assert (out["season"] == 2021).all()
     assert (out["teams"] == 10).all()
     assert (out["trials"] == 3).all()
+
+
+def test_run_backtest_cell_scores_use_actual_points_not_the_circular_default():
+    # MUTATION GUARD (mutant #1 in review-final.md, THE most load-bearing
+    # line on this branch): if `score_roster=scorer` were ever dropped from
+    # the `compare_strategies` call inside `run_backtest_cell`, it would
+    # silently fall back to `optimal_lineup_score` -- proj_points of the
+    # optimal lineup, strictly positive for any real, well-populated board
+    # -- and the WHOLE STUDY would silently revert to grading strategies on
+    # the same circular metric a VOR-based strategy maximises by
+    # construction. `test_run_backtest_cell_returns_one_row_per_strategy_
+    # with_season_and_teams` (given, above) only checks shapes/columns and
+    # cannot catch this.
+    #
+    # `_big_history` carries ONLY season 2020; `actual_points_by_player` for
+    # season 2021 is therefore an EMPTY Series (no player scored any REG
+    # points in 2021 in this fixture), so a roster graded honestly on
+    # actual points must score EXACTLY 0.0 for every strategy, no matter
+    # how good the roster looks by proj_points. Only the circular default
+    # could produce a nonzero mean_score here.
+    history = _big_history()
+    ffc = _big_ffc_from(history)
+    board = build_board(history, CONFIG_OBJ, season=2021, ffc=ffc, teams=10, seed=1)
+    actual = actual_points_by_player(history, CONFIG_OBJ, season=2021)
+    assert actual.empty  # sanity: this fixture really has no 2021 data
+
+    out = run_backtest_cell(
+        board, CONFIG_OBJ, season=2021, teams=10, my_slot=3,
+        trials=3, seed=1, actual_points=actual, rounds=4,
+    )
+    assert (out["mean_score"] == 0.0).all()
+    assert (out["max_score"] == 0.0).all()
 
 
 def test_zero_scoring_diagnostics_reports_a_row_per_strategy():
