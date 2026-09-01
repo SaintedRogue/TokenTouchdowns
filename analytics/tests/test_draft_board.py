@@ -189,6 +189,72 @@ def test_build_projection_board_raises_with_no_prior_seasons():
         build_projection_board(history, CONFIG_OBJ, season=2020, ffc=empty_ffc)
 
 
+# ---------------------------------------------------------------------------
+# M-2 (fix-round-2-brief.md): retired players don't belong on the board, and
+# the fix must not introduce lookahead of its own.
+# ---------------------------------------------------------------------------
+
+
+def test_build_projection_board_excludes_a_player_inactive_in_season_minus_one():
+    # A: active every season including 2020 (season - 1) -- stays on the
+    # board. RETIREE: has TRAINING-window data (2019, so project_players
+    # would otherwise happily project him) but NO 2020 games at all -- a
+    # real player who retired after 2019. He must be excluded from the 2021
+    # board even though 2019 data alone would otherwise get him projected.
+    rows = []
+    for week in range(1, 18):
+        rows.append(_week_row("A", 2019, week, "RB", carries=15, rushing_yards=60))
+        rows.append(_week_row("A", 2020, week, "RB", carries=15, rushing_yards=60))
+        rows.append(_week_row("RETIREE", 2019, week, "RB", carries=12, rushing_yards=50))
+    history = pd.DataFrame(rows)
+    empty_ffc = parse_ffc_crosswalk(ffc_payload([]))
+
+    board = build_projection_board(history, CONFIG_OBJ, season=2021, ffc=empty_ffc, seed=1)
+
+    assert "A" in set(board["player_id"])
+    assert "RETIREE" not in set(board["player_id"])
+
+
+def test_build_projection_board_active_filter_uses_only_season_minus_one_not_season_itself():
+    # THE CORRECTNESS TRAP the brief calls out explicitly: verify the filter
+    # uses ONLY season S-1, never season S -- using S itself would be
+    # lookahead of the worst kind (selecting which players belong on the
+    # board using the very outcome the backtest exists to measure), and
+    # would silently inflate every arm that happens to draft a player who
+    # merely LOOKS good in hindsight.
+    #
+    # RETIREE has training-window data (2019) AND, the trap, 2021 (season S
+    # itself) data -- but NOT 2020 (season S-1). A filter that mistakenly
+    # keys off `season` instead of `season - 1` would see RETIREE's 2021
+    # games and wrongly include him; a filter keyed correctly off
+    # `season - 1` must exclude him regardless of his 2021 activity.
+    rows = []
+    for week in range(1, 18):
+        rows.append(_week_row("A", 2019, week, "RB", carries=15, rushing_yards=60))
+        rows.append(_week_row("A", 2020, week, "RB", carries=15, rushing_yards=60))
+        rows.append(_week_row("A", 2021, week, "RB", carries=15, rushing_yards=60))
+        rows.append(_week_row("RETIREE", 2019, week, "RB", carries=12, rushing_yards=50))
+        rows.append(_week_row("RETIREE", 2021, week, "RB", carries=12, rushing_yards=50))
+    history = pd.DataFrame(rows)
+    empty_ffc = parse_ffc_crosswalk(ffc_payload([]))
+
+    board = build_projection_board(history, CONFIG_OBJ, season=2021, ffc=empty_ffc, seed=1)
+
+    assert "A" in set(board["player_id"])
+    assert "RETIREE" not in set(board["player_id"])
+
+
+def test_active_in_prior_season_filter_raises_with_no_season_minus_one_data():
+    # No 2020 REG rows anywhere -- silently returning an empty/wrong-shaped
+    # board would be worse than failing loudly, same reasoning as the
+    # existing no-training-season guard above.
+    rows = [_week_row("A", 2019, week, "RB", carries=15, rushing_yards=60) for week in range(1, 18)]
+    history = pd.DataFrame(rows)
+    empty_ffc = parse_ffc_crosswalk(ffc_payload([]))
+    with pytest.raises(ValueError, match="season"):
+        build_projection_board(history, CONFIG_OBJ, season=2021, ffc=empty_ffc, seed=1)
+
+
 def test_build_board_attaches_vor_and_adp():
     history = history_two_seasons()
     ffc = parse_ffc_crosswalk(ffc_payload([

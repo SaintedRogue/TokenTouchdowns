@@ -11,7 +11,15 @@ actually good. This module replaces that broken instrument with a real one:
      < season` filter -- non-negotiable, the exact lookahead-bias error
      class already caught twice in this repo).
   2. Draft against season S's OWN preseason ADP (`load_ffc_crosswalk`),
-     never the current board.
+     never the current board. The board itself is restricted to players
+     with >= 1 REG game in season S-1 (`build_projection_board`'s
+     `_active_in_prior_season` filter) -- otherwise it carries every
+     retired player who has ever appeared in the training history (Tom
+     Brady, Rob Gronkowski, Peyton Manning...), which a roster-blind
+     strategy like `strategy_vor` will happily draft. S-1 is legitimately
+     preseason information (strictly before S, same as every training
+     season above) -- see that function's own docstring for how this is
+     verified, not merely asserted, to introduce no lookahead.
   3. Grade each strategy's roster on the OPTIMAL STARTING LINEUP's REAL,
      ACTUAL fantasy points from season S -- computed from nflverse's own
      per-week stats via THIS league's `scoring_weights`, `season_type ==
@@ -168,6 +176,29 @@ def attach_adp(board: pd.DataFrame, ffc: pd.DataFrame) -> pd.DataFrame:
     return board.merge(matched[["player_id", "adp", "stdev"]], on="player_id", how="left")
 
 
+def _active_in_prior_season(history: pd.DataFrame, season: int) -> set[str]:
+    """`player_id`s with >= 1 REG game in season `season - 1` -- see
+    `build_projection_board`'s "ACTIVE-PLAYER FILTER" section (M-2,
+    fix-round-2-brief.md) for why exactly this season, and no other.
+
+    Raises if `history` has no REG rows at all for `season - 1` -- the same
+    "fail loud rather than silently produce a wrong/empty board" reasoning
+    `build_projection_board`'s own lookahead guard already uses for a
+    missing training season.
+    """
+    prior_season = season - 1
+    prior = regular_season(history)
+    prior = prior[prior["season"] == prior_season]
+    if prior.empty:
+        raise ValueError(
+            f"_active_in_prior_season: no REG-season rows for season "
+            f"{prior_season} (season - 1) in history -- cannot restrict the "
+            f"{season} board to players active immediately beforehand "
+            "without it"
+        )
+    return set(prior["player_id"].unique())
+
+
 def build_projection_board(
     history: pd.DataFrame,
     config: LeagueConfig,
@@ -194,6 +225,30 @@ def build_projection_board(
     Raises if `history` has no season strictly before `season` at all --
     silently projecting from nothing (or from `season` itself, the only
     other option) would be worse than failing loudly.
+
+    ACTIVE-PLAYER FILTER (M-2, fix-round-2-brief.md). `project_players`
+    trains on every season strictly before `season` (2015..`season`-1, in
+    the real backtest), so a player who last appeared in, say, 2019 and has
+    been retired ever since still gets a projection here -- there is
+    nothing in the training window itself that says "and is still active."
+    The 2024 board built without this filter carried Tom Brady, Rob
+    Gronkowski, Peyton Manning and Drew Brees; `strategy_vor` (which has no
+    other signal to exclude them) drafted Brady and Gronkowski outright in
+    the real backtest, and both scored zero. The fix restricts the returned
+    board to `_active_in_prior_season`: players with >= 1 REG game in
+    season `season - 1` ONLY.
+
+    THIS INTRODUCES NO LOOKAHEAD -- verified, not merely asserted. Season
+    `season - 1` is STRICTLY BEFORE `season`, exactly like every season
+    `project_players` already trains on above; it is legitimately available
+    preseason information (by the time a real draft for `season` happens,
+    every game of `season - 1` has already been played). The filter never
+    touches `season` itself -- doing so would be lookahead of the worst
+    kind (selecting which players belong on the board using the very
+    outcome the backtest exists to measure), which is exactly what
+    `test_build_projection_board_active_filter_uses_only_season_minus_one_
+    not_season_itself` pins: a player with training-window history AND
+    `season`-itself data, but NO `season - 1` data, must still be excluded.
     """
     seasons_present = {int(s) for s in history["season"].unique()}
     train_seasons = tuple(sorted(s for s in seasons_present if s < season))
@@ -203,7 +258,9 @@ def build_projection_board(
             "history -- cannot draft it without lookahead bias"
         )
     projections = project_players(history, config, seasons=train_seasons, seed=seed)
-    return attach_adp(projections, ffc)
+    board = attach_adp(projections, ffc)
+    active_ids = _active_in_prior_season(history, season)
+    return board[board["player_id"].isin(active_ids)].reset_index(drop=True)
 
 
 def build_board(
