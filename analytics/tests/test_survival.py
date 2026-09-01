@@ -37,6 +37,16 @@ def test_a_zero_stdev_player_is_a_step_function():
     assert p_available(adp=40.0, stdev=0.0, pick=41) == 0.0
 
 
+def test_a_zero_stdev_player_is_gone_exactly_at_the_adp():
+    # The crossover itself: `pick == adp` must land on the "gone" side of
+    # the step, matching the code (see module docstring) -- a point-mass
+    # distribution has no spread to split 50/50 at its own location, unlike
+    # the real (non-degenerate) norm.sf case tested separately above. The
+    # two boundary probes above (39, 41) never touch pick == adp itself, so
+    # they cannot tell `pick < adp` apart from `pick <= adp` -- this does.
+    assert p_available(adp=40.0, stdev=0.0, pick=40) == 0.0
+
+
 def test_a_missing_stdev_is_treated_the_same_as_zero():
     # NaN fails every `<= 0` comparison silently in Python, so this is a
     # distinct guard from the explicit-zero case above -- a `pd.isna` check,
@@ -123,6 +133,15 @@ def test_add_survival_does_not_mutate_the_input_board():
     original_columns = list(board.columns)
     add_survival(board, pick=20, next_pick=30)
     assert list(board.columns) == original_columns
+
+
+def test_add_survival_names_the_missing_column_when_adp_or_stdev_is_absent():
+    # Regression guard for the itertuples() attribute-access bug: a board
+    # missing 'adp' (or 'stdev') previously raised an opaque
+    # AttributeError naming neither column; this must name the real one.
+    board = pd.DataFrame([{"player_id": "x", "position": "RB", "stdev": 5.0}])
+    with pytest.raises(ValueError, match="adp"):
+        add_survival(board, pick=20, next_pick=30)
 
 
 def test_add_survival_rejects_a_next_pick_that_is_not_after_pick():

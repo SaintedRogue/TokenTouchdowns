@@ -49,10 +49,12 @@ def p_available(adp: float, stdev: float, pick: float) -> float:
         return 1.0
     if stdev is None or pd.isna(stdev) or stdev <= 0:
         # Degenerate point-mass distribution: available strictly before
-        # `adp`, gone at or after it. `pick == adp` counts as "gone" for the
-        # same reason `norm.sf` returns exactly 0.5 there in the real
-        # (non-degenerate) case -- the step function's crossover, not a
-        # separate third state.
+        # `adp`, gone at or after it. `pick == adp` counts as "gone", NOT as
+        # a third "exactly 0.5" state the way the real (non-degenerate)
+        # `norm.sf` reads at its own mean -- a point mass has no spread to
+        # split 50/50 at its own location, so "at or after" is the only
+        # coherent convention: the player's one deterministic draft slot has
+        # arrived, which means gone, not half-gone.
         return 1.0 if pick < adp else 0.0
     return float(norm.sf(pick, loc=adp, scale=stdev))
 
@@ -121,15 +123,30 @@ def add_survival(
             "add_survival answers 'will they last from my pick now to my next "
             "one', which only makes sense looking forward."
         )
+    missing = [column for column in ("adp", "stdev") if column not in board.columns]
+    if missing:
+        raise ValueError(f"add_survival requires column(s) {missing} on board")
+
+    # Column lookup by NAME (not `itertuples()`'s attribute access) --
+    # itertuples renames/mangles a column whose name collides with a
+    # DataFrame method, contains a space, or isn't a valid Python
+    # identifier (e.g. a literal "ADP" column shadowing nothing here, but a
+    # column like "adp gap" would) into an opaque positional field, turning
+    # a simple missing/renamed column into an AttributeError that names
+    # neither `adp` nor `stdev`. Zipping the two Series by their real column
+    # names sidesteps that entirely, and the explicit check above gives the
+    # actually-missing-column case a message that names the problem.
+    adps = board["adp"]
+    stdevs = board["stdev"]
     out = board.copy()
     if conditional:
         out["p_available_next"] = [
-            _conditional_p_available_next(row.adp, row.stdev, pick, next_pick)
-            for row in board.itertuples()
+            _conditional_p_available_next(adp, stdev, pick, next_pick)
+            for adp, stdev in zip(adps, stdevs)
         ]
     else:
         out["p_available_next"] = [
-            p_available(row.adp, row.stdev, next_pick) for row in board.itertuples()
+            p_available(adp, stdev, next_pick) for adp, stdev in zip(adps, stdevs)
         ]
     out["p_gone_by_next"] = 1.0 - out["p_available_next"]
     return out
