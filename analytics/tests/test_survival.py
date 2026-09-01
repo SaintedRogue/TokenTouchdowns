@@ -134,3 +134,97 @@ def test_add_survival_rejects_a_next_pick_that_is_not_after_pick():
         add_survival(_board(), pick=20, next_pick=20)
     with pytest.raises(ValueError):
         add_survival(_board(), pick=20, next_pick=10)
+
+
+# --- conditional survival: P(available at next_pick | available at pick) ---
+#
+# The board only ever contains players observed to still be on it at `pick`
+# -- that is a fact about how a real draft board is built, not a modelling
+# assumption. Conditioning on that observation is the statistically correct
+# form: P(survive to next_pick | survive to pick) = P(survive to next_pick)
+# / P(survive to pick). Because next_pick is always later than pick, and
+# surviving to next_pick strictly implies having survived to pick, this
+# ratio is always >= the plain unconditioned P(survive to next_pick) -- the
+# fact that a player already outlasted their expected draft slot is itself
+# evidence they will keep outlasting it.
+
+
+def test_conditional_defaults_to_false_so_existing_behaviour_is_unchanged():
+    board = _board()
+    default = add_survival(board, pick=20, next_pick=30)
+    explicit_false = add_survival(board, pick=20, next_pick=30, conditional=False)
+    pd.testing.assert_frame_equal(default, explicit_false)
+
+
+def test_conditional_survival_matches_the_manual_ratio():
+    board = pd.DataFrame([
+        {"player_id": "mid", "position": "WR", "adp": 15.0, "stdev": 5.0},
+    ])
+    out = add_survival(board, pick=20, next_pick=30, conditional=True)
+    expected = p_available(15.0, 5.0, 30) / p_available(15.0, 5.0, 20)
+    assert out.iloc[0]["p_available_next"] == pytest.approx(expected)
+
+
+def test_conditional_survival_is_never_lower_than_unconditional():
+    # Conditioning on "already survived to pick" can only raise (or leave
+    # unchanged) the odds of surviving further -- never lower them.
+    board = pd.DataFrame([
+        {"player_id": "mid", "position": "WR", "adp": 15.0, "stdev": 5.0},
+    ])
+    unconditional = add_survival(board, pick=20, next_pick=30, conditional=False)
+    conditional = add_survival(board, pick=20, next_pick=30, conditional=True)
+    assert (
+        conditional.iloc[0]["p_available_next"]
+        >= unconditional.iloc[0]["p_available_next"]
+    )
+
+
+def test_conditional_survival_is_clipped_to_one_when_the_ratio_would_exceed_it():
+    # Floating-point edge cases in norm.sf can push the raw ratio a hair
+    # above 1.0; a probability can never exceed 1.0.
+    board = pd.DataFrame([
+        {"player_id": "certain", "position": "RB", "adp": 200.0, "stdev": 5.0},
+    ])
+    out = add_survival(board, pick=1, next_pick=2, conditional=True)
+    assert out.iloc[0]["p_available_next"] <= 1.0
+
+
+def test_conditional_survival_falls_back_to_unconditional_when_denominator_vanishes():
+    # Degenerate case: an elite player (adp=1) has, against all odds,
+    # fallen all the way to pick=100 -- P(available at pick=100) is
+    # numerically indistinguishable from zero. Dividing by that would
+    # produce a huge or NaN ratio with no real meaning: the Normal(adp,
+    # stdev) model has already been falsified for this player by the very
+    # fact he's still here, so trying to extract more signal from
+    # conditioning on that falsified model is not defensible. The chosen
+    # fallback is the plain UNCONDITIONED estimate -- the same, already
+    # -tested number `conditional=False` would produce -- rather than
+    # inventing a new constant or propagating inf/NaN downstream.
+    board = pd.DataFrame([
+        {"player_id": "fallen_star", "position": "RB", "adp": 1.0, "stdev": 1.0},
+    ])
+    conditional = add_survival(board, pick=100, next_pick=110, conditional=True)
+    unconditional_value = p_available(1.0, 1.0, 110)
+    assert conditional.iloc[0]["p_available_next"] == pytest.approx(unconditional_value)
+
+
+def test_conditional_survival_handles_a_no_adp_player_without_dividing_by_zero():
+    # p_available(no adp) is 1.0 regardless of pick (see module docstring),
+    # so the ratio is 1.0/1.0 -- not a degenerate case, just a clean 1.0.
+    board = pd.DataFrame([
+        {"player_id": "noadp", "position": "QB", "adp": float("nan"), "stdev": float("nan")},
+    ])
+    out = add_survival(board, pick=20, next_pick=30, conditional=True)
+    assert out.iloc[0]["p_available_next"] == 1.0
+
+
+def test_conditional_survival_handles_a_zero_stdev_player_past_their_adp():
+    # Step-function player (stdev=0) whose adp is already behind `pick`:
+    # denominator (p_available at pick) is exactly 0.0 -- must trigger the
+    # same fallback as the near-zero case above, not a raw division by
+    # exactly zero.
+    board = pd.DataFrame([
+        {"player_id": "stepfn", "position": "TE", "adp": 10.0, "stdev": 0.0},
+    ])
+    conditional = add_survival(board, pick=20, next_pick=30, conditional=True)
+    assert conditional.iloc[0]["p_available_next"] == 0.0
