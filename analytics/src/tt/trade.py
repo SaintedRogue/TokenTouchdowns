@@ -868,6 +868,7 @@ def find_trades(
     points_column: str = "proj_points",
     sd_column: str = "sd",
     id_column: str = "player_id",
+    drop_dominated: bool = True,
 ) -> pd.DataFrame:
     """Search for trades that raise MY championship probability, ranked --
     and report the counterparty's delta beside every one, because a trade
@@ -1100,10 +1101,16 @@ def find_trades(
             "screen_score": float(screen_score),
         })
 
-    result = pd.DataFrame(rows, columns=_FIND_COLUMNS)
-    result = result.sort_values(
-        "my_delta", ascending=False, kind="mergesort"
-    ).reset_index(drop=True)
+    kept = _drop_dominated(rows) if drop_dominated else list(rows)
+    result = pd.DataFrame(kept, columns=_FIND_COLUMNS)
+    # Ties broken toward the SMALLER package: when two candidates move the
+    # title identically, the one surrendering fewer players is strictly better
+    # in reality even though this model cannot see the difference.
+    if not result.empty:
+        result = result.assign(_n_give=result["gives"].map(len)).sort_values(
+            ["my_delta", "_n_give"], ascending=[False, True], kind="mergesort"
+        ).drop(columns="_n_give")
+    result = result.reset_index(drop=True)
     result.attrs.update({
         "n": n, "seed": seed,
         "monte_carlo_se": 0.5 / math.sqrt(n),
@@ -1112,8 +1119,65 @@ def find_trades(
         "screen_top": screen_top, "screen_mode": screen_mode,
         "candidates_enumerated": enumerated,
         "candidates_simulated": len(rows),
+        "candidates_dominated": len(rows) - len(kept),
+        "drop_dominated": drop_dominated,
     })
     return result
+
+
+def _drop_dominated(rows: list[dict]) -> list[dict]:
+    """Remove candidates that pay MORE for the SAME return.
+
+    Bench depth is priced at exactly zero by this model: a player who never
+    reaches the starting lineup in any simulated week contributes nothing, so
+    adding him to the give side of a package leaves the championship delta
+    bit-for-bit unchanged (common random numbers make the equality exact, not
+    approximate). The visible consequence is that `find_trades` will happily
+    surface `Jefferson + A.J. Brown -> Collins + Brown` beside the identical
+    `Jefferson -> Collins + Brown`, i.e. advise throwing a real asset in for
+    free. Advice that donates an asset for nothing is worse than no advice.
+
+    A candidate is DOMINATED when, against the SAME counterparty, it receives
+    exactly the same players while giving a strict SUPERSET, and gains nothing
+    measurable for the extra. Only the minimal package survives.
+
+    This does NOT fix the underlying zero-priced bench -- that needs the
+    lineup re-optimised inside every simulated week, which is a `season.py`
+    change and costs the runtime `season.py` exists to avoid. It stops a known
+    pricing gap from being rendered as a recommendation.
+
+    Dominance is about paying more for the same, NOT about package size: a
+    bigger package that earns a better delta is a real trade and survives.
+    """
+    keep: list[dict] = []
+    for row in rows:
+        gives = frozenset(row["gives"])
+        gets = frozenset(row["gets"])
+        dominated = False
+        for other in rows:
+            if other is row:
+                continue
+            if other["their_team"] != row["their_team"]:
+                continue  # a different team is a different trade, not a better one
+            if frozenset(other["gets"]) != gets:
+                continue
+            other_gives = frozenset(other["gives"])
+            if not other_gives < gives:
+                continue  # not a strict subset -- nothing to compare
+            # EXACT equality, not >=. Common random numbers make the two
+            # deltas bit-identical precisely when the extra player never
+            # reaches a starting lineup in any simulated world -- that exact
+            # tie IS the free-sweetener signature. A merely-worse larger
+            # package is a different trade with a real (if smaller) effect and
+            # is left for the caller to judge, so this filter stays surgical
+            # rather than pruning the candidate set on its own opinion.
+            if (other["my_delta"] == row["my_delta"]
+                    and other["their_delta"] == row["their_delta"]):
+                dominated = True
+                break
+        if not dominated:
+            keep.append(row)
+    return keep
 
 
 def _screen(

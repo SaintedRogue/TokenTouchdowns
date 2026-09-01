@@ -39,7 +39,7 @@ from scipy.stats import norm
 
 from tt.league import load_config_from_dict
 from tt.season import round_robin_schedule, simulate_season
-from tt.trade import apply_trade, evaluate_trade, find_trades
+from tt.trade import _drop_dominated, apply_trade, evaluate_trade, find_trades
 
 # A one-slot league: a team IS a single player, so every lineup decision
 # collapses and the arithmetic is hand-checkable. Same device as
@@ -713,7 +713,11 @@ def test_the_pairwise_screen_never_scores_below_the_additive_one():
     # screen demoted, never the reverse. Checked candidate by candidate
     # over a whole 2-for-2 enumeration, not just on the best row.
     rosters, schedule = _pathology_league()
-    common = dict(their_teams=["B"], max_give=2, max_get=2, screen_top=None, n=200)
+    # Compares the RAW candidate enumeration score-for-score, so it opts out
+    # of dominance filtering -- that filter is recommendation hygiene, not
+    # part of what the screen scores.
+    common = dict(their_teams=["B"], max_give=2, max_get=2, screen_top=None,
+                  n=200, drop_dominated=False)
     pairwise = _search(rosters, schedule, **common)
     additive = _search(rosters, schedule, screen_mode="additive", **common)
     key = ["their_team", "gives", "gets"]
@@ -726,7 +730,11 @@ def test_the_pairwise_screen_never_scores_below_the_additive_one():
 
 def test_every_candidate_respects_the_package_size_caps():
     rosters, schedule = _pathology_league()
-    found = _search(rosters, schedule, max_give=2, max_get=1, screen_top=4, n=500)
+    # Caps constrain what is ENUMERATED, so this asserts against the raw set;
+    # the dominance filter would legitimately remove every 2-player give in
+    # this fixture (the extra player is worthless to both sides).
+    found = _search(rosters, schedule, max_give=2, max_get=1, screen_top=4,
+                    n=500, drop_dominated=False)
     assert {len(row) for row in found["gives"]} <= {1, 2}
     assert {len(row) for row in found["gets"]} == {1}
     assert max(len(row) for row in found["gives"]) == 2
@@ -1026,8 +1034,10 @@ def test_the_default_screen_finds_the_mutual_package_the_additive_screen_missed(
     rosters, schedule = _interacting_package_league()
     common = dict(my_team="A", max_give=2, max_get=2, their_teams=["B"],
                   playoff_start_week=10, end_week=11, n=8_000, seed=404)
-    screened = find_trades(rosters, schedule, _QB_RB, screen_top=12, **common)
-    exhaustive = find_trades(rosters, schedule, _QB_RB, screen_top=None, **common)
+    screened = find_trades(
+        rosters, schedule, _QB_RB, screen_top=12, drop_dominated=False, **common)
+    exhaustive = find_trades(
+        rosters, schedule, _QB_RB, screen_top=None, drop_dominated=False, **common)
 
     assert exhaustive.attrs["candidates_simulated"] == 225
     assert int(exhaustive["mutual"].sum()) == 8
@@ -1045,3 +1055,97 @@ def test_the_default_screen_finds_the_mutual_package_the_additive_screen_missed(
     assert best["their_exp_points_delta"] == 1.0
     assert best["my_delta_ci_low"] > 0.0
     assert best["their_delta_ci_low"] > 0.0
+
+
+# --- a package must not carry a free sweetener -------------------------------
+
+
+def test_a_package_that_gives_more_for_the_same_return_is_dropped():
+    """Bench depth is priced at exactly zero, so surrendering a bench player
+    who never cracks the starting lineup costs the model NOTHING.
+
+    That is a modelling limitation with a sharp, user-visible consequence:
+    `Jefferson -> Collins + Brown` and `Jefferson + A.J. Brown -> Collins +
+    Brown` come back with deltas identical to the last digit (common random
+    numbers make them exactly equal when the extra player never starts), so
+    the tool cheerfully advises throwing A.J. Brown in for free. Advice that
+    gives away a real asset for nothing is worse than no advice.
+
+    A candidate is DOMINATED when, against the same counterparty, it returns
+    the same players for a strict superset of what another candidate gives,
+    and buys nothing for the extra. Those are dropped -- the minimal package
+    that achieves the delta is the one a human should see. This does not fix
+    the zero-priced bench (that needs re-optimising inside every simulated
+    week, a `season.py` change); it stops the pricing gap from becoming a
+    recommendation.
+    """
+    minimal = {"their_team": "t.2", "gives": ("star",), "gets": ("back",),
+               "my_delta": 0.0100, "their_delta": 0.0050}
+    sweetened = {"their_team": "t.2", "gives": ("star", "bench"), "gets": ("back",),
+                 "my_delta": 0.0100, "their_delta": 0.0050}
+    kept = _drop_dominated([minimal, sweetened])
+    assert kept == [minimal]
+
+
+def test_a_bigger_package_that_actually_buys_something_survives():
+    """Dominance is about paying MORE for the SAME, not about package size.
+    A package that gives an extra player and earns a materially better delta
+    is a real trade and must not be filtered away."""
+    small = {"their_team": "t.2", "gives": ("star",), "gets": ("back",),
+             "my_delta": 0.0100, "their_delta": 0.0050}
+    bigger = {"their_team": "t.2", "gives": ("star", "bench"), "gets": ("back",),
+              "my_delta": 0.0180, "their_delta": 0.0050}
+    assert _drop_dominated([small, bigger]) == [small, bigger]
+
+
+def test_dominance_does_not_reach_across_counterparties():
+    """Two different teams' offers are not comparable -- giving the same
+    players to a different team is a different trade, not a worse version of
+    the same one."""
+    a = {"their_team": "t.2", "gives": ("star",), "gets": ("back",),
+         "my_delta": 0.0100, "their_delta": 0.0050}
+    b = {"their_team": "t.3", "gives": ("star", "bench"), "gets": ("back",),
+         "my_delta": 0.0100, "their_delta": 0.0050}
+    assert _drop_dominated([a, b]) == [a, b]
+
+
+def test_a_bigger_package_that_is_merely_worse_is_not_filtered_away():
+    """Dominance is EXACT-tie-only, and that boundary is load-bearing.
+
+    An earlier draft of this filter used `>=`, which also discards a larger
+    package whose delta is merely LOWER. That is a different claim: a package
+    that gives more and earns less is a real trade with a real (smaller)
+    effect, and suppressing it silently narrows the candidate set on the
+    filter's own opinion rather than removing a known-free giveaway. Only the
+    exact tie is the common-random-numbers signature of a player who never
+    started in any simulated world.
+    """
+    smaller = {"their_team": "t.2", "gives": ("star",), "gets": ("back",),
+               "my_delta": 0.0100, "their_delta": 0.0050}
+    worse = {"their_team": "t.2", "gives": ("star", "bench"), "gets": ("back",),
+             "my_delta": 0.0090, "their_delta": 0.0050}
+    assert _drop_dominated([smaller, worse]) == [smaller, worse]
+
+
+def test_dominance_needs_a_strictly_smaller_give_not_an_equal_one():
+    """Two candidates giving exactly the same players do not dominate each
+    other -- with a non-strict subset test they would each qualify as the
+    other's smaller package and both could be discarded, deleting a real
+    trade rather than a redundant one."""
+    a = {"their_team": "t.2", "gives": ("star",), "gets": ("back",),
+         "my_delta": 0.0100, "their_delta": 0.0050}
+    b = dict(a)
+    assert _drop_dominated([a, b]) == [a, b]
+
+
+def test_find_trades_filters_free_sweeteners_by_default():
+    """The filter must be ON by default -- the whole point is that a user who
+    passes no flags is not handed advice to donate an asset. Pins the DEFAULT,
+    which the `_drop_dominated` unit tests above cannot see."""
+    rosters, schedule = _pathology_league()
+    found = _search(rosters, schedule, max_give=2, max_get=1, screen_top=4, n=500)
+    assert found.attrs["drop_dominated"] is True
+    assert found.attrs["candidates_dominated"] > 0, \
+        "fixture must contain at least one free-sweetener package to filter"
+    # And the filtering actually reached the returned frame.
+    assert len(found) == found.attrs["candidates_simulated"] - found.attrs["candidates_dominated"]
