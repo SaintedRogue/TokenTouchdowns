@@ -35,14 +35,17 @@ export function formatTable(rows, columns) {
   ].join('\n');
 }
 
+import { writeFile, readFile } from 'node:fs/promises';
 import { SessionExpiredError, YahooApiError } from './client.js';
 import {
   SOURCES, sourcesProviding, recordsOf, metaOf, feedVariantLabel,
 } from './sources/index.js';
 import { SCORING_FORMATS } from './sources/ffc.js';
 import { readCache, writeCache } from './cache.js';
-import { buildCrosswalk, buildAdpIndex } from './identity.js';
+import { buildCrosswalk, buildAdpIndex, matchAdp, lookupByYahooKey } from './identity.js';
 import { enrichPlayers, IMPLEMENTED_CAPABILITIES } from './enrich.js';
+import { createAnalyticsClient, AnalyticsError, DEFAULT_ANALYTICS_DIR } from './analytics.js';
+import path from 'node:path';
 
 /**
  * The user's input was invalid -- distinct from a Yahoo-side failure. A typo
@@ -68,7 +71,21 @@ Commands:
   players [league_key]   Browse the player pool
   sync                   Refresh cached external data (ADP, injury, ...)
   sources                List registered external data sources
+  league export [key]    Export scoring/roster settings for the draft engine
+  draft board            Ranked draft board (VOR, tier, ADP, survival)
+  draft pick              What to take right now
+  mock                   Simulate and compare draft strategies
+  lineup                 Optimal lineup for this week
+  playoff                Variance-aware lineup vs. an opponent
   help                   Show this message
+
+Draft engine flags (analytics/data/league.json + nflverse parquet required):
+  --teams=N  --slot=K  --season=YYYY  --conditional
+  draft board [--teams N] [--slot K] [--count N]
+  draft pick  [--roster PATH] --slot K [--round N] [--rounds N]
+  mock [--trials N] [--teams N] [--strategy adp,vor,vor_survival] [--rounds N]
+  lineup [--week N]
+  playoff [--week N] [--opponent team_key_or_name]
 
 Player filters:
   --position=QB  --status=A  --search=kelce  --count=25  --sort=OR
@@ -84,6 +101,9 @@ Sync flags:
   ADP is published per scoring format and league size; the two flags above
   select which board --with=adp shows, and the format is labelled in the
   footer so an unlabelled number can never be read as the wrong one.
+
+League export flags:
+  --out=PATH   Write the config to a file instead of stdout
 
 Omitted keys are resolved from your own leagues and team.`;
 
@@ -318,6 +338,232 @@ async function tryEnrich(players, caps, { cacheDir, err }) {
   }
 }
 
+/**
+ * Parse an integer-valued flag (`--teams=4`), or `undefined` if the flag
+ * was never given. A BARE flag (`--teams` with no `=value`, which
+ * `parseArgs` reads as the boolean `true`) and a non-integer value are both
+ * usage errors, not silently coerced to `NaN` or `1` -- a typo in a numeric
+ * draft-engine flag (wrong team count, wrong slot) produces a wrong board
+ * or a wrong pick, not a crash Python would have to explain instead.
+ */
+export function intFlag(flags, name) {
+  const v = flags?.[name];
+  if (v === undefined) return undefined;
+  if (v === true) throw new UsageError(`--${name} needs a value, e.g. --${name}=4`);
+  const n = Number(v);
+  if (!Number.isInteger(n)) {
+    throw new UsageError(`--${name} must be a whole number (got "${v}")`);
+  }
+  return n;
+}
+
+/** Two-decimal rounding for display -- the analytics engine's Monte Carlo
+ * floats carry far more precision than a draft board needs to read. Passes
+ * through anything that isn't a number (null, undefined, a string) so a
+ * missing value renders as the table's own "-" rather than "NaN". */
+export function round2(n) {
+  return typeof n === 'number' ? Math.round(n * 100) / 100 : n;
+}
+
+/** A probability as a whole-number percentage, or '-' when absent. */
+export function pct(n) {
+  return typeof n === 'number' ? `${Math.round(n * 100)}%` : '-';
+}
+
+/**
+ * `--roster=PATH` for `draft pick`: the user's own JSON file tracking what
+ * they've drafted so far THIS draft night. Node has no live source for this
+ * (unlike `lineup`/`playoff`'s season roster, an in-progress live draft
+ * isn't something the Yahoo roster endpoint tracks) -- see src/analytics.js
+ * and analytics/src/tt/cli.py's module docstrings for the full reasoning.
+ * A bare `--roster` (no path) and an unreadable/malformed file are both
+ * usage errors: a typo'd path must never silently draft as though nothing
+ * had been picked yet.
+ */
+async function readRosterFile(flagValue) {
+  if (flagValue === undefined) return [];
+  if (flagValue === true) throw new UsageError('--roster needs a file path, e.g. --roster=my-draft.json');
+  let raw;
+  try {
+    raw = await readFile(flagValue, 'utf8');
+  } catch (e) {
+    throw new UsageError(`Could not read --roster file "${flagValue}": ${e.message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new UsageError(`--roster file "${flagValue}" is not valid JSON: ${e.message}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new UsageError(`--roster file "${flagValue}" must contain a JSON array of drafted players`);
+  }
+  return parsed;
+}
+
+/**
+ * The nflverse roster export `analytics/scripts/export_nflverse_roster.py`
+ * writes (gitignored; the script must be run to produce it). Used ONLY as
+ * a name+position+team fallback index -- see `resolveRosterIdentity` below.
+ */
+export const DEFAULT_NFLVERSE_ROSTER_PATH = path.join(DEFAULT_ANALYTICS_DIR, 'data', 'nflverse_players.json');
+
+// Memoised per path within one process: `playoff` resolves two rosters
+// (mine, theirs) in the same run and would otherwise read and re-index this
+// ~1,850-row file twice for no reason. The underlying file is static
+// per-invocation (nothing in this process writes it), so caching it for the
+// lifetime of the process is safe.
+const _nflverseIndexCache = new Map();
+
+async function loadNflverseIndex(rosterPath) {
+  if (_nflverseIndexCache.has(rosterPath)) return _nflverseIndexCache.get(rosterPath);
+  let index;
+  try {
+    const records = JSON.parse(await readFile(rosterPath, 'utf8'));
+    index = buildAdpIndex(records);
+  } catch {
+    // Missing/corrupt file (e.g. export_nflverse_roster.py hasn't been run
+    // yet) degrades to "no fallback available" -- resolveRosterIdentity
+    // still works with just the Sleeper gsis_id pass, exactly as it did
+    // before this fallback existed. Never a hard failure over an optional
+    // enrichment source, same principle as tryEnrich's cache handling above.
+    index = buildAdpIndex([]);
+  }
+  _nflverseIndexCache.set(rosterPath, index);
+  return index;
+}
+
+/**
+ * Resolve a Yahoo roster to the nflverse `player_id` the analytics engine
+ * projects against.
+ *
+ * PASS 1: the tested crosswalk `--with=adp,injury` already uses
+ * (`buildCrosswalk` + `lookupByYahooKey`, joined through the cached Sleeper
+ * payload's `gsis_id` -- see src/identity.js). Deliberately NOT a new join.
+ *
+ * PASS 2 (fallback): Sleeper's own `gsis_id` field has REAL, MEASURED gaps
+ * for exactly the players a real roster cares about most -- checked live
+ * against this project's own cached Sleeper payload and a real Yahoo
+ * league's player pool 2026-09-01: Sleeper-gsis_id alone resolved only
+ * 19% (38/200), because star players like Ja'Marr Chase, Bijan Robinson,
+ * Puka Nacua and Jahmyr Gibbs carry `gsis_id: null` in Sleeper's feed (the
+ * exact gap `analytics/scripts/build_ffc_crosswalk.mjs`'s own module
+ * docstring documents for the ADP crosswalk). This is the SAME gap, hit a
+ * second time on a different data path. Rather than inventing a new
+ * matcher, pass 2 reuses the IDENTICAL tested `buildAdpIndex`/`matchAdp`
+ * (src/identity.js) against nflverse's own roster export
+ * (`DEFAULT_NFLVERSE_ROSTER_PATH`) -- the exact second-pass technique
+ * `build_ffc_crosswalk.mjs` already uses for the ADP crosswalk, applied
+ * here to Yahoo names instead of FFC names. Combined, the two passes
+ * resolved 170/200 (85%) of that same real player pool -- the residue is
+ * almost entirely 2025-rookie-class players not yet in the historical
+ * nflverse export, and team defenses (which never match by name at all,
+ * by `buildAdpIndex`'s own design -- see that module's docstring -- and
+ * which this engine does not project regardless, see `projections.
+ * PROJECTABLE_POSITIONS`).
+ *
+ * A player neither pass can resolve gets `player_id: null` and is added to
+ * `unresolved` -- carried through to the analytics engine rather than
+ * dropped, so `lineup.optimal_lineup`'s own NaN-points handling benches
+ * them visibly instead of a roster spot silently vanishing.
+ */
+async function resolveRosterIdentity(players, { cacheDir, err, nflverseRosterPath = DEFAULT_NFLVERSE_ROSTER_PATH }) {
+  const cached = await readCache('sleeper', { dir: cacheDir, ttlHours: ttlFor('sleeper') });
+  if (!cached) err.write('Identity cache is empty for: sleeper. Run: tt sync\n');
+  const crosswalk = buildCrosswalk(cached ? recordsOf(cached.data) : []);
+  const nflverseIndex = await loadNflverseIndex(nflverseRosterPath);
+
+  const roster = [];
+  const unresolved = [];
+  for (const p of players ?? []) {
+    const xw = lookupByYahooKey(crosswalk, p.player_key);
+    let playerId = xw?.gsisId ?? null;
+    const name = p.name?.full ?? '(unknown player)';
+    if (!playerId) {
+      const fallback = matchAdp(nflverseIndex, {
+        name, position: p.display_position, team: p.editorial_team_abbr ?? xw?.team,
+      });
+      if (fallback?.playerId) playerId = fallback.playerId;
+    }
+    if (!playerId) unresolved.push(name);
+    roster.push({ player_id: playerId, name, position: p.display_position });
+  }
+  return { roster, total: (players ?? []).length, matched: (players ?? []).length - unresolved.length, unresolved };
+}
+
+/** Match-rate footer for lineup/playoff, mirroring writeEnrichmentFooter's
+ * "never under --json" rule. Also names every unresolved player -- spec:
+ * "name any roster player that could not be resolved rather than silently
+ * dropping them." */
+function writeIdentityFooter(out, identity, flags) {
+  if (flags?.json) return;
+  out.write(`identity: ${identity.matched} matched, ${identity.unresolved.length} unresolved (of ${identity.total})\n`);
+  if (identity.unresolved.length > 0) out.write(`Unresolved: ${identity.unresolved.join(', ')}\n`);
+}
+
+/** Names players the analytics engine itself could not project (a resolved
+ * id with no data, e.g. K/DEF, or one Node passed through unresolved) --
+ * distinct from `writeIdentityFooter`'s crosswalk-specific reporting, since
+ * a resolved player can still have no projection. */
+function writeUnprojectedFooter(out, names, flags, label) {
+  if (flags?.json || !names || names.length === 0) return;
+  out.write(`${label}: ${names.join(', ')}\n`);
+}
+
+/** Roster entries that are not lineup slots. */
+const NON_STARTING_SLOTS = new Set(['BN', 'IR']);
+
+/**
+ * Derive the parameters a draft engine needs from a league's own settings.
+ *
+ * Reading these rather than hardcoding them is what keeps the engine usable in
+ * any league -- and replacement level, which every VOR number depends on, is a
+ * direct function of `rosterSlots` and `numTeams`.
+ */
+export function leagueConfig(league) {
+  const s = league.settings;
+  const slots = {};
+  for (const p of s.roster_positions ?? []) {
+    if (p.is_starting_position === 1 && !NON_STARTING_SLOTS.has(p.position)) {
+      slots[p.position] = Number(p.count);
+    }
+  }
+  // stat_modifiers carries values keyed by stat_id; stat_categories carries
+  // the human name and group. Neither is useful without the other -- and the
+  // join key MUST be stat_id, not display_name: Yahoo reuses display names
+  // across unrelated stats (e.g. stat_id 6 "Interceptions"/passing, an
+  // individual QB's picks thrown, modifier -1; and stat_id 33
+  // "Interception"/def_turnovers, a defense's takeaways, modifier +2 -- both
+  // display as "Int"). A name-keyed dict can only hold one of a colliding
+  // pair and silently drops or overwrites the other; stat_id is the field
+  // Yahoo itself treats as unique, so keying the export by it keeps both.
+  // `name`/`group` ride along for human readability only, never as keys.
+  // Every modifier with a matching category is emitted -- filtering to a
+  // subset (e.g. offense-only) is a downstream concern, not this export's.
+  const categories = new Map(
+    (s.stat_categories?.stats ?? []).map((c) => [String(c.stat_id), c]));
+  const scoring = [];
+  for (const m of s.stat_modifiers?.stats ?? []) {
+    const category = categories.get(String(m.stat_id));
+    if (!category) continue; // a modifier with no matching category can't be labelled
+    scoring.push({
+      statId: Number(m.stat_id),
+      name: category.display_name,
+      group: category.group,
+      value: Number(m.value),
+    });
+  }
+  return {
+    leagueKey: league.league_key,
+    name: league.name,
+    numTeams: Number(league.num_teams),
+    maxTeams: Number(league.max_teams),
+    draftStatus: league.draft_status,
+    rosterSlots: slots,
+    scoring,
+  };
+}
+
 /** The team the logged-in user owns in a league. */
 async function myTeamKey(client, leagueKey) {
   const { league } = await client.get(`league/${leagueKey}/teams`);
@@ -348,6 +594,15 @@ export async function runCommand(
     // directory and stub the network, without touching the real
     // ~/.tokentouchdowns/cache or making live requests.
     cacheDir = undefined, fetch: fetchImpl = globalThis.fetch,
+    // Injectable the same way `client` is: production gets a real client
+    // that spawns analytics/.venv/bin/python; tests always supply a fake
+    // `{ run() {...} }` so no test ever shells out to a real Python process
+    // (see src/analytics.js and test/cli.test.js's fakeAnalytics).
+    analytics = createAnalyticsClient(),
+    // Injectable so tests point identity resolution's nflverse-name
+    // fallback at a small fixture instead of the real (large, gitignored)
+    // analytics/data/nflverse_players.json -- see resolveRosterIdentity.
+    nflverseRosterPath = DEFAULT_NFLVERSE_ROSTER_PATH,
   } = {},
 ) {
   const emit = (rows, columns) => {
@@ -496,6 +751,30 @@ export async function runCommand(
         return 0;
       }
 
+      case 'league': {
+        const sub = args[0];
+        if (sub !== 'export') {
+          throw new UsageError(
+            `Unknown league subcommand "${sub ?? ''}". Usage: league export [league_key] [--out=PATH]`);
+        }
+        // Deliberately `myLeagues` directly, not `resolveLeagueKey`: the
+        // latter throws when none are found, so an account with no
+        // discoverable leagues still reaches the settings request below and
+        // surfaces Yahoo's own error for a missing key, instead of a
+        // resolution step masking it with a less specific one.
+        const key = flags.league ?? args[1] ?? (await myLeagues(client))[0]?.league_key;
+        const { league } = await client.get(`league/${key}/settings`);
+        const cfg = leagueConfig(league);
+        const json = `${JSON.stringify(cfg, null, 2)}\n`;
+        if (flags.out && flags.out !== true) {
+          await writeFile(flags.out, json);
+          out.write(`Wrote ${flags.out}\n`);
+        } else {
+          out.write(json);
+        }
+        return 0;
+      }
+
       case 'sync': {
         // Record counts only -- sync has no Yahoo player list to compute a
         // match rate against, and any denominator it invented here would be
@@ -596,11 +875,199 @@ export async function runCommand(
         return 0;
       }
 
+      case 'draft': {
+        const sub = args[0];
+        if (sub === 'board') {
+          const payload = await analytics.run('board', {
+            flags: {
+              teams: intFlag(flags, 'teams'),
+              slot: intFlag(flags, 'slot'),
+              count: intFlag(flags, 'count'),
+              conditional: flags.conditional === true,
+            },
+          });
+          if (flags?.json) {
+            out.write(`${JSON.stringify(payload, null, 2)}\n`);
+            return 0;
+          }
+          const hasSurvival = payload.slot != null;
+          const rows = (payload.players ?? []).map((p) => ({
+            name: p.name, pos: p.position, proj: round2(p.proj_points),
+            vor: round2(p.vor), tier: p.tier,
+            adp: p.adp == null ? '-' : round2(p.adp),
+            ...(hasSurvival ? { gone: pct(p.p_gone_by_next) } : {}),
+          }));
+          out.write(`${formatTable(rows, [
+            { key: 'name', label: 'PLAYER' }, { key: 'pos', label: 'POS' },
+            { key: 'proj', label: 'PROJ' }, { key: 'vor', label: 'VOR' },
+            { key: 'tier', label: 'TIER' }, { key: 'adp', label: 'ADP' },
+            ...(hasSurvival ? [{ key: 'gone', label: 'P(GONE)' }] : []),
+          ])}\n`);
+          const slotNote = payload.slot ? `, slot ${payload.slot}` : '';
+          const adpNote = payload.adp_source ? `adp: ${payload.adp_source}` : 'adp: none (VOR-only board)';
+          out.write(`Season ${payload.season}, ${payload.teams} teams${slotNote} | ${adpNote}\n`);
+          return 0;
+        }
+        if (sub === 'pick') {
+          const roster = await readRosterFile(flags.roster);
+          const payload = await analytics.run('pick', {
+            flags: {
+              teams: intFlag(flags, 'teams'),
+              slot: intFlag(flags, 'slot'),
+              round: intFlag(flags, 'round'),
+              rounds: intFlag(flags, 'rounds'),
+              n: intFlag(flags, 'n'),
+              conditional: flags.conditional === true,
+            },
+            stdin: { roster },
+          });
+          if (flags?.json) {
+            out.write(`${JSON.stringify(payload, null, 2)}\n`);
+            return 0;
+          }
+          const rows = (payload.recommendations ?? []).map((p) => ({
+            name: p.name, pos: p.position, vor: round2(p.vor),
+            gone: pct(p.p_gone_by_next), loss: round2(p.expected_loss),
+          }));
+          out.write(`${formatTable(rows, [
+            { key: 'name', label: 'PLAYER' }, { key: 'pos', label: 'POS' },
+            { key: 'vor', label: 'VOR' }, { key: 'gone', label: 'P(GONE)' },
+            { key: 'loss', label: 'EXP LOSS' },
+          ])}\n`);
+          out.write(`Pick ${payload.pick} (your next: ${payload.next_pick})\n`);
+          return 0;
+        }
+        throw new UsageError(
+          `Unknown draft subcommand "${sub ?? ''}". Usage: ` +
+          'draft board [--teams N] [--slot K] | draft pick [--roster PATH] --slot K',
+        );
+      }
+
+      case 'mock': {
+        const payload = await analytics.run('mock', {
+          flags: {
+            teams: intFlag(flags, 'teams'),
+            slot: intFlag(flags, 'slot'),
+            trials: intFlag(flags, 'trials'),
+            rounds: intFlag(flags, 'rounds'),
+            strategy: flags.strategy === true
+              ? (() => { throw new UsageError('--strategy needs a value, e.g. --strategy=adp,vor'); })()
+              : flags.strategy,
+          },
+        });
+        if (flags?.json) {
+          out.write(`${JSON.stringify(payload, null, 2)}\n`);
+          return 0;
+        }
+        const rows = (payload.strategies ?? []).map((s) => ({
+          strategy: s.strategy, trials: s.trials, mean: round2(s.mean_score),
+          std: round2(s.std_score), ci95: `[${round2(s.ci95_low)}, ${round2(s.ci95_high)}]`,
+        }));
+        out.write(`${formatTable(rows, [
+          { key: 'strategy', label: 'STRATEGY' }, { key: 'trials', label: 'TRIALS' },
+          { key: 'mean', label: 'MEAN' }, { key: 'std', label: 'STD' }, { key: 'ci95', label: 'CI95' },
+        ])}\n`);
+        if (payload.note) out.write(`${payload.note}\n`);
+        return 0;
+      }
+
+      case 'lineup': {
+        const leagueKey = await resolveLeagueKey(client, flags.league);
+        const teamKey = flags.team && flags.team !== true ? flags.team : await myTeamKey(client, leagueKey);
+        const { team } = await client.get(buildRosterResource(teamKey, flags));
+        const identity = await resolveRosterIdentity(team.roster?.players ?? [], { cacheDir, err, nflverseRosterPath });
+        const payload = await analytics.run('lineup', {
+          flags: { week: intFlag(flags, 'week') },
+          stdin: { roster: identity.roster },
+        });
+        if (flags?.json) {
+          out.write(`${JSON.stringify(payload, null, 2)}\n`);
+          return 0;
+        }
+        out.write(`Week ${payload.week ?? '(current)'}\n`);
+        const rows = (payload.lineup ?? []).filter((r) => r.starter).map((r) => ({
+          slot: r.slot, name: r.empty ? '(empty)' : (r.name ?? '-'),
+          pos: r.position ?? '-',
+          proj: r.empty || r.proj_points == null ? '-' : round2(r.proj_points),
+        }));
+        out.write(`${formatTable(rows, [
+          { key: 'slot', label: 'SLOT' }, { key: 'name', label: 'PLAYER' },
+          { key: 'pos', label: 'POS' }, { key: 'proj', label: 'PROJ' },
+        ])}\n`);
+        writeIdentityFooter(out, identity, flags);
+        writeUnprojectedFooter(out, payload.unprojected_players, flags,
+          'No projection available (e.g. K/DEF are not modelled)');
+        return 0;
+      }
+
+      case 'playoff': {
+        const week = intFlag(flags, 'week');
+        const leagueKey = await resolveLeagueKey(client, flags.league);
+        const teamKey = flags.team && flags.team !== true ? flags.team : await myTeamKey(client, leagueKey);
+        const { team } = await client.get(`team/${teamKey}/matchups`);
+        const matchups = team.matchups ?? [];
+        const found = week
+          ? matchups.find((m) => String(m.week) === String(week))
+          : matchups.find((m) => m.status !== 'postevent') ?? matchups[0];
+        if (!found) throw new UsageError(`No matchup found for week ${week ?? '(current)'}`);
+
+        const teamsInMatchup = found.teams ?? [];
+        let opponentTeam;
+        if (flags.opponent && flags.opponent !== true) {
+          const needle = String(flags.opponent).toLowerCase();
+          opponentTeam = teamsInMatchup.find((t) =>
+            t.team_key === flags.opponent || (t.name ?? '').toLowerCase().includes(needle));
+          if (!opponentTeam) {
+            throw new UsageError(
+              `Could not find an opponent matching "${flags.opponent}" in week ${found.week}'s matchup`);
+          }
+        } else {
+          opponentTeam = teamsInMatchup.find((t) => t.is_owned_by_current_login !== 1);
+          if (!opponentTeam) throw new UsageError(`Could not find an opponent for week ${found.week}'s matchup`);
+        }
+
+        const [{ team: myTeam }, { team: oppTeam }] = await Promise.all([
+          client.get(buildRosterResource(teamKey, { ...flags, week: found.week })),
+          client.get(buildRosterResource(opponentTeam.team_key, { ...flags, week: found.week })),
+        ]);
+        const mine = await resolveRosterIdentity(myTeam.roster?.players ?? [], { cacheDir, err, nflverseRosterPath });
+        const theirs = await resolveRosterIdentity(oppTeam.roster?.players ?? [], { cacheDir, err, nflverseRosterPath });
+
+        const payload = await analytics.run('playoff', {
+          flags: { week: found.week },
+          stdin: { roster: mine.roster, opponent_roster: theirs.roster },
+        });
+        if (flags?.json) {
+          out.write(`${JSON.stringify(payload, null, 2)}\n`);
+          return 0;
+        }
+        out.write(`Week ${payload.week} vs ${opponentTeam.name}\n`);
+        const rows = (payload.lineup ?? []).filter((r) => r.starter).map((r) => ({
+          slot: r.slot, name: r.empty ? '(empty)' : (r.name ?? '-'),
+          pos: r.position ?? '-',
+          proj: r.empty || r.proj_points == null ? '-' : round2(r.proj_points),
+        }));
+        out.write(`${formatTable(rows, [
+          { key: 'slot', label: 'SLOT' }, { key: 'name', label: 'PLAYER' },
+          { key: 'pos', label: 'POS' }, { key: 'proj', label: 'PROJ' },
+        ])}\n`);
+        out.write(`Win probability: ${pct(payload.win_probability)} ` +
+          `(expected-points lineup would be ${pct(payload.expected_points_lineup_win_probability)})\n`);
+        writeIdentityFooter(out, mine, flags);
+        writeUnprojectedFooter(out, payload.unprojected_players, flags,
+          'No projection available (e.g. K/DEF are not modelled)');
+        return 0;
+      }
+
       default:
         err.write(`Unknown command: ${command}\n\n${USAGE}\n`);
         return 1;
     }
   } catch (e) {
+    if (e instanceof AnalyticsError) {
+      err.write(`${e.message}\n`);
+      return 4;
+    }
     if (e instanceof SessionExpiredError) {
       // Design doc §9.1: only auto-launch a browser where a human can use it.
       err.write(

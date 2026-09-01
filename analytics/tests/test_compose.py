@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from tt.models.compose import simulate_points, summarise
+from tt.models.compose import TD_POINTS, YARDS_POINT, simulate_components, simulate_points, summarise
 
 
 def test_simulate_points_returns_the_requested_sample_count():
@@ -66,3 +66,28 @@ def test_mean_is_preserved_across_efficiency_spread():
     loose = simulate_points(volume=10.0, eff_rate=4.0, td_rate=0.0, n=40000, seed=6, yards_cv=1.5)
     assert tight.mean() == pytest.approx(loose.mean(), rel=0.05)
     assert loose.std() > tight.std()
+
+
+def test_simulate_components_is_deterministic_for_a_fixed_seed():
+    a = simulate_components(volume=10.0, eff_rate=4.0, td_rate=0.05, n=200, seed=7)
+    b = simulate_components(volume=10.0, eff_rate=4.0, td_rate=0.05, n=200, seed=7)
+    for got, expected in zip(a, b):
+        assert np.array_equal(got, expected)
+
+
+def test_simulate_components_returns_three_arrays_of_the_requested_length():
+    opportunities, yards, tds = simulate_components(volume=10.0, eff_rate=4.0, td_rate=0.05, n=500, seed=1)
+    assert len(opportunities) == 500
+    assert len(yards) == 500
+    assert len(tds) == 500
+
+
+def test_simulate_points_equals_weighted_components_from_the_same_seed():
+    # simulate_points is a thin wrapper over simulate_components applying
+    # this module's fixed YARDS_POINT/TD_POINTS conversion -- pins that
+    # relationship directly, so a future refactor that lets the two drift
+    # apart (e.g. reordering draws in one but not the other) fails loudly.
+    _, yards, tds = simulate_components(volume=10.0, eff_rate=4.0, td_rate=0.05, n=300, seed=3)
+    points = simulate_points(volume=10.0, eff_rate=4.0, td_rate=0.05, n=300, seed=3)
+    expected = yards * YARDS_POINT + tds * TD_POINTS
+    assert np.array_equal(points, expected)

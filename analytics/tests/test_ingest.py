@@ -105,8 +105,10 @@ def test_load_seasons_concatenates_two_seasons(tmp_path):
     data_dir.mkdir()
 
     # Create two small parquet files with real pandas.
-    df1 = pd.DataFrame({"player_id": [1, 2], "season": [2024, 2024], "week": [1, 1]})
-    df2 = pd.DataFrame({"player_id": [3, 4], "season": [2025, 2025], "week": [1, 1]})
+    df1 = pd.DataFrame({"player_id": [1, 2], "season": [2024, 2024], "week": [1, 1],
+                       "season_type": ["REG", "REG"]})
+    df2 = pd.DataFrame({"player_id": [3, 4], "season": [2025, 2025], "week": [1, 1],
+                       "season_type": ["REG", "REG"]})
 
     def fake_fetch(url):
         # Return different dataframes based on which season is in the URL.
@@ -128,8 +130,10 @@ def test_load_seasons_produces_clean_index(tmp_path):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    df1 = pd.DataFrame({"player_id": [1, 2], "season": [2024, 2024]}, index=[10, 11])
-    df2 = pd.DataFrame({"player_id": [3, 4], "season": [2025, 2025]}, index=[20, 21])
+    df1 = pd.DataFrame({"player_id": [1, 2], "season": [2024, 2024],
+                       "season_type": ["REG", "REG"]}, index=[10, 11])
+    df2 = pd.DataFrame({"player_id": [3, 4], "season": [2025, 2025],
+                       "season_type": ["REG", "REG"]}, index=[20, 21])
 
     def fake_fetch(url):
         if "2024" in url:
@@ -165,9 +169,28 @@ def test_load_seasons_respects_injected_fetch(tmp_path):
 
     def fake_fetch(url):
         calls.append(url)
-        df = pd.DataFrame({"player_id": [1], "season": [2025], "week": [1]})
+        df = pd.DataFrame({"player_id": [1], "season": [2025], "week": [1],
+                           "season_type": ["REG"]})
         return df.to_parquet()
 
     load_seasons("stats_player", [2025], data_dir, fetch=fake_fetch)
     # Verify fetch was called (no network request was made).
     assert len(calls) > 0
+
+
+def test_load_seasons_rejects_a_stats_player_asset_with_no_season_type(tmp_path):
+    """The nflverse per-week player asset carries REG and POST rows; every
+    consumer filters on `season_type` (see projections.regular_season). An
+    asset that stopped carrying it would mean the release layout changed --
+    which this module's whole "pinned, not discovered" contract says must
+    fail loudly rather than silently mixing playoff rows into a
+    regular-season average."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    df = pd.DataFrame({"player_id": [1, 2], "season": [2025, 2025], "week": [1, 2]})
+
+    def fake_fetch(url):
+        return df.to_parquet()
+
+    with pytest.raises(ValueError, match="season_type"):
+        load_seasons("stats_player", [2025], data_dir, fetch=fake_fetch)

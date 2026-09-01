@@ -6,11 +6,17 @@ import { loadCookieHeader, login, isInteractive } from '../src/session.js';
 const parsed = parseArgs(process.argv.slice(2));
 const interactive = isInteractive();
 
-// Commands that need no API client.
+// Commands that need no API client. `draft board`/`draft pick`/`mock` are
+// pure analytics (docs/draft-engine-design.md §4) -- they never call
+// `client.get` at all, so building one here (which launches a headless
+// browser just to read cookies) would make an offline-capable command
+// pointlessly depend on a Yahoo session existing at all.
 if (parsed.command === 'help') process.exit(await runCommand(parsed, {}));
 if (parsed.command === 'login') process.exit((await login()) ? 0 : 1);
 if (parsed.command === 'sources') process.exit(await runCommand(parsed, {}));
 if (parsed.command === 'sync') process.exit(await runCommand(parsed, {}));
+if (parsed.command === 'mock') process.exit(await runCommand(parsed, {}));
+if (parsed.command === 'draft') process.exit(await runCommand(parsed, {}));
 
 const makeClient = async () => createClient({ cookieHeader: await loadCookieHeader() });
 
