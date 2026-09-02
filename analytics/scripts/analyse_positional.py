@@ -190,13 +190,100 @@ def cliff_table() -> None:
               + ", ".join(f"{k}={v:.0f}" for k, v in proj.items()))
 
 
+def summary_table() -> None:
+    """The headline Q3 table: every arm's delta vs BPA in all 12 cells, with
+    how many of them were significant wins and significant losses.
+
+    "Significant" is the project's own conservative rule -- the arm's 95%
+    trial CI does not overlap BPA's in that cell. It is roughly twice as
+    strict as a paired test on the same common random numbers, so it
+    under-claims. Sign consistency across 12 independent-ish cells is the
+    other half of the evidence and is reported beside it.
+    """
+    scores = pd.read_csv(CACHE / "positional_scores.csv")
+    rows = []
+    for (season, teams), cell in scores.groupby(["season", "teams"]):
+        base = cell[cell.strategy == "bpa"].iloc[0]
+        for _, row in cell.iterrows():
+            overlap = not (row.ci95_low > base.ci95_high or row.ci95_high < base.ci95_low)
+            rows.append({
+                "season": season, "teams": teams, "arm": row.strategy,
+                "delta": row.mean_score - base.mean_score,
+                "sig": (not overlap) and row.strategy != "bpa",
+            })
+    deltas = pd.DataFrame(rows)
+
+    print("\n########## Q3 HEADLINE: delta vs BPA, every cell ##########")
+    grid = deltas.pivot_table(index="arm", columns=["teams", "season"], values="delta")
+    print(grid.round(1).to_string())
+
+    print("\n########## Q3 HEADLINE: pooled ##########")
+    out = []
+    for arm, group in deltas.groupby("arm"):
+        wins = group[(group.delta > 0) & group.sig]
+        losses = group[(group.delta < 0) & group.sig]
+        out.append({
+            "arm": arm, "mean_delta": group.delta.mean(),
+            "cells_positive": f"{int((group.delta > 0).sum())}/{len(group)}",
+            "sig_wins": len(wins), "sig_losses": len(losses),
+            "worst_cell": group.delta.min(), "best_cell": group.delta.max(),
+        })
+    print(pd.DataFrame(out).sort_values("mean_delta", ascending=False)
+          .round(1).to_string(index=False))
+
+    print("\n--- by team count (mean delta over the 3 seasons) ---")
+    piv = deltas.pivot_table(index="arm", columns="teams", values="delta", aggfunc="mean")
+    piv["all"] = deltas.groupby("arm")["delta"].mean()
+    print(piv.sort_values("all", ascending=False).round(1).to_string())
+
+    print("\n--- by season (mean delta over the 4 team counts) ---")
+    piv = deltas.pivot_table(index="arm", columns="season", values="delta", aggfunc="mean")
+    print(piv.round(1).to_string())
+
+
+def projected_waiting_table() -> None:
+    """Ex-ante waiting cost -- the same measure computed on the BOARD'S OWN
+    projections, i.e. the number a live draft-room UI could actually show."""
+    path = CACHE / "waiting_projected.csv"
+    if not path.exists():
+        return
+    wait = pd.read_csv(path)
+    print("\n########## Ex-ante (projected) value lost by waiting ##########")
+    for teams in sorted(wait["teams"].unique()):
+        block = wait[wait.teams == teams]
+        agg = block.groupby(["round", "position"])["mean_lost"].agg(
+            mean="mean", lo="min", hi="max")
+        agg["sem"] = block.groupby(["round", "position"])["mean_lost"].sem()
+        wide = agg["mean"].unstack("position")[list(POSITIONS)]
+        print(f"\nteams={teams} -- projected points lost by waiting one turn")
+        print(wide.round(1).to_string())
+        rows = []
+        for rnd in wide.index:
+            order = wide.loc[rnd].sort_values(ascending=False)
+            first, second = order.index[0], order.index[1]
+            gap = order.iloc[0] - order.iloc[1]
+            sem = float(np.hypot(agg.loc[(rnd, first), "sem"], agg.loc[(rnd, second), "sem"]))
+            per_season = block[(block["round"] == rnd) & (block.position == first)]
+            rows.append({
+                "round": rnd, "take_now": first, "lost": order.iloc[0],
+                "season_range": f"{agg.loc[(rnd, first), 'lo']:.0f}..{agg.loc[(rnd, first), 'hi']:.0f}",
+                "all_seasons_positive": int((per_season["mean_lost"] > 0).all()),
+                "runner_up": second, "runner_up_lost": order.iloc[1],
+                "gap": gap, "clear": "yes" if gap > 1.96 * sem else "no",
+            })
+        print(pd.DataFrame(rows).round(1).to_string(index=False))
+
+
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if which in ("all", "summary"):
+        summary_table()
     if which in ("all", "scores"):
         scores_table()
     if which in ("all", "composition"):
         composition_table()
     if which in ("all", "waiting"):
         waiting_table()
+        projected_waiting_table()
     if which in ("all", "cliffs"):
         cliff_table()
