@@ -1,0 +1,1648 @@
+{
+  "fantasy_content": {
+    "xml:lang": "en-US",
+    "yahoo:uri": "/fantasy/v2/league/470.l.1433972/draftresults",
+    "league": [
+      {
+        "league_key": "470.l.1433972",
+        "league_id": "1433972",
+        "name": "Mock Draft League",
+        "url": "https://football.fantasysports.yahoo.com/f1/1433972",
+        "logo_url": "https://s.yimg.com/cv/api/default/20180206/default-league-logo@2x.png",
+        "draft_status": "draft",
+        "num_teams": 14,
+        "max_teams": "14",
+        "edit_key": "1",
+        "weekly_deadline": "",
+        "roster_type": "week",
+        "league_update_timestamp": null,
+        "scoring_type": "head",
+        "scoring_label": "H2H",
+        "league_type": "public",
+        "renew": "",
+        "renewed": "",
+        "felo_tier": null,
+        "is_highscore": false,
+        "is_guillotine": "0",
+        "iris_group_chat_id": "",
+        "short_invitation_url": "",
+        "allow_add_to_dl_extra_pos": 0,
+        "is_pro_league": "0",
+        "is_cash_league": "0",
+        "is_mock": 1,
+        "is_plus_league": "0",
+        "game_code": "nfl",
+        "season": "2026"
+      },
+      {
+        "draft_results": {
+          "0": {
+            "draft_result": {
+              "pick": 1,
+              "round": 1,
+              "team_key": "470.l.1433972.t.1",
+              "player_key": "470.p.40059"
+            }
+          },
+          "1": {
+            "draft_result": {
+              "pick": 2,
+              "round": 1,
+              "team_key": "470.l.1433972.t.2",
+              "player_key": "470.p.30977"
+            }
+          },
+          "2": {
+            "draft_result": {
+              "pick": 3,
+              "round": 1,
+              "team_key": "470.l.1433972.t.3",
+              "player_key": "470.p.40055"
+            }
+          },
+          "3": {
+            "draft_result": {
+              "pick": 4,
+              "round": 1,
+              "team_key": "470.l.1433972.t.4",
+              "player_key": "470.p.32711"
+            }
+          },
+          "4": {
+            "draft_result": {
+              "pick": 5,
+              "round": 1,
+              "team_key": "470.l.1433972.t.5",
+              "player_key": "470.p.33393"
+            }
+          },
+          "5": {
+            "draft_result": {
+              "pick": 6,
+              "round": 1,
+              "team_key": "470.l.1433972.t.6",
+              "player_key": "470.p.40168"
+            }
+          },
+          "6": {
+            "draft_result": {
+              "pick": 7,
+              "round": 1,
+              "team_key": "470.l.1433972.t.7",
+              "player_key": "470.p.40041"
+            }
+          },
+          "7": {
+            "draft_result": {
+              "pick": 8,
+              "round": 1,
+              "team_key": "470.l.1433972.t.8",
+              "player_key": "470.p.30121"
+            }
+          },
+          "8": {
+            "draft_result": {
+              "pick": 9,
+              "round": 1,
+              "team_key": "470.l.1433972.t.9",
+              "player_key": "470.p.33500"
+            }
+          },
+          "9": {
+            "draft_result": {
+              "pick": 10,
+              "round": 1,
+              "team_key": "470.l.1433972.t.10",
+              "player_key": "470.p.34019"
+            }
+          },
+          "10": {
+            "draft_result": {
+              "pick": 11,
+              "round": 1,
+              "team_key": "470.l.1433972.t.11",
+              "player_key": "470.p.30972"
+            }
+          },
+          "11": {
+            "draft_result": {
+              "pick": 12,
+              "round": 1,
+              "team_key": "470.l.1433972.t.12",
+              "player_key": "470.p.33996"
+            }
+          },
+          "12": {
+            "draft_result": {
+              "pick": 13,
+              "round": 1,
+              "team_key": "470.l.1433972.t.13",
+              "player_key": "470.p.40118"
+            }
+          },
+          "13": {
+            "draft_result": {
+              "pick": 14,
+              "round": 1,
+              "team_key": "470.l.1433972.t.14",
+              "player_key": "470.p.29279"
+            }
+          },
+          "14": {
+            "draft_result": {
+              "pick": 15,
+              "round": 2,
+              "team_key": "470.l.1433972.t.14",
+              "player_key": "470.p.32692"
+            }
+          },
+          "15": {
+            "draft_result": {
+              "pick": 16,
+              "round": 2,
+              "team_key": "470.l.1433972.t.13",
+              "player_key": "470.p.32687"
+            }
+          },
+          "16": {
+            "draft_result": {
+              "pick": 17,
+              "round": 2,
+              "team_key": "470.l.1433972.t.12",
+              "player_key": "470.p.33477"
+            }
+          },
+          "17": {
+            "draft_result": {
+              "pick": 18,
+              "round": 2,
+              "team_key": "470.l.1433972.t.11",
+              "player_key": "470.p.41791"
+            }
+          },
+          "18": {
+            "draft_result": {
+              "pick": 19,
+              "round": 2,
+              "team_key": "470.l.1433972.t.10",
+              "player_key": "470.p.41807"
+            }
+          },
+          "19": {
+            "draft_result": {
+              "pick": 20,
+              "round": 2,
+              "team_key": "470.l.1433972.t.9",
+              "player_key": "470.p.40196"
+            }
+          },
+          "20": {
+            "draft_result": {
+              "pick": 21,
+              "round": 2,
+              "team_key": "470.l.1433972.t.8",
+              "player_key": "470.p.33963"
+            }
+          },
+          "21": {
+            "draft_result": {
+              "pick": 22,
+              "round": 2,
+              "team_key": "470.l.1433972.t.7",
+              "player_key": "470.p.34007"
+            }
+          },
+          "22": {
+            "draft_result": {
+              "pick": 23,
+              "round": 2,
+              "team_key": "470.l.1433972.t.6",
+              "player_key": "470.p.40878"
+            }
+          },
+          "23": {
+            "draft_result": {
+              "pick": 24,
+              "round": 2,
+              "team_key": "470.l.1433972.t.5",
+              "player_key": "470.p.31883"
+            }
+          },
+          "24": {
+            "draft_result": {
+              "pick": 25,
+              "round": 2,
+              "team_key": "470.l.1433972.t.4",
+              "player_key": "470.p.33966"
+            }
+          },
+          "25": {
+            "draft_result": {
+              "pick": 26,
+              "round": 2,
+              "team_key": "470.l.1433972.t.3",
+              "player_key": "470.p.40899"
+            }
+          },
+          "26": {
+            "draft_result": {
+              "pick": 27,
+              "round": 2,
+              "team_key": "470.l.1433972.t.2",
+              "player_key": "470.p.32705"
+            }
+          },
+          "27": {
+            "draft_result": {
+              "pick": 28,
+              "round": 2,
+              "team_key": "470.l.1433972.t.1",
+              "player_key": "470.p.34120"
+            }
+          },
+          "28": {
+            "draft_result": {
+              "pick": 29,
+              "round": 3,
+              "team_key": "470.l.1433972.t.1",
+              "player_key": "470.p.34010"
+            }
+          },
+          "29": {
+            "draft_result": {
+              "pick": 30,
+              "round": 3,
+              "team_key": "470.l.1433972.t.2",
+              "player_key": "470.p.33394"
+            }
+          },
+          "30": {
+            "draft_result": {
+              "pick": 31,
+              "round": 3,
+              "team_key": "470.l.1433972.t.3",
+              "player_key": "470.p.33398"
+            }
+          },
+          "31": {
+            "draft_result": {
+              "pick": 32,
+              "round": 3,
+              "team_key": "470.l.1433972.t.4",
+              "player_key": "470.p.40908"
+            }
+          },
+          "32": {
+            "draft_result": {
+              "pick": 33,
+              "round": 3,
+              "team_key": "470.l.1433972.t.5",
+              "player_key": "470.p.42625"
+            }
+          },
+          "33": {
+            "draft_result": {
+              "pick": 34,
+              "round": 3,
+              "team_key": "470.l.1433972.t.6",
+              "player_key": "470.p.32703"
+            }
+          },
+          "34": {
+            "draft_result": {
+              "pick": 35,
+              "round": 3,
+              "team_key": "470.l.1433972.t.7",
+              "player_key": "470.p.33991"
+            }
+          },
+          "35": {
+            "draft_result": {
+              "pick": 36,
+              "round": 3,
+              "team_key": "470.l.1433972.t.8",
+              "player_key": "470.p.33413"
+            }
+          },
+          "36": {
+            "draft_result": {
+              "pick": 37,
+              "round": 3,
+              "team_key": "470.l.1433972.t.9",
+              "player_key": "470.p.33423"
+            }
+          },
+          "37": {
+            "draft_result": {
+              "pick": 38,
+              "round": 3,
+              "team_key": "470.l.1433972.t.10",
+              "player_key": "470.p.41795"
+            }
+          },
+          "38": {
+            "draft_result": {
+              "pick": 39,
+              "round": 3,
+              "team_key": "470.l.1433972.t.11",
+              "player_key": "470.p.41922"
+            }
+          },
+          "39": {
+            "draft_result": {
+              "pick": 40,
+              "round": 3,
+              "team_key": "470.l.1433972.t.12",
+              "player_key": "470.p.31002"
+            }
+          },
+          "40": {
+            "draft_result": {
+              "pick": 41,
+              "round": 3,
+              "team_key": "470.l.1433972.t.13",
+              "player_key": "470.p.40039"
+            }
+          },
+          "41": {
+            "draft_result": {
+              "pick": 42,
+              "round": 3,
+              "team_key": "470.l.1433972.t.14",
+              "player_key": "470.p.40084"
+            }
+          },
+          "42": {
+            "draft_result": {
+              "pick": 43,
+              "round": 4,
+              "team_key": "470.l.1433972.t.14",
+              "player_key": "470.p.31905"
+            }
+          },
+          "43": {
+            "draft_result": {
+              "pick": 44,
+              "round": 4,
+              "team_key": "470.l.1433972.t.13",
+              "player_key": "470.p.41821"
+            }
+          },
+          "44": {
+            "draft_result": {
+              "pick": 45,
+              "round": 4,
+              "team_key": "470.l.1433972.t.12",
+              "player_key": "470.p.27535"
+            }
+          },
+          "45": {
+            "draft_result": {
+              "pick": 46,
+              "round": 4,
+              "team_key": "470.l.1433972.t.11",
+              "player_key": "470.p.41804"
+            }
+          },
+          "46": {
+            "draft_result": {
+              "pick": 47,
+              "round": 4,
+              "team_key": "470.l.1433972.t.10",
+              "player_key": "470.p.30994"
+            }
+          },
+          "47": {
+            "draft_result": {
+              "pick": 48,
+              "round": 4,
+              "team_key": "470.l.1433972.t.9",
+              "player_key": "470.p.31908"
+            }
+          },
+          "48": {
+            "draft_result": {
+              "pick": 49,
+              "round": 4,
+              "team_key": "470.l.1433972.t.8",
+              "player_key": "470.p.33965"
+            }
+          },
+          "49": {
+            "draft_result": {
+              "pick": 50,
+              "round": 4,
+              "team_key": "470.l.1433972.t.7",
+              "player_key": "470.p.41793"
+            }
+          },
+          "50": {
+            "draft_result": {
+              "pick": 51,
+              "round": 4,
+              "team_key": "470.l.1433972.t.6",
+              "player_key": "470.p.41824"
+            }
+          },
+          "51": {
+            "draft_result": {
+              "pick": 52,
+              "round": 4,
+              "team_key": "470.l.1433972.t.5",
+              "player_key": "470.p.41799"
+            }
+          },
+          "52": {
+            "draft_result": {
+              "pick": 53,
+              "round": 4,
+              "team_key": "470.l.1433972.t.4",
+              "player_key": "470.p.41900"
+            }
+          },
+          "53": {
+            "draft_result": {
+              "pick": 54,
+              "round": 4,
+              "team_key": "470.l.1433972.t.3",
+              "player_key": "470.p.40901"
+            }
+          },
+          "54": {
+            "draft_result": {
+              "pick": 55,
+              "round": 4,
+              "team_key": "470.l.1433972.t.2",
+              "player_key": "470.p.40993"
+            }
+          },
+          "55": {
+            "draft_result": {
+              "pick": 56,
+              "round": 4,
+              "team_key": "470.l.1433972.t.1",
+              "player_key": "470.p.33967"
+            }
+          },
+          "56": {
+            "draft_result": {
+              "pick": 57,
+              "round": 5,
+              "team_key": "470.l.1433972.t.1",
+              "player_key": "470.p.40881"
+            }
+          },
+          "57": {
+            "draft_result": {
+              "pick": 58,
+              "round": 5,
+              "team_key": "470.l.1433972.t.2",
+              "player_key": "470.p.27581"
+            }
+          },
+          "58": {
+            "draft_result": {
+              "pick": 59,
+              "round": 5,
+              "team_key": "470.l.1433972.t.3",
+              "player_key": "470.p.42654"
+            }
+          },
+          "59": {
+            "draft_result": {
+              "pick": 60,
+              "round": 5,
+              "team_key": "470.l.1433972.t.4",
+              "player_key": "470.p.33989"
+            }
+          },
+          "60": {
+            "draft_result": {
+              "pick": 61,
+              "round": 5,
+              "team_key": "470.l.1433972.t.5",
+              "player_key": "470.p.40234"
+            }
+          },
+          "61": {
+            "draft_result": {
+              "pick": 62,
+              "round": 5,
+              "team_key": "470.l.1433972.t.6",
+              "player_key": "470.p.33508"
+            }
+          },
+          "62": {
+            "draft_result": {
+              "pick": 63,
+              "round": 5,
+              "team_key": "470.l.1433972.t.7",
+              "player_key": "470.p.41823"
+            }
+          },
+          "63": {
+            "draft_result": {
+              "pick": 64,
+              "round": 5,
+              "team_key": "470.l.1433972.t.8",
+              "player_key": "470.p.32671"
+            }
+          },
+          "64": {
+            "draft_result": {
+              "pick": 65,
+              "round": 5,
+              "team_key": "470.l.1433972.t.9",
+              "player_key": "470.p.40893"
+            }
+          },
+          "65": {
+            "draft_result": {
+              "pick": 66,
+              "round": 5,
+              "team_key": "470.l.1433972.t.10",
+              "player_key": "470.p.30197"
+            }
+          },
+          "66": {
+            "draft_result": {
+              "pick": 67,
+              "round": 5,
+              "team_key": "470.l.1433972.t.11",
+              "player_key": "470.p.40102"
+            }
+          },
+          "67": {
+            "draft_result": {
+              "pick": 68,
+              "round": 5,
+              "team_key": "470.l.1433972.t.12",
+              "player_key": "470.p.34447"
+            }
+          },
+          "68": {
+            "draft_result": {
+              "pick": 69,
+              "round": 5,
+              "team_key": "470.l.1433972.t.13",
+              "player_key": "470.p.32723"
+            }
+          },
+          "69": {
+            "draft_result": {
+              "pick": 70,
+              "round": 5,
+              "team_key": "470.l.1433972.t.14",
+              "player_key": "470.p.40875"
+            }
+          },
+          "70": {
+            "draft_result": {
+              "pick": 71,
+              "round": 6,
+              "team_key": "470.l.1433972.t.14",
+              "player_key": "470.p.34008"
+            }
+          },
+          "71": {
+            "draft_result": {
+              "pick": 72,
+              "round": 6,
+              "team_key": "470.l.1433972.t.13",
+              "player_key": "470.p.41877"
+            }
+          },
+          "72": {
+            "draft_result": {
+              "pick": 73,
+              "round": 6,
+              "team_key": "470.l.1433972.t.12",
+              "player_key": "470.p.40064"
+            }
+          },
+          "73": {
+            "draft_result": {
+              "pick": 74,
+              "round": 6,
+              "team_key": "470.l.1433972.t.11",
+              "player_key": "470.p.29369"
+            }
+          },
+          "74": {
+            "draft_result": {
+              "pick": 75,
+              "round": 6,
+              "team_key": "470.l.1433972.t.10",
+              "player_key": "470.p.40896"
+            }
+          },
+          "75": {
+            "draft_result": {
+              "pick": 76,
+              "round": 6,
+              "team_key": "470.l.1433972.t.9",
+              "player_key": "470.p.40926"
+            }
+          },
+          "76": {
+            "draft_result": {
+              "pick": 77,
+              "round": 6,
+              "team_key": "470.l.1433972.t.8",
+              "player_key": "470.p.31960"
+            }
+          },
+          "77": {
+            "draft_result": {
+              "pick": 78,
+              "round": 6,
+              "team_key": "470.l.1433972.t.7",
+              "player_key": "470.p.40900"
+            }
+          },
+          "78": {
+            "draft_result": {
+              "pick": 79,
+              "round": 6,
+              "team_key": "470.l.1433972.t.6",
+              "player_key": "470.p.32676"
+            }
+          },
+          "79": {
+            "draft_result": {
+              "pick": 80,
+              "round": 6,
+              "team_key": "470.l.1433972.t.5",
+              "player_key": "470.p.33389"
+            }
+          },
+          "80": {
+            "draft_result": {
+              "pick": 81,
+              "round": 6,
+              "team_key": "470.l.1433972.t.4",
+              "player_key": "470.p.32725"
+            }
+          },
+          "81": {
+            "draft_result": {
+              "pick": 82,
+              "round": 6,
+              "team_key": "470.l.1433972.t.3",
+              "player_key": "470.p.33392"
+            }
+          },
+          "82": {
+            "draft_result": {
+              "pick": 83,
+              "round": 6,
+              "team_key": "470.l.1433972.t.2",
+              "player_key": "470.p.31056"
+            }
+          },
+          "83": {
+            "draft_result": {
+              "pick": 84,
+              "round": 6,
+              "team_key": "470.l.1433972.t.1",
+              "player_key": "470.p.40051"
+            }
+          },
+          "84": {
+            "draft_result": {
+              "pick": 85,
+              "round": 7,
+              "team_key": "470.l.1433972.t.1",
+              "player_key": "470.p.40883"
+            }
+          },
+          "85": {
+            "draft_result": {
+              "pick": 86,
+              "round": 7,
+              "team_key": "470.l.1433972.t.2",
+              "player_key": "470.p.31482"
+            }
+          },
+          "86": {
+            "draft_result": {
+              "pick": 87,
+              "round": 7,
+              "team_key": "470.l.1433972.t.3",
+              "player_key": "470.p.34218"
+            }
+          },
+          "87": {
+            "draft_result": {
+              "pick": 88,
+              "round": 7,
+              "team_key": "470.l.1433972.t.4",
+              "player_key": "470.p.40971"
+            }
+          },
+          "88": {
+            "draft_result": {
+              "pick": 89,
+              "round": 7,
+              "team_key": "470.l.1433972.t.5",
+              "player_key": "470.p.33100"
+            }
+          },
+          "89": {
+            "draft_result": {
+              "pick": 90,
+              "round": 7,
+              "team_key": "470.l.1433972.t.6",
+              "player_key": "470.p.33514"
+            }
+          },
+          "90": {
+            "draft_result": {
+              "pick": 91,
+              "round": 7,
+              "team_key": "470.l.1433972.t.7",
+              "player_key": "470.p.30259"
+            }
+          },
+          "91": {
+            "draft_result": {
+              "pick": 92,
+              "round": 7,
+              "team_key": "470.l.1433972.t.8",
+              "player_key": "470.p.31896"
+            }
+          },
+          "92": {
+            "draft_result": {
+              "pick": 93,
+              "round": 7,
+              "team_key": "470.l.1433972.t.9",
+              "player_key": "470.p.9265"
+            }
+          },
+          "93": {
+            "draft_result": {
+              "pick": 94,
+              "round": 7,
+              "team_key": "470.l.1433972.t.10",
+              "player_key": "470.p.42010"
+            }
+          },
+          "94": {
+            "draft_result": {
+              "pick": 95,
+              "round": 7,
+              "team_key": "470.l.1433972.t.11",
+              "player_key": "470.p.42626"
+            }
+          },
+          "95": {
+            "draft_result": {
+              "pick": 96,
+              "round": 7,
+              "team_key": "470.l.1433972.t.12",
+              "player_key": "470.p.40121"
+            }
+          },
+          "96": {
+            "draft_result": {
+              "pick": 97,
+              "round": 7,
+              "team_key": "470.l.1433972.t.13",
+              "player_key": "470.p.40126"
+            }
+          },
+          "97": {
+            "draft_result": {
+              "pick": 98,
+              "round": 7,
+              "team_key": "470.l.1433972.t.14",
+              "player_key": "470.p.40048"
+            }
+          },
+          "98": {
+            "draft_result": {
+              "pick": 99,
+              "round": 8,
+              "team_key": "470.l.1433972.t.14",
+              "player_key": "470.p.28534"
+            }
+          },
+          "99": {
+            "draft_result": {
+              "pick": 100,
+              "round": 8,
+              "team_key": "470.l.1433972.t.13",
+              "player_key": "470.p.40962"
+            }
+          },
+          "100": {
+            "draft_result": {
+              "pick": 101,
+              "round": 8,
+              "team_key": "470.l.1433972.t.12",
+              "player_key": "470.p.42655"
+            }
+          },
+          "101": {
+            "draft_result": {
+              "pick": 102,
+              "round": 8,
+              "team_key": "470.l.1433972.t.11",
+              "player_key": "470.p.40042"
+            }
+          },
+          "102": {
+            "draft_result": {
+              "pick": 103,
+              "round": 8,
+              "team_key": "470.l.1433972.t.10",
+              "player_key": "470.p.40063"
+            }
+          },
+          "103": {
+            "draft_result": {
+              "pick": 104,
+              "round": 8,
+              "team_key": "470.l.1433972.t.9",
+              "player_key": "470.p.34320"
+            }
+          },
+          "104": {
+            "draft_result": {
+              "pick": 105,
+              "round": 8,
+              "team_key": "470.l.1433972.t.8",
+              "player_key": "470.p.31019"
+            }
+          },
+          "105": {
+            "draft_result": {
+              "pick": 106,
+              "round": 8,
+              "team_key": "470.l.1433972.t.7",
+              "player_key": "470.p.42646"
+            }
+          },
+          "106": {
+            "draft_result": {
+              "pick": 107,
+              "round": 8,
+              "team_key": "470.l.1433972.t.6",
+              "player_key": "470.p.31010"
+            }
+          },
+          "107": {
+            "draft_result": {
+              "pick": 108,
+              "round": 8,
+              "team_key": "470.l.1433972.t.5",
+              "player_key": "470.p.41808"
+            }
+          },
+          "108": {
+            "draft_result": {
+              "pick": 109,
+              "round": 8,
+              "team_key": "470.l.1433972.t.4",
+              "player_key": "470.p.34095"
+            }
+          },
+          "109": {
+            "draft_result": {
+              "pick": 110,
+              "round": 8,
+              "team_key": "470.l.1433972.t.3",
+              "player_key": "470.p.32704"
+            }
+          },
+          "110": {
+            "draft_result": {
+              "pick": 111,
+              "round": 8,
+              "team_key": "470.l.1433972.t.2",
+              "player_key": "470.p.100021"
+            }
+          },
+          "111": {
+            "draft_result": {
+              "pick": 112,
+              "round": 8,
+              "team_key": "470.l.1433972.t.1",
+              "player_key": "470.p.31856"
+            }
+          },
+          "112": {
+            "draft_result": {
+              "pick": 113,
+              "round": 9,
+              "team_key": "470.l.1433972.t.1",
+              "player_key": "470.p.42642"
+            }
+          },
+          "113": {
+            "draft_result": {
+              "pick": 114,
+              "round": 9,
+              "team_key": "470.l.1433972.t.2",
+              "player_key": "470.p.32231"
+            }
+          },
+          "114": {
+            "draft_result": {
+              "pick": 115,
+              "round": 9,
+              "team_key": "470.l.1433972.t.3",
+              "player_key": "470.p.41810"
+            }
+          },
+          "115": {
+            "draft_result": {
+              "pick": 116,
+              "round": 9,
+              "team_key": "470.l.1433972.t.4",
+              "player_key": "470.p.100014"
+            }
+          },
+          "116": {
+            "draft_result": {
+              "pick": 117,
+              "round": 9,
+              "team_key": "470.l.1433972.t.5",
+              "player_key": "470.p.42025"
+            }
+          },
+          "117": {
+            "draft_result": {
+              "pick": 118,
+              "round": 9,
+              "team_key": "470.l.1433972.t.6",
+              "player_key": "470.p.41845"
+            }
+          },
+          "118": {
+            "draft_result": {
+              "pick": 119,
+              "round": 9,
+              "team_key": "470.l.1433972.t.7",
+              "player_key": "470.p.40231"
+            }
+          },
+          "119": {
+            "draft_result": {
+              "pick": 120,
+              "round": 9,
+              "team_key": "470.l.1433972.t.8",
+              "player_key": "470.p.30295"
+            }
+          },
+          "120": {
+            "draft_result": {
+              "pick": 121,
+              "round": 9,
+              "team_key": "470.l.1433972.t.9",
+              "player_key": "470.p.40877"
+            }
+          },
+          "121": {
+            "draft_result": {
+              "pick": 122,
+              "round": 9,
+              "team_key": "470.l.1433972.t.10",
+              "player_key": "470.p.33998"
+            }
+          },
+          "122": {
+            "draft_result": {
+              "pick": 123,
+              "round": 9,
+              "team_key": "470.l.1433972.t.11",
+              "player_key": "470.p.41293"
+            }
+          },
+          "123": {
+            "draft_result": {
+              "pick": 124,
+              "round": 9,
+              "team_key": "470.l.1433972.t.12",
+              "player_key": "470.p.33538"
+            }
+          },
+          "124": {
+            "draft_result": {
+              "pick": 125,
+              "round": 9,
+              "team_key": "470.l.1433972.t.13",
+              "player_key": "470.p.28378"
+            }
+          },
+          "125": {
+            "draft_result": {
+              "pick": 126,
+              "round": 9,
+              "team_key": "470.l.1433972.t.14",
+              "player_key": "470.p.31833"
+            }
+          },
+          "126": {
+            "draft_result": {
+              "pick": 127,
+              "round": 10,
+              "team_key": "470.l.1433972.t.14",
+              "player_key": "470.p.34047"
+            }
+          },
+          "127": {
+            "draft_result": {
+              "pick": 128,
+              "round": 10,
+              "team_key": "470.l.1433972.t.13",
+              "player_key": "470.p.29235"
+            }
+          },
+          "128": {
+            "draft_result": {
+              "pick": 129,
+              "round": 10,
+              "team_key": "470.l.1433972.t.12",
+              "player_key": "470.p.30123"
+            }
+          },
+          "129": {
+            "draft_result": {
+              "pick": 130,
+              "round": 10,
+              "team_key": "470.l.1433972.t.11",
+              "player_key": "470.p.32696"
+            }
+          },
+          "130": {
+            "draft_result": {
+              "pick": 131,
+              "round": 10,
+              "team_key": "470.l.1433972.t.10",
+              "player_key": "470.p.26686"
+            }
+          },
+          "131": {
+            "draft_result": {
+              "pick": 132,
+              "round": 10,
+              "team_key": "470.l.1433972.t.9"
+            }
+          },
+          "132": {
+            "draft_result": {
+              "pick": 133,
+              "round": 10,
+              "team_key": "470.l.1433972.t.8"
+            }
+          },
+          "133": {
+            "draft_result": {
+              "pick": 134,
+              "round": 10,
+              "team_key": "470.l.1433972.t.7"
+            }
+          },
+          "134": {
+            "draft_result": {
+              "pick": 135,
+              "round": 10,
+              "team_key": "470.l.1433972.t.6"
+            }
+          },
+          "135": {
+            "draft_result": {
+              "pick": 136,
+              "round": 10,
+              "team_key": "470.l.1433972.t.5"
+            }
+          },
+          "136": {
+            "draft_result": {
+              "pick": 137,
+              "round": 10,
+              "team_key": "470.l.1433972.t.4"
+            }
+          },
+          "137": {
+            "draft_result": {
+              "pick": 138,
+              "round": 10,
+              "team_key": "470.l.1433972.t.3"
+            }
+          },
+          "138": {
+            "draft_result": {
+              "pick": 139,
+              "round": 10,
+              "team_key": "470.l.1433972.t.2"
+            }
+          },
+          "139": {
+            "draft_result": {
+              "pick": 140,
+              "round": 10,
+              "team_key": "470.l.1433972.t.1"
+            }
+          },
+          "140": {
+            "draft_result": {
+              "pick": 141,
+              "round": 11,
+              "team_key": "470.l.1433972.t.1"
+            }
+          },
+          "141": {
+            "draft_result": {
+              "pick": 142,
+              "round": 11,
+              "team_key": "470.l.1433972.t.2"
+            }
+          },
+          "142": {
+            "draft_result": {
+              "pick": 143,
+              "round": 11,
+              "team_key": "470.l.1433972.t.3"
+            }
+          },
+          "143": {
+            "draft_result": {
+              "pick": 144,
+              "round": 11,
+              "team_key": "470.l.1433972.t.4"
+            }
+          },
+          "144": {
+            "draft_result": {
+              "pick": 145,
+              "round": 11,
+              "team_key": "470.l.1433972.t.5"
+            }
+          },
+          "145": {
+            "draft_result": {
+              "pick": 146,
+              "round": 11,
+              "team_key": "470.l.1433972.t.6"
+            }
+          },
+          "146": {
+            "draft_result": {
+              "pick": 147,
+              "round": 11,
+              "team_key": "470.l.1433972.t.7"
+            }
+          },
+          "147": {
+            "draft_result": {
+              "pick": 148,
+              "round": 11,
+              "team_key": "470.l.1433972.t.8"
+            }
+          },
+          "148": {
+            "draft_result": {
+              "pick": 149,
+              "round": 11,
+              "team_key": "470.l.1433972.t.9"
+            }
+          },
+          "149": {
+            "draft_result": {
+              "pick": 150,
+              "round": 11,
+              "team_key": "470.l.1433972.t.10"
+            }
+          },
+          "150": {
+            "draft_result": {
+              "pick": 151,
+              "round": 11,
+              "team_key": "470.l.1433972.t.11"
+            }
+          },
+          "151": {
+            "draft_result": {
+              "pick": 152,
+              "round": 11,
+              "team_key": "470.l.1433972.t.12"
+            }
+          },
+          "152": {
+            "draft_result": {
+              "pick": 153,
+              "round": 11,
+              "team_key": "470.l.1433972.t.13"
+            }
+          },
+          "153": {
+            "draft_result": {
+              "pick": 154,
+              "round": 11,
+              "team_key": "470.l.1433972.t.14"
+            }
+          },
+          "154": {
+            "draft_result": {
+              "pick": 155,
+              "round": 12,
+              "team_key": "470.l.1433972.t.14"
+            }
+          },
+          "155": {
+            "draft_result": {
+              "pick": 156,
+              "round": 12,
+              "team_key": "470.l.1433972.t.13"
+            }
+          },
+          "156": {
+            "draft_result": {
+              "pick": 157,
+              "round": 12,
+              "team_key": "470.l.1433972.t.12"
+            }
+          },
+          "157": {
+            "draft_result": {
+              "pick": 158,
+              "round": 12,
+              "team_key": "470.l.1433972.t.11"
+            }
+          },
+          "158": {
+            "draft_result": {
+              "pick": 159,
+              "round": 12,
+              "team_key": "470.l.1433972.t.10"
+            }
+          },
+          "159": {
+            "draft_result": {
+              "pick": 160,
+              "round": 12,
+              "team_key": "470.l.1433972.t.9"
+            }
+          },
+          "160": {
+            "draft_result": {
+              "pick": 161,
+              "round": 12,
+              "team_key": "470.l.1433972.t.8"
+            }
+          },
+          "161": {
+            "draft_result": {
+              "pick": 162,
+              "round": 12,
+              "team_key": "470.l.1433972.t.7"
+            }
+          },
+          "162": {
+            "draft_result": {
+              "pick": 163,
+              "round": 12,
+              "team_key": "470.l.1433972.t.6"
+            }
+          },
+          "163": {
+            "draft_result": {
+              "pick": 164,
+              "round": 12,
+              "team_key": "470.l.1433972.t.5"
+            }
+          },
+          "164": {
+            "draft_result": {
+              "pick": 165,
+              "round": 12,
+              "team_key": "470.l.1433972.t.4"
+            }
+          },
+          "165": {
+            "draft_result": {
+              "pick": 166,
+              "round": 12,
+              "team_key": "470.l.1433972.t.3"
+            }
+          },
+          "166": {
+            "draft_result": {
+              "pick": 167,
+              "round": 12,
+              "team_key": "470.l.1433972.t.2"
+            }
+          },
+          "167": {
+            "draft_result": {
+              "pick": 168,
+              "round": 12,
+              "team_key": "470.l.1433972.t.1"
+            }
+          },
+          "168": {
+            "draft_result": {
+              "pick": 169,
+              "round": 13,
+              "team_key": "470.l.1433972.t.1"
+            }
+          },
+          "169": {
+            "draft_result": {
+              "pick": 170,
+              "round": 13,
+              "team_key": "470.l.1433972.t.2"
+            }
+          },
+          "170": {
+            "draft_result": {
+              "pick": 171,
+              "round": 13,
+              "team_key": "470.l.1433972.t.3"
+            }
+          },
+          "171": {
+            "draft_result": {
+              "pick": 172,
+              "round": 13,
+              "team_key": "470.l.1433972.t.4"
+            }
+          },
+          "172": {
+            "draft_result": {
+              "pick": 173,
+              "round": 13,
+              "team_key": "470.l.1433972.t.5"
+            }
+          },
+          "173": {
+            "draft_result": {
+              "pick": 174,
+              "round": 13,
+              "team_key": "470.l.1433972.t.6"
+            }
+          },
+          "174": {
+            "draft_result": {
+              "pick": 175,
+              "round": 13,
+              "team_key": "470.l.1433972.t.7"
+            }
+          },
+          "175": {
+            "draft_result": {
+              "pick": 176,
+              "round": 13,
+              "team_key": "470.l.1433972.t.8"
+            }
+          },
+          "176": {
+            "draft_result": {
+              "pick": 177,
+              "round": 13,
+              "team_key": "470.l.1433972.t.9"
+            }
+          },
+          "177": {
+            "draft_result": {
+              "pick": 178,
+              "round": 13,
+              "team_key": "470.l.1433972.t.10"
+            }
+          },
+          "178": {
+            "draft_result": {
+              "pick": 179,
+              "round": 13,
+              "team_key": "470.l.1433972.t.11"
+            }
+          },
+          "179": {
+            "draft_result": {
+              "pick": 180,
+              "round": 13,
+              "team_key": "470.l.1433972.t.12"
+            }
+          },
+          "180": {
+            "draft_result": {
+              "pick": 181,
+              "round": 13,
+              "team_key": "470.l.1433972.t.13"
+            }
+          },
+          "181": {
+            "draft_result": {
+              "pick": 182,
+              "round": 13,
+              "team_key": "470.l.1433972.t.14"
+            }
+          },
+          "182": {
+            "draft_result": {
+              "pick": 183,
+              "round": 14,
+              "team_key": "470.l.1433972.t.14"
+            }
+          },
+          "183": {
+            "draft_result": {
+              "pick": 184,
+              "round": 14,
+              "team_key": "470.l.1433972.t.13"
+            }
+          },
+          "184": {
+            "draft_result": {
+              "pick": 185,
+              "round": 14,
+              "team_key": "470.l.1433972.t.12"
+            }
+          },
+          "185": {
+            "draft_result": {
+              "pick": 186,
+              "round": 14,
+              "team_key": "470.l.1433972.t.11"
+            }
+          },
+          "186": {
+            "draft_result": {
+              "pick": 187,
+              "round": 14,
+              "team_key": "470.l.1433972.t.10"
+            }
+          },
+          "187": {
+            "draft_result": {
+              "pick": 188,
+              "round": 14,
+              "team_key": "470.l.1433972.t.9"
+            }
+          },
+          "188": {
+            "draft_result": {
+              "pick": 189,
+              "round": 14,
+              "team_key": "470.l.1433972.t.8"
+            }
+          },
+          "189": {
+            "draft_result": {
+              "pick": 190,
+              "round": 14,
+              "team_key": "470.l.1433972.t.7"
+            }
+          },
+          "190": {
+            "draft_result": {
+              "pick": 191,
+              "round": 14,
+              "team_key": "470.l.1433972.t.6"
+            }
+          },
+          "191": {
+            "draft_result": {
+              "pick": 192,
+              "round": 14,
+              "team_key": "470.l.1433972.t.5"
+            }
+          },
+          "192": {
+            "draft_result": {
+              "pick": 193,
+              "round": 14,
+              "team_key": "470.l.1433972.t.4"
+            }
+          },
+          "193": {
+            "draft_result": {
+              "pick": 194,
+              "round": 14,
+              "team_key": "470.l.1433972.t.3"
+            }
+          },
+          "194": {
+            "draft_result": {
+              "pick": 195,
+              "round": 14,
+              "team_key": "470.l.1433972.t.2"
+            }
+          },
+          "195": {
+            "draft_result": {
+              "pick": 196,
+              "round": 14,
+              "team_key": "470.l.1433972.t.1"
+            }
+          },
+          "196": {
+            "draft_result": {
+              "pick": 197,
+              "round": 15,
+              "team_key": "470.l.1433972.t.1"
+            }
+          },
+          "197": {
+            "draft_result": {
+              "pick": 198,
+              "round": 15,
+              "team_key": "470.l.1433972.t.2"
+            }
+          },
+          "198": {
+            "draft_result": {
+              "pick": 199,
+              "round": 15,
+              "team_key": "470.l.1433972.t.3"
+            }
+          },
+          "199": {
+            "draft_result": {
+              "pick": 200,
+              "round": 15,
+              "team_key": "470.l.1433972.t.4"
+            }
+          },
+          "200": {
+            "draft_result": {
+              "pick": 201,
+              "round": 15,
+              "team_key": "470.l.1433972.t.5"
+            }
+          },
+          "201": {
+            "draft_result": {
+              "pick": 202,
+              "round": 15,
+              "team_key": "470.l.1433972.t.6"
+            }
+          },
+          "202": {
+            "draft_result": {
+              "pick": 203,
+              "round": 15,
+              "team_key": "470.l.1433972.t.7"
+            }
+          },
+          "203": {
+            "draft_result": {
+              "pick": 204,
+              "round": 15,
+              "team_key": "470.l.1433972.t.8"
+            }
+          },
+          "204": {
+            "draft_result": {
+              "pick": 205,
+              "round": 15,
+              "team_key": "470.l.1433972.t.9"
+            }
+          },
+          "205": {
+            "draft_result": {
+              "pick": 206,
+              "round": 15,
+              "team_key": "470.l.1433972.t.10"
+            }
+          },
+          "206": {
+            "draft_result": {
+              "pick": 207,
+              "round": 15,
+              "team_key": "470.l.1433972.t.11"
+            }
+          },
+          "207": {
+            "draft_result": {
+              "pick": 208,
+              "round": 15,
+              "team_key": "470.l.1433972.t.12"
+            }
+          },
+          "208": {
+            "draft_result": {
+              "pick": 209,
+              "round": 15,
+              "team_key": "470.l.1433972.t.13"
+            }
+          },
+          "209": {
+            "draft_result": {
+              "pick": 210,
+              "round": 15,
+              "team_key": "470.l.1433972.t.14"
+            }
+          },
+          "count": 210
+        }
+      }
+    ],
+    "time": "32.390832901001ms",
+    "copyright": "Certain Data by Sportradar, Stats Perform and Rotowire",
+    "refresh_rate": "30"
+  }
+}

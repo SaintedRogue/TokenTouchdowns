@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TokenTouchdowns — Draft Room</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #131a22;
+    --panel-2: #182029;
+    --border: #253140;
+    --text: #e8eef5;
+    --muted: #8ea0b3;
+    --accent: #4fd1c5;
+    --accent-dim: #1f4a47;
+    --warn: #f5a623;
+    --warn-bg: #3a2c0d;
+    --err: #ff6b6b;
+    --err-bg: #3a1414;
+    --good: #6fd97f;
+    font-size: 16px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 0.75rem 1rem;
+  }
+  .clock-row {
+    display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+  }
+  .clock {
+    font-size: 1.6rem; font-weight: 700; padding: 0.35rem 0.9rem; border-radius: 8px;
+    background: var(--panel-2); border: 1px solid var(--border);
+  }
+  .clock.my-turn { background: var(--accent); color: #04201d; border-color: var(--accent); }
+  .next-pick { font-size: 1.1rem; color: var(--muted); }
+  .next-pick b { color: var(--text); }
+  .spacer { flex: 1; }
+  .updated { font-size: 0.9rem; color: var(--muted); white-space: nowrap; }
+  .updated.stale { color: var(--warn); }
+  #undoBtn {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.4rem 0.8rem; cursor: pointer; font-size: 0.9rem;
+  }
+  #undoBtn:hover { border-color: var(--accent); }
+  .banner {
+    margin-top: 0.6rem; padding: 0.55rem 0.8rem; border-radius: 6px; font-size: 0.92rem;
+    display: none;
+  }
+  .banner.warn { display: block; background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn); }
+  .banner.error { display: block; background: var(--err-bg); color: var(--err); border: 1px solid var(--err); }
+
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr);
+    gap: 1rem;
+    padding: 1rem;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  section.panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.9rem; margin-bottom: 1rem;
+  }
+  h2 {
+    margin: 0 0 0.6rem 0; font-size: 1rem; letter-spacing: 0.02em; text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* Recommendations */
+  #recs { display: flex; flex-direction: column; gap: 0.5rem; }
+  .rec-card {
+    display: grid;
+    grid-template-columns: 2.2rem 1fr auto;
+    gap: 0.15rem 0.9rem;
+    align-items: center;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    cursor: pointer;
+  }
+  .rec-card:hover { border-color: var(--accent); }
+  .rec-rank { font-size: 1.3rem; font-weight: 700; color: var(--muted); grid-row: 1 / 3; }
+  .rec-name { font-size: 1.25rem; font-weight: 700; grid-column: 2; }
+  .rec-meta { grid-column: 2; color: var(--muted); font-size: 0.85rem; }
+  .rec-stats { grid-column: 3; grid-row: 1 / 3; display: flex; gap: 1.1rem; text-align: center; }
+  .rec-stats div { display: flex; flex-direction: column; }
+  .rec-stats .label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
+  .rec-stats .value { font-size: 1.15rem; font-weight: 700; }
+  .rec-stats .value.hi { color: var(--good); }
+  .rec-stats .value.warn { color: var(--warn); }
+  .rec-stats .value.danger { color: var(--err); }
+  #recs .empty, #board tbody .empty td { color: var(--muted); padding: 0.6rem; }
+
+  /* Board */
+  .filters { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .filters button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 999px; padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.85rem;
+  }
+  .filters button.active { background: var(--accent); color: #04201d; border-color: var(--accent); }
+  .board-wrap { max-height: 70vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  thead th {
+    position: sticky; top: 0; background: var(--panel-2); text-align: left;
+    padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); color: var(--muted);
+    font-weight: 600; cursor: default;
+  }
+  tbody td { padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); }
+  tbody tr:hover:not(.taken) { background: var(--panel-2); cursor: pointer; }
+  tbody tr.taken { color: var(--muted); }
+  tbody tr.taken .pname { text-decoration: line-through; }
+  .pos-badge {
+    display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 0.05rem 0.35rem;
+    border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border);
+  }
+  .num { text-align: right; }
+
+  /* Roster */
+  .slot-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0.35rem 0; border-bottom: 1px solid var(--border);
+  }
+  .slot-row:last-child { border-bottom: none; }
+  .slot-label {
+    font-size: 0.75rem; font-weight: 700; color: var(--muted); width: 3.4rem; flex-shrink: 0;
+  }
+  .slot-player { flex: 1; }
+  .slot-player.empty { color: var(--muted); font-style: italic; }
+  .bench-title { margin-top: 0.7rem; font-size: 0.8rem; color: var(--muted); text-transform: uppercase; }
+
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="clock-row">
+    <div id="clock" class="clock">—</div>
+    <div class="next-pick">Your next pick: <b id="nextPick">—</b></div>
+    <div class="spacer"></div>
+    <div id="identity" class="updated" title="How much of the board is trustworthy: picks Yahoo has confirmed that actually matched a board row and got struck off. A gap here means a drafted player may still show as available.">identity: —</div>
+    <div id="updated" class="updated">not yet polled</div>
+    <button id="undoBtn" title="Revert the last manual mark">Undo last mark</button>
+  </div>
+  <div id="banner" class="banner"></div>
+</header>
+
+<main>
+  <div>
+    <section class="panel">
+      <h2>Recommendations</h2>
+      <div id="recs"><div class="empty">Loading...</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>Board</h2>
+      <div class="filters" id="filters"></div>
+      <div class="board-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Player</th><th>Pos</th>
+              <th class="num">Proj</th><th class="num">VOR</th><th class="num">Tier</th>
+              <th class="num">ADP</th><th class="num">P(gone)</th>
+            </tr>
+          </thead>
+          <tbody id="boardBody"><tr class="empty"><td colspan="7">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div>
+    <section class="panel">
+      <h2>Your roster</h2>
+      <div id="rosterSlots"></div>
+      <div class="bench-title">Bench</div>
+      <div id="rosterBench" class="slot-player empty">(none)</div>
+    </section>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  var state = null;          // last /api/state view model
+  var filter = 'ALL';        // current position filter
+  var boardRows = new Map(); // playerId -> <tr>
+  var pollTimer = null;
+  var tickTimer = null;
+
+  function pct(n) { return (n === null || n === undefined) ? '-' : Math.round(n * 100) + '%'; }
+  function num(n, d) {
+    if (n === null || n === undefined) return '-';
+    return (typeof d === 'number') ? n.toFixed(d) : String(n);
+  }
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function classify(pGone) {
+    if (pGone === null || pGone === undefined) return '';
+    if (pGone >= 0.7) return 'danger';
+    if (pGone >= 0.35) return 'warn';
+    return 'hi';
+  }
+
+  async function api(path, opts) {
+    var res = await fetch(path, opts);
+    return res.json();
+  }
+
+  async function markTaken(playerId) {
+    if (!playerId) return;
+    var next = await api('/api/taken', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ playerId: playerId }),
+    });
+    render(next);
+  }
+
+  async function undoLast() {
+    var next = await api('/api/undo', { method: 'POST' });
+    render(next);
+  }
+
+  // "Round R, Pick N" reads far better at a glance than a bare pick number
+  // -- draft_results carries `round` (design doc 4.1/4.2), so show it
+  // whenever we have it; a bare pick number is still a fine fallback.
+  function pickLabel(pick, round) {
+    if (pick === null || pick === undefined) return '-';
+    return round ? ('Round ' + round + ', Pick ' + pick) : ('Pick ' + pick);
+  }
+
+  function renderClock(status) {
+    var clock = document.getElementById('clock');
+    var nextPick = document.getElementById('nextPick');
+    if (status.isMyTurn) {
+      clock.textContent = 'YOU ARE ON THE CLOCK';
+      clock.classList.add('my-turn');
+    } else if (status.draftStatus === 'postdraft') {
+      clock.textContent = 'Your draft is complete';
+      clock.classList.remove('my-turn');
+    } else if (status.draftStatus === 'predraft') {
+      clock.textContent = 'Predraft';
+      clock.classList.remove('my-turn');
+    } else {
+      clock.textContent = pickLabel(status.currentPick, status.currentRound);
+      clock.classList.remove('my-turn');
+    }
+    nextPick.textContent = status.myNextPick === null ? '(done)'
+      : (status.myNextPickRound ? ('Round ' + status.myNextPickRound + ', #' + status.myNextPick) : ('#' + status.myNextPick));
+  }
+
+  function renderBanner(banner) {
+    var b = document.getElementById('banner');
+    if (!banner) { b.className = 'banner'; b.textContent = ''; return; }
+    b.className = 'banner ' + (banner.level === 'error' ? 'error' : 'warn');
+    b.textContent = banner.message;
+  }
+
+  function renderUpdated(status) {
+    var u = document.getElementById('updated');
+    if (!status.lastPollAt) { u.textContent = 'never polled Yahoo yet'; u.classList.remove('stale'); return; }
+    var secs = Math.max(0, Math.round((Date.now() - new Date(status.lastPollAt).getTime()) / 1000));
+    u.textContent = 'updated ' + secs + 's ago' + (status.lastPollOk ? '' : ' (poll failing)');
+    u.classList.toggle('stale', secs > 10 || !status.lastPollOk);
+  }
+
+  // How much of the board is trustworthy right now (see this branch's fix
+  // for why this exists): a silent identity-resolution gap is exactly what
+  // let a drafted player sit on the board marked available, invisibly, on a
+  // real draft day. This makes that number impossible to miss instead.
+  function renderIdentity(status) {
+    var e = document.getElementById('identity');
+    var id = status.identity;
+    if (!id || id.total === 0) {
+      e.textContent = 'identity: n/a (predraft)';
+      e.classList.remove('stale');
+      return;
+    }
+    var pctText = id.rate === null ? '-' : Math.round(id.rate * 100) + '%';
+    e.textContent = 'identity: ' + id.matched + '/' + id.total + ' matched (' + pctText + ')';
+    e.classList.toggle('stale', id.rate !== null && id.rate < 0.5);
+  }
+
+  function renderRecs(recs) {
+    var wrap = document.getElementById('recs');
+    wrap.innerHTML = '';
+    if (!recs || recs.length === 0) {
+      wrap.appendChild(el('div', 'empty', 'No recommendations right now.'));
+      return;
+    }
+    recs.forEach(function (r, i) {
+      var card = el('div', 'rec-card');
+      card.appendChild(el('div', 'rec-rank', String(i + 1)));
+      card.appendChild(el('div', 'rec-name', r.name));
+      card.appendChild(el('div', 'rec-meta', r.position + (r.tier ? ' · tier ' + r.tier : '')));
+      var stats = el('div', 'rec-stats');
+      var vorBox = el('div'); vorBox.appendChild(el('span', 'label', 'VOR')); vorBox.appendChild(el('span', 'value', num(r.vor, 1)));
+      var goneBox = el('div'); goneBox.appendChild(el('span', 'label', 'P(gone)'));
+      var goneVal = el('span', 'value ' + classify(r.pGone), pct(r.pGone)); goneBox.appendChild(goneVal);
+      var lossBox = el('div'); lossBox.appendChild(el('span', 'label', 'Exp. loss')); lossBox.appendChild(el('span', 'value', num(r.expectedLoss, 1)));
+      stats.appendChild(vorBox); stats.appendChild(goneBox); stats.appendChild(lossBox);
+      card.appendChild(stats);
+      card.addEventListener('click', function () { markTaken(r.playerId); });
+      wrap.appendChild(card);
+    });
+  }
+
+  function applyFilter() {
+    boardRows.forEach(function (tr, playerId) {
+      var pos = tr.getAttribute('data-position');
+      tr.hidden = !(filter === 'ALL' || pos === filter);
+    });
+  }
+
+  function renderFilters(positions) {
+    var wrap = document.getElementById('filters');
+    if (wrap.childElementCount > 0) return; // built once
+    ['ALL'].concat(positions).forEach(function (p) {
+      var btn = el('button', p === filter ? 'active' : '', p);
+      btn.addEventListener('click', function () {
+        filter = p;
+        Array.prototype.forEach.call(wrap.children, function (b) { b.classList.toggle('active', b.textContent === p); });
+        applyFilter();
+      });
+      wrap.appendChild(btn);
+    });
+  }
+
+  function updateRow(tr, row) {
+    tr.className = row.taken ? 'taken' : '';
+    tr.querySelector('.pname').textContent = row.name;
+    tr.querySelector('.pgone').textContent = pct(row.pGone);
+    tr.querySelector('.pgone').className = 'num pgone ' + classify(row.pGone);
+  }
+
+  function renderBoard(rows) {
+    var body = document.getElementById('boardBody');
+    var isFirstRender = boardRows.size === 0;
+    if (isFirstRender) body.innerHTML = '';
+
+    var positions = [];
+    rows.forEach(function (row) {
+      if (positions.indexOf(row.position) === -1 && row.position) positions.push(row.position);
+      var tr = boardRows.get(row.playerId);
+      if (!tr) {
+        tr = document.createElement('tr');
+        tr.setAttribute('data-position', row.position || '');
+        var nameTd = el('td'); nameTd.appendChild(el('span', 'pname', row.name));
+        tr.appendChild(nameTd);
+        var posTd = el('td'); posTd.appendChild(el('span', 'pos-badge', row.position || '-'));
+        tr.appendChild(posTd);
+        tr.appendChild(el('td', 'num', num(row.proj, 1)));
+        tr.appendChild(el('td', 'num', num(row.vor, 1)));
+        tr.appendChild(el('td', 'num', row.tier === null || row.tier === undefined ? '-' : String(row.tier)));
+        tr.appendChild(el('td', 'num', num(row.adp, 1)));
+        tr.appendChild(el('td', 'num pgone', pct(row.pGone)));
+        tr.addEventListener('click', function () { if (!row.taken) markTaken(row.playerId); });
+        boardRows.set(row.playerId, tr);
+        body.appendChild(tr);
+      }
+      tr._row = row;
+      updateRow(tr, row);
+    });
+    positions.sort();
+    renderFilters(positions);
+    applyFilter();
+  }
+
+  function renderRoster(roster) {
+    var slotsWrap = document.getElementById('rosterSlots');
+    slotsWrap.innerHTML = '';
+    (roster.slots || []).forEach(function (s) {
+      var row = el('div', 'slot-row');
+      row.appendChild(el('div', 'slot-label', s.slot));
+      if (s.player) {
+        row.appendChild(el('div', 'slot-player', s.player.name + ' (' + s.player.position + ')'));
+      } else {
+        row.appendChild(el('div', 'slot-player empty', 'empty'));
+      }
+      slotsWrap.appendChild(row);
+    });
+    var bench = document.getElementById('rosterBench');
+    if (!roster.bench || roster.bench.length === 0) {
+      bench.textContent = '(none)';
+      bench.className = 'slot-player empty';
+    } else {
+      bench.className = 'slot-player';
+      // A pick the engine never matched still has a Yahoo name and still
+      // occupies a roster spot, so show it as a name with an honest marker
+      // rather than "470.p.42654 (null)" -- which told the user nothing at
+      // exactly the moment they were checking what they already own.
+      bench.textContent = roster.bench.map(function (p) {
+        if (p.position) return p.name + ' (' + p.position + ')';
+        return p.name + (p.unmatched ? ' (unmatched)' : '');
+      }).join(', ');
+    }
+  }
+
+  function render(next) {
+    state = next;
+    renderClock(state.status);
+    renderBanner(state.status.banner);
+    renderUpdated(state.status);
+    renderIdentity(state.status);
+    renderRecs(state.recommendations);
+    renderBoard(state.board);
+    renderRoster(state.roster);
+  }
+
+  async function poll() {
+    try {
+      var next = await api('/api/state');
+      render(next);
+    } catch (e) {
+      // A dead network doesn't take the page down -- the last render stands,
+      // and renderUpdated's local ticking (below) still shows growing staleness.
+    }
+  }
+
+  document.getElementById('undoBtn').addEventListener('click', undoLast);
+
+  poll();
+  pollTimer = setInterval(poll, 3000);
+  tickTimer = setInterval(function () { if (state) renderUpdated(state.status); }, 1000);
+})();
+</script>
+</body>
+</html>

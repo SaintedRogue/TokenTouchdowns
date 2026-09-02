@@ -45,6 +45,7 @@ import { readCache, writeCache } from './cache.js';
 import { buildCrosswalk, buildAdpIndex, matchAdp, lookupByYahooKey, normalizeName } from './identity.js';
 import { enrichPlayers, IMPLEMENTED_CAPABILITIES } from './enrich.js';
 import { createAnalyticsClient, AnalyticsError, DEFAULT_ANALYTICS_DIR } from './analytics.js';
+import { startDraftRoomServer } from './draft-room.js';
 import path from 'node:path';
 
 /**
@@ -74,6 +75,8 @@ Commands:
   league export [key]    Export scoring/roster settings for the draft engine
   draft board            Ranked draft board (VOR, tier, ADP, survival)
   draft pick              What to take right now
+  draft-room              Live draft room: a localhost page that tracks picks
+                          and re-ranks recommendations as the draft happens
   mock                   Simulate and compare draft strategies
   lineup                 Optimal lineup for this week
   playoff                Variance-aware lineup vs. an opponent
@@ -85,6 +88,10 @@ Draft engine flags (analytics/data/league.json + nflverse parquet required):
   --teams=N  --slot=K  --season=YYYY  --conditional
   draft board [--teams N] [--slot K] [--count N]
   draft pick  [--roster PATH] --slot K [--round N] [--rounds N]
+  draft-room --teams=N --slot=K [--port 8787] [--poll 3] [--rounds 15] [--league KEY]
+          Binds to 127.0.0.1 only. Builds the board once at startup (the ~4-5s
+          Monte Carlo step), then polls Yahoo's draft results every --poll
+          seconds, re-ranking recommendations cheaply against that same board.
   mock [--trials N] [--teams N] [--strategy adp,vor,vor_survival] [--rounds N]
   lineup [--week N]
   playoff [--week N] [--opponent team_key_or_name]
@@ -715,8 +722,10 @@ export function leagueConfig(league) {
   };
 }
 
-/** The team the logged-in user owns in a league. */
-async function myTeamKey(client, leagueKey) {
+/** The team the logged-in user owns in a league. Exported for
+ * src/draft-room.js, which needs this same lookup to know which team_key
+ * is "me" when reconciling live draft_results against my own roster. */
+export async function myTeamKey(client, leagueKey) {
   const { league } = await client.get(`league/${leagueKey}/teams`);
   const mine = league.teams.find((t) => t.is_owned_by_current_login === 1);
   if (!mine) throw new YahooApiError('Could not find your team in that league');
@@ -729,8 +738,10 @@ async function myLeagues(client) {
   return data.users?.[0]?.games?.[0]?.leagues ?? [];
 }
 
-/** Use the supplied key, else fall back to the user's first league. */
-async function resolveLeagueKey(client, given) {
+/** Use the supplied key, else fall back to the user's first league.
+ * Exported for src/draft-room.js -- same lookup `draft-room --league=`
+ * needs, and the same "just use my first league" default. */
+export async function resolveLeagueKey(client, given) {
   if (given) return given;
   const leagues = await myLeagues(client);
   if (leagues.length === 0) throw new YahooApiError('No leagues found for this account');
@@ -834,6 +845,11 @@ export async function runCommand(
     // fallback at a small fixture instead of the real (large, gitignored)
     // analytics/data/nflverse_players.json -- see resolveRosterIdentity.
     nflverseRosterPath = DEFAULT_NFLVERSE_ROSTER_PATH,
+    // `draft-room` is the one long-lived command: it only returns once this
+    // resolves (real SIGINT/SIGTERM in production; a test supplies an
+    // already-resolved/controllable promise so the command can be exercised
+    // end-to-end without signalling the test process itself).
+    shutdownSignal = undefined,
   } = {},
 ) {
   const emit = (rows, columns) => {
@@ -1172,6 +1188,50 @@ export async function runCommand(
           `Unknown draft subcommand "${sub ?? ''}". Usage: ` +
           'draft board [--teams N] [--slot K] | draft pick [--roster PATH] --slot K',
         );
+      }
+
+      case 'draft-room': {
+        const teamsFlag = intFlag(flags, 'teams');
+        const slotFlag = intFlag(flags, 'slot');
+        if (teamsFlag === undefined) throw new UsageError('--teams is required, e.g. --teams=10');
+        if (slotFlag === undefined) throw new UsageError('--slot is required, e.g. --slot=3');
+        const port = intFlag(flags, 'port') ?? 8787;
+        const pollSeconds = intFlag(flags, 'poll') ?? 3;
+        const rounds = intFlag(flags, 'rounds') ?? 15;
+        const leagueFlagValue = flags.league && flags.league !== true ? flags.league : undefined;
+
+        // Builds the board ONCE (docs/draft-room-design.md section 3) before
+        // ever binding a socket -- a broken venv or a dead session fails
+        // this await and falls straight into this function's own
+        // AnalyticsError/YahooApiError/SessionExpiredError handling below,
+        // so the command fails loudly BEFORE the draft, never during it.
+        const started = await startDraftRoomServer({
+          port, pollSeconds, teams: teamsFlag, slot: slotFlag, rounds,
+          client, analytics, cacheDir, league: leagueFlagValue,
+        });
+        out.write(`Draft room ready: ${started.url}\n`);
+        out.write(
+          `teams=${teamsFlag} slot=${slotFlag} rounds=${rounds}, polling Yahoo every ${pollSeconds}s. `
+          + 'Press Ctrl+C to stop.\n',
+        );
+
+        // A long-lived command, unlike every other case here: it never
+        // returns on its own, only on SIGINT/SIGTERM (or, in a test, an
+        // injected `shutdownSignal` -- see runCommand's destructuring above
+        // -- so this path is exercisable without sending the test process
+        // itself a real signal), so the server and its poller are torn down
+        // cleanly instead of just left running.
+        await (shutdownSignal ?? new Promise((resolve) => {
+          const onSignal = () => {
+            process.off('SIGINT', onSignal);
+            process.off('SIGTERM', onSignal);
+            resolve();
+          };
+          process.on('SIGINT', onSignal);
+          process.on('SIGTERM', onSignal);
+        }));
+        await started.close();
+        return 0;
       }
 
       case 'mock': {
