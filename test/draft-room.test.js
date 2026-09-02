@@ -113,6 +113,27 @@ const TEAMS_RESPONSE = {
   },
 };
 
+// A synthetic `draft_results` payload for this fixture league (4 teams, 6
+// rounds, snake), with the first `made` picks taken and the rest pending --
+// exactly the shape Yahoo publishes from the very first poll (every pick
+// slot for the whole draft, made or not; see src/draft-state.js). Made picks
+// use player keys the crosswalk cannot resolve, which is fine here: the
+// pick still counts and still advances the clock, which is all these tests
+// need.
+const TOTAL_PICKS = 24;
+function draftResultsAfter(made) {
+  const results = [];
+  for (let pick = 1; pick <= TOTAL_PICKS; pick += 1) {
+    const round = Math.floor((pick - 1) / 4) + 1;
+    const inRound = (pick - 1) % 4;
+    const slot = round % 2 === 1 ? inRound + 1 : 4 - inRound;
+    const entry = { pick, round, team_key: `470.l.1.t.${slot}` };
+    if (pick <= made) entry.player_key = `470.p.${1000 + pick}`;
+    results.push(entry);
+  }
+  return { league: { draft_results: results } };
+}
+
 function emptyDraftResults() {
   return { league: { draft_results: [] } };
 }
@@ -1014,4 +1035,231 @@ test('createDraftRoom degrades to an empty crosswalk when no sleeper cache exist
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// --- the guidance block (the redesign) ---------------------------------------
+//
+// docs/positional-value.md measured that filling the lineup is worth +63 to
+// +80 actual points in this 4-team league -- more than any positional
+// strategy -- while the largest waiting cost anywhere in a 4-team draft is 20
+// points. The old page led with a big red survival percentage (the small
+// effect) and buried roster completion (the large one) in a grey panel.
+// `guidance` is what inverts that, and these tests hold the inversion in
+// place. The arithmetic itself lives in src/draft-guidance.js, unit-tested
+// there; what is asserted here is that the room WIRES it to real state.
+
+test('/api/state carries a guidance block: hero, cliffs, runway, urgency, replacement', async () => {
+  const { room } = await baseRoom();
+  const { guidance } = room.getViewModel();
+  for (const key of ['hero', 'cliffs', 'runway', 'urgency', 'replacement', 'league']) {
+    assert.ok(key in guidance, `guidance is missing "${key}"`);
+  }
+  assert.deepEqual(guidance.cliffs.map((c) => c.position), ['RB', 'WR', 'TE', 'QB']);
+  assert.deepEqual(guidance.league, { teams: 4, rounds: 6, slot: 2 });
+});
+
+test('the hero is the engine\'s own top recommendation -- the page never re-ranks', async () => {
+  const { room } = await baseRoom();
+  const view = room.getViewModel();
+  assert.equal(view.guidance.hero.playerId, view.recommendations[0].playerId);
+  assert.equal(view.guidance.hero.name, view.recommendations[0].name);
+  assert.equal(view.guidance.hero.reasons.length, 4);
+  assert.deepEqual(view.guidance.hero.reasons.map((r) => r.kind), ['cliff', 'survival', 'need', 'runway']);
+});
+
+test('the cliff strip counts only players still on the board, and drains as picks are made', async () => {
+  const { room } = await baseRoom();
+  const before = room.getViewModel().guidance.cliffs.find((c) => c.position === 'RB');
+  assert.equal(before.remaining, 2); // P1 and P5, both inside RB12
+  await room.markTaken('P1');
+  const after = room.getViewModel().guidance.cliffs.find((c) => c.position === 'RB');
+  assert.equal(after.remaining, 1);
+  assert.equal(after.afterRank, 12);
+  assert.equal(after.drop, 68.0);
+});
+
+test('THE HONESTY RULE, end to end: this 4-team room never renders an alarm-level urgency', async () => {
+  // Not a restatement of the unit test -- this drives the ROOM through every
+  // round of its own 24-pick draft, via Yahoo's own draft_results, and
+  // asserts the urgency level it actually publishes at each one.
+  const script = [];
+  for (let n = 0; n <= TOTAL_PICKS; n += 1) script.push(draftResultsAfter(n));
+  const client = fakeClient({
+    'league/470.l.1/teams': TEAMS_RESPONSE,
+    'league/470.l.1/draftresults': script,
+  });
+  const { room } = await baseRoom({ client });
+  const seen = new Set();
+  for (let n = 0; n <= TOTAL_PICKS; n += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    await room.poll();
+    const { guidance, status } = room.getViewModel();
+    seen.add(status.currentRound);
+    assert.notEqual(guidance.urgency.level, 'alarm',
+      `round ${status.currentRound}: ${JSON.stringify(guidance.urgency)}`);
+  }
+  assert.ok(seen.has(6), `never actually reached the last round (saw ${[...seen]})`);
+});
+
+test('urgency names the measured table it read and never interpolates the room\'s own team count', async () => {
+  const { room } = await baseRoom({ extra: { teams: 14, slot: 3 } });
+  const { urgency } = room.getViewModel().guidance;
+  assert.equal(urgency.teams, 14);
+  assert.equal(urgency.basisTeams, 10);
+  assert.ok(Number.isFinite(urgency.byPosition.RB));
+});
+
+test('the runway counts unfilled starting slots and leaves K/DEF out of the count', async () => {
+  const { room } = await baseRoom({
+    extra: { rounds: 12 },
+    leagueConfig: { ...LEAGUE_CONFIG, rosterSlots: { QB: 1, RB: 2, WR: 1, TE: 1, K: 1, DEF: 1 } },
+  });
+  const { runway } = room.getViewModel().guidance;
+  assert.equal(runway.empty, 5);
+  assert.deepEqual(runway.unprojected, ['K', 'DEF']);
+  assert.equal(runway.roundsRemaining, 12);
+  // Seven spare rounds for five slots: nothing to shout about, and the page
+  // must not shout. A board that always looks urgent teaches its user to
+  // ignore it.
+  assert.equal(runway.level, 'calm');
+});
+
+test('the runway raises the alarm when the rounds left stop covering the empty slots', async () => {
+  // rounds=5, five empty projected slots -> slack 0, the one thing in this
+  // league genuinely worth 63-80 points.
+  const { room } = await baseRoom({
+    extra: { rounds: 5 },
+    leagueConfig: { ...LEAGUE_CONFIG, rosterSlots: { QB: 1, RB: 2, WR: 1, TE: 1, K: 1, DEF: 1 } },
+  });
+  const { runway } = room.getViewModel().guidance;
+  assert.equal(runway.slack, 0);
+  assert.equal(runway.level, 'alarm');
+});
+
+test('status publishes rounds remaining, which the runway is measured against', async () => {
+  const { room } = await baseRoom();
+  assert.equal(room.getViewModel().status.roundsRemaining, 6);
+});
+
+test('board rows carry positional rank and the ADP-vs-now delta', async () => {
+  const { room } = await baseRoom();
+  const view = room.getViewModel();
+  for (const key of ['posRank', 'adpDelta', 'aboveCliff']) {
+    assert.ok(key in view.board[0], `board row is missing "${key}"`);
+  }
+  const p5 = view.board.find((r) => r.playerId === 'P5'); // RB, adp 10, second RB
+  assert.equal(p5.posRank, 2);
+  assert.equal(p5.aboveCliff, true);
+  // currentPick 1, adp 10 -> nine picks EARLIER than his ADP.
+  assert.equal(p5.adpDelta, -9);
+});
+
+test('the ADP delta turns positive once a player outlasts his own ADP -- he is falling', async () => {
+  const client = fakeClient({
+    'league/470.l.1/teams': TEAMS_RESPONSE,
+    'league/470.l.1/draftresults': [draftResultsAfter(11)],
+  });
+  const { room } = await baseRoom({ client });
+  await room.poll();
+  const view = room.getViewModel();
+  assert.equal(view.status.currentPick, 12);
+  const p4 = view.board.find((r) => r.playerId === 'P4'); // adp 8, still on the board
+  assert.equal(p4.taken, false);
+  assert.equal(p4.adpDelta, 4); // four picks past his own ADP
+});
+
+test('recommendations carry the same depth the board does, projection included', async () => {
+  const { room } = await baseRoom();
+  for (const row of room.getViewModel().recommendations) {
+    for (const key of ['proj', 'posRank', 'adpDelta', 'expectedLoss', 'fillsNeed']) {
+      assert.ok(key in row, `recommendation row is missing "${key}"`);
+    }
+  }
+});
+
+test('replacement level is read off this board\'s own VOR, for the explainer panel', async () => {
+  const { room } = await baseRoom();
+  const { replacement } = room.getViewModel().guidance;
+  // BOARD_PLAYERS has no vor==0 row, so the closest to zero stands in: the
+  // point is that the number comes from the engine's column, not a formula.
+  assert.equal(replacement.RB.rank, 2);
+  assert.equal(replacement.RB.points, 150);
+  assert.ok(replacement.QB.points > replacement.RB.points); // the VOR story, on this league's own board
+});
+
+test('guidance survives a postdraft state without throwing or inventing a hero', async () => {
+  const client = fakeClient({
+    'league/470.l.1/teams': TEAMS_RESPONSE,
+    'league/470.l.1/draftresults': [draftResultsAfter(TOTAL_PICKS)],
+  });
+  const { room } = await baseRoom({ client });
+  await room.poll();
+  const view = room.getViewModel();
+  assert.equal(view.status.draftStatus, 'postdraft');
+  assert.equal(view.guidance.hero, null);
+  assert.equal(view.guidance.urgency.level, 'calm');
+  assert.equal(view.guidance.runway.roundsRemaining, 0);
+});
+
+// --- the survival horizon while you are ON THE CLOCK -------------------------
+//
+// A defect the redesign's own rendering exposed: `deriveClock` correctly
+// reports myNextPick === currentPick while you are on the clock (that is what
+// `isMyTurn` is built from), and `recompute` used to pass that straight
+// through as `nextPick`. `tt.survival.add_survival` rejects `next_pick <=
+// pick` outright, so EVERY one of the user's own turns raised the recompute
+// banner and froze the recommendations at exactly the moment the tool is
+// being used.
+
+test('on the clock, survival is measured to your FOLLOWING turn, not to the pick you are making', async () => {
+  // myPicks(4, 2, 6) = [2, 7, 10, 15, 18, 23]; one pick made -> I am on #2.
+  const client = fakeClient({
+    'league/470.l.1/teams': TEAMS_RESPONSE,
+    'league/470.l.1/draftresults': [draftResultsAfter(1)],
+  });
+  const { room, analytics } = await baseRoom({ client });
+  await room.poll();
+  const view = room.getViewModel();
+  assert.equal(view.status.isMyTurn, true);
+  assert.equal(view.status.myNextPick, 2);
+
+  const { stdin } = analytics.runScriptCalls.at(-1).opts;
+  assert.equal(stdin.pick, 2);
+  assert.equal(stdin.nextPick, 7, 'must look FORWARD to my next turn, not at this pick');
+  assert.equal(view.status.banner, null, 'the recompute must not fail on my own turn');
+});
+
+test('the pick survival is measured to is published, and the hero sentence names it', async () => {
+  const client = fakeClient({
+    'league/470.l.1/teams': TEAMS_RESPONSE,
+    'league/470.l.1/draftresults': [draftResultsAfter(1)],
+  });
+  const { room } = await baseRoom({ client });
+  await room.poll();
+  const view = room.getViewModel();
+  assert.equal(view.status.survivalPick, 7);
+  const survival = view.guidance.hero.reasons.find((r) => r.kind === 'survival');
+  assert.match(survival.text, /#7/);
+  assert.doesNotMatch(survival.text, /#2\b/);
+});
+
+test('off the clock, the survival horizon is simply your next pick', async () => {
+  const { room } = await baseRoom();
+  const view = room.getViewModel();
+  assert.equal(view.status.myNextPick, 2);
+  assert.equal(view.status.survivalPick, 2);
+});
+
+test('on your last pick of the draft, survival runs to the end of the draft', async () => {
+  // 22 picks made -> pending starts at #23, my last pick. There is no
+  // following turn, so everyone not taken now really is gone.
+  const client = fakeClient({
+    'league/470.l.1/teams': TEAMS_RESPONSE,
+    'league/470.l.1/draftresults': [draftResultsAfter(22)],
+  });
+  const { room, analytics } = await baseRoom({ client });
+  await room.poll();
+  assert.equal(room.getViewModel().status.currentPick, 23);
+  assert.equal(room.getViewModel().status.survivalPick, 25); // teams * rounds + 1
+  assert.equal(analytics.runScriptCalls.at(-1).opts.stdin.nextPick, 25);
 });

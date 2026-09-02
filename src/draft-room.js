@@ -36,6 +36,31 @@
  *     is kept, and the failure is surfaced only via `banner`
  *   - the poll loop itself NEVER throws (a `setInterval` callback that
  *     rejects is an unhandled rejection on draft day -- the worst outcome)
+ *
+ * /api/state SHAPE (what the page renders, nothing more):
+ *   status         draftStatus, picksMade, currentPick/Round, myNextPick(+Round),
+ *                  survivalPick (the pick every survival number is measured
+ *                  to -- see `survivalPickFrom`), roundsRemaining, onTheClock,
+ *                  isMyTurn, lastPollAt/Ok, staleSeconds, banner,
+ *                  identity{matched,unresolved,total,rate}
+ *   recommendations the engine's own ranking, top N, each with name/position/
+ *                  proj/vor/tier/adp/pGone/expectedLoss + posRank (ADP rank
+ *                  within position), adpDelta (currentPick - adp; positive =
+ *                  he is falling) and fillsNeed
+ *   board          the same decoration for every VOR-sorted row, plus
+ *                  taken/takenBy and aboveCliff
+ *   roster         {slots:[{slot,player}], bench:[...]}
+ *   guidance       THE REDESIGN (see `buildGuidance`): hero (= the engine's
+ *                  own top recommendation, with four plain-language reasons),
+ *                  cliffs (per-position count still above the measured cliff),
+ *                  runway (unfilled starting slots vs rounds left -- the
+ *                  largest measured effect in this league), urgency (the
+ *                  MEASURED waiting cost for this round and team count, and
+ *                  the level the page is allowed to render at), replacement
+ *                  (where this board's own VOR crosses zero) and league.
+ *                  All of it built from src/draft-guidance.js, which
+ *                  transcribes docs/positional-value.md and computes no
+ *                  fantasy logic of its own.
  */
 import { readFile } from 'node:fs/promises';
 import http from 'node:http';
@@ -46,6 +71,10 @@ import {
   myPicks, nextPick, parseDraftResults, clockFromPending, createState, applyPicks,
   markTaken as markTakenState, undo as undoState,
 } from './draft-state.js';
+import {
+  CLIFFS, positionAdpRanks, cliffStrip, waitingCost, urgencyLevel, basisTeamsFor,
+  runwayState, replacementLine, heroReasons,
+} from './draft-guidance.js';
 import { SessionExpiredError, YahooApiError } from './client.js';
 import { buildCrosswalk, lookupByYahooKey, buildAdpIndex, matchAdp } from './identity.js';
 import { recordsOf } from './sources/index.js';
@@ -107,6 +136,12 @@ async function readJsonBody(req) {
 }
 
 function roundsRemainingFor(teams, slot, rounds, myNextPickNumber) {
+  // A team with no next pick has no runway left at all -- 0, not "the last
+  // round". The redesign's runway row divides rounds by unfilled slots, and
+  // a phantom final round there would understate the one effect this league
+  // actually pays for (docs/positional-value.md: filling the lineup is worth
+  // +63 to +80 actual points at 4 teams).
+  if (myNextPickNumber === null || myNextPickNumber === undefined) return 0;
   const picks = myPicks(teams, slot, rounds);
   const idx = picks.indexOf(myNextPickNumber);
   const myRound = idx === -1 ? rounds : idx + 1;
@@ -159,6 +194,14 @@ export async function createDraftRoom({
   });
   const boardRecords = (boardPayload.players ?? []).filter((r) => r.player_id != null);
   const boardByPlayerId = new Map(boardRecords.map((r) => [r.player_id, r]));
+  // Rank within position by consensus ADP -- the axis docs/positional-value.md
+  // measures its cliffs on. Computed ONCE here, alongside the board, for
+  // exactly the reason the board itself is (module docstring's performance
+  // split): a player's ADP does not change during a draft.
+  const adpRankByPlayerId = positionAdpRanks(boardRecords);
+  // Where THIS board's own VOR crosses zero, per position. Startup-constant
+  // for the same reason, and the ground the page's explainer stands on.
+  const replacementByPosition = replacementLine(boardRecords);
 
   const leagueConfigDict = leagueConfigOverride ?? JSON.parse(
     await readFile(path.join(analytics.cwd, 'data', 'league.json'), 'utf8'),
@@ -285,8 +328,41 @@ export async function createDraftRoom({
     };
   }
 
-  function myNextPickNow() {
-    return deriveClock().myNextPick;
+  /**
+   * The pick survival is measured TO -- and it is NOT always `myNextPick`.
+   *
+   * While you are ON THE CLOCK, `deriveClock` correctly reports
+   * `myNextPick === currentPick` (that is exactly what `isMyTurn` is built
+   * from). `recompute` used to pass that straight through, and
+   * `tt.survival.add_survival` rejects `next_pick <= pick` outright -- it
+   * answers "will he last from my pick now to my NEXT one", which only makes
+   * sense looking forward. The result was that EVERY one of the user's own
+   * turns raised the recompute banner and froze the recommendations at
+   * exactly the moment the tool is being used. (Found by rendering a real
+   * 4-team draft state; see this branch's report.)
+   *
+   * On the clock the horizon that actually matters is the FOLLOWING turn: if
+   * I don't take him now, will he still be there then? Yahoo's own pending
+   * list is authoritative here for the same reason `deriveClock` prefers it
+   * -- it is correct for a custom draft order this module does not model --
+   * with `myPicks` as the fallback before the first successful poll.
+   *
+   * On the LAST pick of my draft there is no following turn at all, so the
+   * horizon is the end of the draft: everyone I do not take now is gone,
+   * which is the honest reading rather than a crash or a made-up number.
+   */
+  function survivalPickFrom(clock) {
+    if (clock.myNextPick === null) return null;
+    if (clock.myNextPick > draftState.currentPick) return clock.myNextPick;
+    let following = null;
+    for (const p of draftState.pending ?? []) {
+      if (p.teamKey !== myTeamKeyValue) continue;
+      if (p.pick > draftState.currentPick && (following === null || p.pick < following)) following = p.pick;
+    }
+    if (following === null) {
+      following = myPicks(teams, slot, rounds).find((p) => p > draftState.currentPick) ?? null;
+    }
+    return following ?? (teams * rounds + 1);
   }
 
   /**
@@ -300,7 +376,9 @@ export async function createDraftRoom({
    * board"); only `recomputeErrorMessage` changes, surfaced via `banner`.
    */
   async function recompute() {
-    const myNext = myNextPickNow();
+    const clock = deriveClock();
+    const myNext = clock.myNextPick;
+    const survivalPick = survivalPickFrom(clock);
     if (myNext === null) {
       // My draft is over -- nothing left to recommend. The board itself is
       // still worth serving (with the last known decoration, if any), just
@@ -319,7 +397,7 @@ export async function createDraftRoom({
         stdin: {
           records: boardRecords,
           pick: draftState.currentPick,
-          nextPick: myNext,
+          nextPick: survivalPick,
           availableIds: [...draftState.available],
           roster,
           config: leagueConfigDict,
@@ -543,6 +621,20 @@ export async function createDraftRoom({
     return m;
   }
 
+  /** Positional ADP rank, and how far past (or short of) his own ADP a
+   * player is RIGHT NOW. A positive `adpDelta` means he is falling -- "going
+   * 14 picks later than ADP" is one of the most actionable things on a live
+   * board and the old page rendered nothing at all for it. */
+  function decorate(r) {
+    const posRank = adpRankByPlayerId.get(r.player_id) ?? null;
+    const cliff = CLIFFS[r.position] ?? null;
+    return {
+      posRank,
+      adpDelta: Number.isFinite(r.adp) ? draftState.currentPick - r.adp : null,
+      aboveCliff: cliff !== null && posRank !== null ? posRank <= cliff.afterRank : null,
+    };
+  }
+
   function buildBoardView() {
     const takenByMap = buildTakenByMap();
     const rows = (recomputeCache.board ?? boardRecords).map((r) => {
@@ -558,22 +650,34 @@ export async function createDraftRoom({
         pGone: r.p_gone_by_next ?? null,
         taken: !available,
         takenBy: available ? null : (takenByMap.get(r.player_id) ?? null),
+        ...decorate(r),
       };
     });
     rows.sort((a, b) => (b.vor ?? -Infinity) - (a.vor ?? -Infinity));
     return rows.slice(0, boardViewLimit);
   }
 
-  function buildRecommendationsView() {
+  function buildRecommendationsView(runway) {
+    const emptyPositions = new Set();
+    for (const s of runway?.slots ?? []) {
+      if (s.filled) continue;
+      const eligible = FLEX_ELIGIBLE[s.slot] ?? [s.slot];
+      for (const pos of eligible) emptyPositions.add(pos);
+    }
     return (recomputeCache.recommendations ?? []).map((r) => ({
       playerId: r.player_id,
       name: r.name,
       position: r.position,
+      // The engine already knows a projection for every ranked player; the
+      // old view model simply dropped it before the page could show it.
+      proj: r.proj_points ?? null,
       vor: r.vor ?? null,
       tier: r.tier ?? null,
       adp: r.adp ?? null,
       pGone: r.p_gone_by_next ?? null,
       expectedLoss: r.expected_loss ?? null,
+      fillsNeed: emptyPositions.has(r.position),
+      ...decorate(r),
     }));
   }
 
@@ -621,8 +725,12 @@ export async function createDraftRoom({
       currentRound: clock.currentRound,
       myNextPick: clock.myNextPick,
       myNextPickRound: clock.myNextPickRound,
+      // The pick every survival number on the page is measured to. Equal to
+      // myNextPick except while you are on the clock -- see survivalPickFrom.
+      survivalPick: survivalPickFrom(clock),
       onTheClock: clock.onTheClock,
       isMyTurn,
+      roundsRemaining: roundsRemainingFor(teams, slot, rounds, clock.myNextPick),
       lastPollAt: lastPollAt === null ? null : new Date(lastPollAt).toISOString(),
       lastPollOk,
       staleSeconds: lastPollAt === null ? 0 : Math.max(0, Math.floor((now() - lastPollAt) / 1000)),
@@ -631,12 +739,85 @@ export async function createDraftRoom({
     };
   }
 
-  function getViewModel() {
+  /**
+   * THE REDESIGN'S CORE, and the reason this block exists at all.
+   *
+   * `docs/positional-value.md` measured, out of sample and graded on actual
+   * points, that in this 4-team league:
+   *   - FILLING THE LINEUP is worth +63 to +80 points -- more than any
+   *     positional strategy in the study. -> `runway`.
+   *   - POSITIONAL URGENCY is mostly a 10-team problem: the largest waiting
+   *     cost anywhere in a 4-team draft is 20 points, most rounds under 10.
+   *     -> `urgency`, whose alarm threshold sits above that measured
+   *     maximum on purpose, so a calm 4-team board renders calm.
+   *   - THE CLIFFS ARE COUNTABLE: RB and WR after the 12th at the position,
+   *     TE after the 6th, QB never. -> `cliffs`.
+   *
+   * Every number here is either an engine output being counted/ranked or a
+   * constant transcribed from that document (src/draft-guidance.js). Nothing
+   * here re-ranks, re-scores, or second-guesses the engine: `hero` is
+   * literally `recommendations[0]`, explained.
+   */
+  function buildGuidance(status, runway, recommendations) {
+    const cliffs = cliffStrip({
+      rows: recomputeCache.board ?? boardRecords,
+      available: draftState.available,
+      teams,
+      rounds,
+    });
+
+    const round = status.currentRound;
+    const byPosition = {};
+    const levelByPosition = {};
+    let clamped = false;
+    for (const position of ['QB', 'RB', 'WR', 'TE']) {
+      const cost = waitingCost({ position, round, teams, rounds });
+      byPosition[position] = cost.cost;
+      levelByPosition[position] = urgencyLevel(cost.cost);
+      clamped = clamped || cost.clamped;
+    }
+    for (const cliff of cliffs) cliff.level = levelByPosition[cliff.position] ?? 'calm';
+
+    const top = recommendations[0] ?? null;
+    const heroCost = top ? byPosition[top.position] ?? null : null;
+    const urgency = {
+      round: round ?? null,
+      teams,
+      basisTeams: basisTeamsFor(teams),
+      clamped,
+      byPosition,
+      levelByPosition,
+      position: top ? top.position : null,
+      cost: top ? heroCost : null,
+      level: top ? urgencyLevel(heroCost) : 'calm',
+    };
+
+    const hero = top === null ? null : {
+      ...top,
+      reasons: heroReasons({ top, cliffs, runway, myNextPick: status.survivalPick }),
+    };
+
     return {
-      status: buildStatus(),
-      recommendations: buildRecommendationsView(),
+      hero,
+      cliffs,
+      runway,
+      urgency,
+      replacement: replacementByPosition,
+      league: { teams, rounds, slot },
+    };
+  }
+
+  function getViewModel() {
+    const status = buildStatus();
+    const roster = buildRosterView();
+    const runway = runwayState({ slots: roster.slots, roundsRemaining: status.roundsRemaining });
+    const recommendations = buildRecommendationsView(runway);
+    return {
+      status,
+      recommendations,
       board: buildBoardView(),
-      roster: buildRosterView(),
+      roster,
+      guidance: buildGuidance(status, runway, recommendations),
     };
   }
 

@@ -4,190 +4,518 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TokenTouchdowns — Draft Room</title>
+<!--
+  THE LIVE DRAFT ROOM. Sixty seconds a pick, on draft-day wifi.
+
+  NO EXTERNAL REQUESTS OF ANY KIND. No CDN, no webfont, no image host. A font
+  that fails to load at pick 3 is a defect, so every typeface here is a system
+  stack and every byte of this page arrives with it.
+
+  WHAT THIS PAGE LEADS WITH, AND WHY. docs/positional-value.md measured, out
+  of sample and graded on the points players actually scored:
+    * Filling your lineup -- not finishing with an empty QB or TE slot -- is
+      worth +63 to +80 actual points in this 4-team league. It is the single
+      largest effect in the study, larger than any positional strategy.
+    * Positional urgency is mostly a 10-TEAM problem. The largest waiting cost
+      measured anywhere in a 4-team draft is 20 points; most rounds are under
+      10. At 10 teams the same numbers run 20-55.
+  The previous version of this page had that backwards: a large red P(GONE)
+  percentage on top, roster completion in a quiet grey box. So: the runway is
+  the only thing here allowed to raise the alarm in a shallow league, and the
+  alarm threshold for positional urgency sits ABOVE the largest cost ever
+  measured in a 4-team draft (src/draft-guidance.js). A calm board renders
+  calm. A page that always looks urgent teaches its reader to ignore it.
+
+  COLOUR CARRIES MEANING. Hue is position -- orange QB, green RB, blue WR,
+  purple TE -- which is how a drafter already reads a board. Red is the only
+  alarm colour on the page and appears only when something is genuinely at
+  risk.
+-->
 <style>
   :root {
-    --bg: #0b0f14;
-    --panel: #131a22;
-    --panel-2: #182029;
-    --border: #253140;
-    --text: #e8eef5;
-    --muted: #8ea0b3;
-    --accent: #4fd1c5;
-    --accent-dim: #1f4a47;
-    --warn: #f5a623;
-    --warn-bg: #3a2c0d;
-    --err: #ff6b6b;
-    --err-bg: #3a1414;
-    --good: #6fd97f;
-    font-size: 16px;
+    /* Hue means position. Red means risk. Nothing here is decoration. */
+    --field: #0A0E17;
+    --card: #131A27;
+    --chalk: #E6EDF7;
+    --faded: #76839A;
+    --qb: #F2A93B;
+    --rb: #3FB984;
+    --wr: #4C9BEA;
+    --te: #C57BE0;
+    --gone: #FF6B6B;
+
+    --line: rgba(230, 237, 247, 0.10);
+    --line-soft: rgba(230, 237, 247, 0.055);
+    --raised: #18212F;
+
+    --display: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --data: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   }
-  * { box-sizing: border-box; }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { color-scheme: dark; }
   body {
     margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--field);
+    color: var(--chalk);
+    font-family: var(--display);
+    font-size: 15px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
   }
-  header {
-    position: sticky; top: 0; z-index: 10;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-    padding: 0.75rem 1rem;
-  }
-  .clock-row {
-    display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
-  }
-  .clock {
-    font-size: 1.6rem; font-weight: 700; padding: 0.35rem 0.9rem; border-radius: 8px;
-    background: var(--panel-2); border: 1px solid var(--border);
-  }
-  .clock.my-turn { background: var(--accent); color: #04201d; border-color: var(--accent); }
-  .next-pick { font-size: 1.1rem; color: var(--muted); }
-  .next-pick b { color: var(--text); }
-  .spacer { flex: 1; }
-  .updated { font-size: 0.9rem; color: var(--muted); white-space: nowrap; }
-  .updated.stale { color: var(--warn); }
-  #undoBtn {
-    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 0.4rem 0.8rem; cursor: pointer; font-size: 0.9rem;
-  }
-  #undoBtn:hover { border-color: var(--accent); }
-  .banner {
-    margin-top: 0.6rem; padding: 0.55rem 0.8rem; border-radius: 6px; font-size: 0.92rem;
-    display: none;
-  }
-  .banner.warn { display: block; background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn); }
-  .banner.error { display: block; background: var(--err-bg); color: var(--err); border: 1px solid var(--err); }
 
-  main {
-    display: grid;
-    grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr);
-    gap: 1rem;
-    padding: 1rem;
-    max-width: 1400px;
-    margin: 0 auto;
+  /* Every live-updating number is monospaced and tabular: a column that
+     reflows as digits change is unusable under time pressure. */
+  .n { font-family: var(--data); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+
+  :focus-visible {
+    outline: 2px solid var(--chalk);
+    outline-offset: 2px;
+    border-radius: 3px;
   }
-  section.panel {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 0.9rem; margin-bottom: 1rem;
+
+  /* Hue means position. The fallback MUST come first: these all have equal
+     specificity, so a generic [data-pos] rule placed last would win over
+     every specific one and quietly grey out the whole palette. */
+  [data-pos] { --pos: var(--faded); }
+  [data-pos="QB"] { --pos: var(--qb); }
+  [data-pos="RB"] { --pos: var(--rb); }
+  [data-pos="WR"] { --pos: var(--wr); }
+  [data-pos="TE"] { --pos: var(--te); }
+
+  /* ---------- header: thin and quiet, never the story ---------- */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    background: rgba(10, 14, 23, 0.94);
+    backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--line);
+  }
+  .bar {
+    display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap;
+    max-width: 1500px; margin: 0 auto; padding: 0.5rem 1.1rem;
+    font-size: 0.78rem; letter-spacing: 0.04em; color: var(--faded);
+  }
+  .bar .where { color: var(--chalk); font-weight: 700; letter-spacing: 0.06em; }
+  .bar .sep { color: var(--line); }
+  .bar .mine b { color: var(--chalk); font-weight: 700; }
+  .bar .push { margin-left: auto; }
+  .bar .flag { color: var(--gone); }
+  .bar .onclock {
+    color: var(--field); background: var(--chalk); font-weight: 800;
+    padding: 0.1rem 0.5rem; border-radius: 3px; letter-spacing: 0.08em;
+  }
+  #undo {
+    font: inherit; font-size: 0.74rem; letter-spacing: 0.04em;
+    color: var(--faded); background: transparent;
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 0.2rem 0.55rem; cursor: pointer;
+  }
+  #undo:hover { color: var(--chalk); border-color: var(--faded); }
+
+  #banner {
+    display: none;
+    max-width: 1500px; margin: 0 auto; padding: 0.5rem 1.1rem 0.7rem;
+    font-size: 0.85rem;
+  }
+  #banner.show { display: block; }
+  #banner .box {
+    border-left: 3px solid var(--gone); background: rgba(255, 107, 107, 0.08);
+    padding: 0.5rem 0.7rem; border-radius: 0 4px 4px 0; color: var(--chalk);
+    max-height: 5.5rem; overflow: auto;
+  }
+  #banner.warn .box { border-left-color: var(--qb); background: rgba(242, 169, 59, 0.08); }
+
+  /* ---------- layout ---------- */
+  main {
+    max-width: 1500px; margin: 0 auto; padding: 0.8rem 1.1rem 2rem;
+    display: grid; gap: 0.7rem;
+    grid-template-columns: minmax(0, 1fr) 305px;
+    /* The side column spans all four rows, so whenever it is TALLER than the
+       left column (the explainer expanded, a long bench) the slack has to go
+       somewhere. Without this it inflates the middle rows and opens a gap
+       above the board; `1fr` on the last row sends it to the bottom of the
+       page instead, where nobody sees it. */
+    grid-template-rows: auto auto auto 1fr;
+    grid-template-areas:
+      "hero   side"
+      "cliffs side"
+      "runway side"
+      "board  side";
+    align-items: start;
+  }
+  .hero    { grid-area: hero; }
+  .cliffs  { grid-area: cliffs; }
+  .runway  { grid-area: runway; }
+  .board   { grid-area: board; }
+  .side    { grid-area: side; display: grid; gap: 0.7rem; }
+
+  .panel {
+    background: var(--card);
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
   }
   h2 {
-    margin: 0 0 0.6rem 0; font-size: 1rem; letter-spacing: 0.02em; text-transform: uppercase;
-    color: var(--muted);
+    margin: 0; font-size: 0.68rem; font-weight: 700;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--faded);
   }
 
-  /* Recommendations */
-  #recs { display: flex; flex-direction: column; gap: 0.5rem; }
-  .rec-card {
+  /* ---------- HERO: the decision, as a sentence ---------- */
+  .hero { padding: 0.8rem 1.1rem 0.7rem; border-left: 3px solid var(--pos, var(--line)); }
+  .hero-head { display: flex; align-items: baseline; gap: 0.75rem; }
+  .verb {
+    font-size: 0.8rem; font-weight: 800; letter-spacing: 0.16em;
+    color: var(--pos, var(--faded)); text-transform: uppercase; flex: none;
+  }
+  .hero-name {
+    margin: 0; font-size: clamp(1.5rem, 2.6vw, 2.15rem); font-weight: 800;
+    letter-spacing: -0.03em; line-height: 1.05; min-width: 0;
+    overflow-wrap: break-word;
+  }
+  .hero-pos {
+    margin-left: auto; flex: none;
+    font-family: var(--data); font-size: 0.95rem; font-weight: 700;
+    letter-spacing: 0.04em; color: var(--pos, var(--faded));
+    border: 1px solid var(--pos, var(--line)); border-radius: 4px;
+    padding: 0.1rem 0.45rem;
+  }
+  .hero-meta {
+    margin-top: 0.35rem; font-size: 0.8rem; color: var(--faded);
+    font-family: var(--data); font-variant-numeric: tabular-nums;
+  }
+  .hero-meta b { color: var(--chalk); font-weight: 600; }
+  .rule { height: 1px; background: var(--line); margin: 0.6rem 0 0.55rem; }
+
+  .reasons {
+    display: grid; grid-template-columns: max-content max-content max-content;
+    justify-content: start;
+    row-gap: 0.26rem; column-gap: 0.8rem; align-items: baseline;
+    font-size: 0.92rem;
+  }
+  .reasons .dot { color: var(--line); }
+  .reason { min-width: 0; }
+  .reason[data-kind="cliff"] { color: var(--chalk); }
+  .reason[data-kind="survival"] { color: var(--chalk); }
+  .reason[data-kind="need"] { color: var(--chalk); }
+  .reason[data-kind="runway"] { color: var(--faded); }
+  .hero[data-runway="alarm"] .reason[data-kind="runway"] { color: var(--gone); font-weight: 600; }
+  .hero[data-runway="notable"] .reason[data-kind="runway"] { color: var(--chalk); }
+
+  .hero-foot {
+    display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+    margin-top: 0.6rem; padding-top: 0.5rem; border-top: 1px solid var(--line-soft);
+    font-size: 0.78rem; color: var(--faded);
+  }
+  .cost { font-family: var(--data); font-variant-numeric: tabular-nums; }
+  .hero[data-urgency="notable"] .cost { color: var(--chalk); }
+  .hero[data-urgency="alarm"] .cost { color: var(--gone); font-weight: 700; }
+  .hero-foot .push { margin-left: auto; }
+  .mark {
+    font: inherit; font-size: 0.74rem; letter-spacing: 0.04em;
+    color: var(--faded); background: transparent;
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 0.2rem 0.55rem; cursor: pointer;
+  }
+  .mark:hover { color: var(--chalk); border-color: var(--faded); }
+
+  .then {
+    display: flex; align-items: center; gap: 0.4rem 0.7rem; flex-wrap: wrap;
+    margin-top: 0.45rem; font-size: 0.8rem; color: var(--faded);
+  }
+  .then-label { letter-spacing: 0.1em; text-transform: uppercase; font-size: 0.66rem; }
+  .then button {
+    font: inherit; font-size: 0.8rem; background: none; border: 0; padding: 0;
+    color: var(--faded); cursor: pointer; display: inline-flex; gap: 0.35rem; align-items: baseline;
+  }
+  .then button:hover { color: var(--chalk); }
+  .then .tag {
+    font-family: var(--data); font-variant-numeric: tabular-nums;
+    font-size: 0.68rem; font-weight: 700; color: var(--pos, var(--faded));
+  }
+  .then .tag.stake { color: var(--faded); font-weight: 400; }
+
+  /* ---------- CLIFF STRIP: the signature ---------- */
+  .cliffs { padding: 0.7rem 1.1rem 0.75rem; }
+  .cliff-head { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.45rem; }
+  .cliff-head .hint { font-size: 0.72rem; color: var(--faded); }
+  /* ONE grid for the whole strip, with each row contributing its cells
+     directly (display: contents). Four separate row-grids do not share
+     column widths, so the counts drifted out of line by however long that
+     position's bar happened to be. */
+  #cliffRows {
     display: grid;
-    grid-template-columns: 2.2rem 1fr auto;
-    gap: 0.15rem 0.9rem;
-    align-items: center;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.6rem 0.8rem;
-    cursor: pointer;
+    grid-template-columns: 2.1rem 170px max-content 1fr;
+    align-items: center; column-gap: 0.8rem; row-gap: 0.3rem;
   }
-  .rec-card:hover { border-color: var(--accent); }
-  .rec-rank { font-size: 1.3rem; font-weight: 700; color: var(--muted); grid-row: 1 / 3; }
-  .rec-name { font-size: 1.25rem; font-weight: 700; grid-column: 2; }
-  .rec-meta { grid-column: 2; color: var(--muted); font-size: 0.85rem; }
-  .rec-stats { grid-column: 3; grid-row: 1 / 3; display: flex; gap: 1.1rem; text-align: center; }
-  .rec-stats div { display: flex; flex-direction: column; }
-  .rec-stats .label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
-  .rec-stats .value { font-size: 1.15rem; font-weight: 700; }
-  .rec-stats .value.hi { color: var(--good); }
-  .rec-stats .value.warn { color: var(--warn); }
-  .rec-stats .value.danger { color: var(--err); }
-  #recs .empty, #board tbody .empty td { color: var(--muted); padding: 0.6rem; }
+  .cliff-row { display: contents; }
+  .cliff-pos {
+    font-family: var(--data); font-size: 0.9rem; font-weight: 700;
+    color: var(--pos, var(--faded));
+  }
+  .bar-track { display: flex; gap: 3px; }
+  .seg {
+    width: 11px; height: 17px; border-radius: 2px;
+    border: 1px solid var(--pos, var(--faded));
+    opacity: 0.28;
+  }
+  .seg.on { background: var(--pos, var(--faded)); opacity: 1; }
+  .cliff-count {
+    font-family: var(--data); font-variant-numeric: tabular-nums;
+    font-size: 0.92rem; color: var(--chalk);
+  }
+  .cliff-count b { color: var(--pos, var(--chalk)); font-weight: 700; }
+  .cliff-row[data-empty="1"] .cliff-count b { color: var(--faded); }
+  .cliff-row[data-thin="1"] .cliff-count b { font-size: 1.15rem; }
+  .cliff-row[data-alarm="1"] .cliff-count b { color: var(--gone); }
+  .cliff-note { font-size: 0.76rem; color: var(--faded); }
+  .slope {
+    height: 17px; width: 164px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--qb), rgba(242, 169, 59, 0.12));
+  }
 
-  /* Board */
-  .filters { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  /* ---------- RUNWAY: the largest measured effect ---------- */
+  .runway { padding: 0.6rem 1.1rem 0.65rem; }
+  .runway-line { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+  .slots { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  .slot {
+    font-family: var(--data); font-size: 0.78rem; font-weight: 700;
+    letter-spacing: 0.03em;
+    border: 1px solid var(--pos, var(--faded)); border-radius: 4px;
+    padding: 0.16rem 0.42rem; color: var(--pos, var(--faded));
+    display: inline-flex; gap: 0.3rem; align-items: center;
+  }
+  .slot.empty { border-style: dashed; opacity: 0.55; color: var(--faded); border-color: var(--faded); }
+  .slot .tick { font-size: 0.7rem; }
+  .runway-count {
+    margin-left: auto; font-family: var(--data); font-variant-numeric: tabular-nums;
+    font-size: 0.88rem; color: var(--faded);
+  }
+  .runway-count b { color: var(--chalk); font-weight: 700; }
+  .runway[data-level="notable"] .runway-count b { color: var(--qb); }
+  .runway[data-level="alarm"] { border-color: rgba(255, 107, 107, 0.45); }
+  .runway[data-level="alarm"] .runway-count b { color: var(--gone); }
+  .runway[data-level="alarm"] .slot.empty { border-color: var(--gone); color: var(--gone); opacity: 1; }
+  .runway-note { margin-top: 0.4rem; font-size: 0.74rem; color: var(--faded); }
+
+  /* ---------- BOARD ---------- */
+  .board { padding: 0.7rem 0 0; overflow: hidden; }
+  .board-head {
+    display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+    padding: 0 1.1rem 0.55rem;
+  }
+  .filters { display: flex; gap: 0.3rem; margin-left: auto; }
   .filters button {
-    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 999px; padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.85rem;
+    font: inherit; font-size: 0.74rem; font-weight: 700; letter-spacing: 0.05em;
+    background: transparent; color: var(--faded);
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 0.16rem 0.65rem; cursor: pointer;
   }
-  .filters button.active { background: var(--accent); color: #04201d; border-color: var(--accent); }
-  .board-wrap { max-height: 70vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  .filters button:hover { color: var(--chalk); }
+  .filters button[data-pos=""] { --pos: var(--chalk); }
+  .filters button[aria-pressed="true"] {
+    color: var(--field); background: var(--pos, var(--chalk));
+    border-color: var(--pos, var(--chalk));
+  }
+  .only {
+    font: inherit; font-size: 0.74rem; letter-spacing: 0.04em;
+    background: transparent; color: var(--faded);
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 0.16rem 0.65rem; cursor: pointer;
+  }
+  .only:hover { color: var(--chalk); }
+  .only[aria-pressed="true"] { color: var(--field); background: var(--chalk); border-color: var(--chalk); }
+  .scroll { max-height: 52vh; min-height: 170px; overflow: auto; border-top: 1px solid var(--line-soft); }
+  table { width: 100%; border-collapse: collapse; }
   thead th {
-    position: sticky; top: 0; background: var(--panel-2); text-align: left;
-    padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); color: var(--muted);
-    font-weight: 600; cursor: default;
+    position: sticky; top: 0; z-index: 1;
+    background: var(--card);
+    font-size: 0.64rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--faded); text-align: right; padding: 0.45rem 0.7rem;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
   }
-  tbody td { padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); }
-  tbody tr:hover:not(.taken) { background: var(--panel-2); cursor: pointer; }
-  tbody tr.taken { color: var(--muted); }
-  tbody tr.taken .pname { text-decoration: line-through; }
-  .pos-badge {
-    display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 0.05rem 0.35rem;
-    border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border);
+  thead th:first-child, thead th.l { text-align: left; }
+  tbody td {
+    padding: 0.3rem 0.7rem; border-bottom: 1px solid var(--line-soft);
+    text-align: right; white-space: nowrap;
   }
-  .num { text-align: right; }
+  tbody td:first-child {
+    text-align: left; width: 45%;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  tbody td.num {
+    font-family: var(--data); font-variant-numeric: tabular-nums;
+    font-size: 0.84rem; color: var(--faded);
+  }
+  tbody td.num.key { color: var(--chalk); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover:not(.taken) { background: var(--raised); }
+  tbody tr.taken { color: var(--faded); cursor: default; }
+  tbody tr.taken .who { text-decoration: line-through; opacity: 0.65; }
+  tbody tr.taken td.num { opacity: 0.45; }
+  tbody tr:first-child td { padding-top: 0.45rem; }
+  .who { font-size: 0.9rem; }
+  .badge {
+    display: inline-block; min-width: 2.7rem; text-align: center;
+    font-family: var(--data); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.02em;
+    border: 1px solid var(--pos, var(--faded)); border-radius: 3px;
+    padding: 0.02rem 0.28rem; color: var(--pos, var(--faded));
+  }
+  .badge.above { background: var(--pos, transparent); color: var(--field); }
+  td.delta.late { color: var(--chalk); }
+  .empty-row td { color: var(--faded); padding: 0.9rem 1.2rem; text-align: left; }
 
-  /* Roster */
-  .slot-row {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 0.35rem 0; border-bottom: 1px solid var(--border);
+  /* ---------- SIDE: roster + the explainer ---------- */
+  .side .panel { padding: 0.85rem 1rem 0.95rem; }
+  .side h2 { margin-bottom: 0.6rem; }
+  .rslot {
+    display: flex; align-items: baseline; gap: 0.6rem;
+    padding: 0.26rem 0; border-bottom: 1px solid var(--line-soft); font-size: 0.86rem;
   }
-  .slot-row:last-child { border-bottom: none; }
-  .slot-label {
-    font-size: 0.75rem; font-weight: 700; color: var(--muted); width: 3.4rem; flex-shrink: 0;
+  .rslot:last-of-type { border-bottom: 0; }
+  .rslot .lab {
+    font-family: var(--data); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.04em;
+    color: var(--pos, var(--faded)); width: 2.9rem; flex: none;
   }
-  .slot-player { flex: 1; }
-  .slot-player.empty { color: var(--muted); font-style: italic; }
-  .bench-title { margin-top: 0.7rem; font-size: 0.8rem; color: var(--muted); text-transform: uppercase; }
+  .rslot .val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rslot .val.none { color: var(--faded); }
+  .bench { margin-top: 0.7rem; font-size: 0.8rem; color: var(--faded); }
+  .bench span { display: block; font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 0.25rem; }
 
-  @media (max-width: 900px) {
-    main { grid-template-columns: 1fr; }
+  details.why summary {
+    cursor: pointer; list-style: none;
+    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--faded);
+  }
+  details.why summary::-webkit-details-marker { display: none; }
+  details.why summary::after { content: " +"; }
+  details.why[open] summary::after { content: " −"; }
+  details.why summary:hover { color: var(--chalk); }
+  .why-body { margin-top: 0.7rem; font-size: 0.82rem; color: var(--faded); }
+  .why-body p { margin: 0 0 0.65rem; }
+  .why-body p:last-child { margin-bottom: 0; }
+  .why-body b { color: var(--chalk); font-weight: 600; }
+  .why-body .n { color: var(--chalk); }
+
+  /* ---------- the one restrained moment ---------- */
+  @keyframes lift {
+    from { opacity: 0; transform: translateY(3px); }
+    to   { opacity: 1; transform: none; }
+  }
+  .hero-name.changed { animation: lift 220ms ease-out; }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+
+  /* ---------- a small laptop is the target, not an afterthought ---------- */
+  @media (max-width: 1180px) {
+    main {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: none;
+      grid-template-areas: "hero" "cliffs" "runway" "board" "side";
+    }
+    .side { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 720px) {
+    .side { grid-template-columns: 1fr; }
+    .reasons { grid-template-columns: 1fr; }
+    .reasons .dot { display: none; }
+    #cliffRows { grid-template-columns: 2.1rem 1fr; row-gap: 0.35rem; }
+    .cliff-note { grid-column: 2; }
+  }
+  @media (max-height: 820px) {
+    .scroll { max-height: 40vh; }
   }
 </style>
 </head>
 <body>
+
 <header>
-  <div class="clock-row">
-    <div id="clock" class="clock">—</div>
-    <div class="next-pick">Your next pick: <b id="nextPick">—</b></div>
-    <div class="spacer"></div>
-    <div id="identity" class="updated" title="How much of the board is trustworthy: picks Yahoo has confirmed that actually matched a board row and got struck off. A gap here means a drafted player may still show as available.">identity: —</div>
-    <div id="updated" class="updated">not yet polled</div>
-    <button id="undoBtn" title="Revert the last manual mark">Undo last mark</button>
+  <div class="bar">
+    <span id="where" class="where">—</span>
+    <span class="sep">|</span>
+    <span class="mine">your next <b id="next" class="n">—</b></span>
+    <span class="push"></span>
+    <span id="identity" class="n" title="Of the picks Yahoo has confirmed, how many matched a board row and got struck off. A gap here means a drafted player may still show as available.">identity —</span>
+    <span class="sep">|</span>
+    <span id="updated" class="n">not polled yet</span>
+    <button id="undo" type="button" title="Revert the last manual mark">undo mark</button>
   </div>
-  <div id="banner" class="banner"></div>
+  <div id="banner"><div class="box"></div></div>
 </header>
 
 <main>
-  <div>
-    <section class="panel">
-      <h2>Recommendations</h2>
-      <div id="recs"><div class="empty">Loading...</div></div>
-    </section>
+  <section class="panel hero" id="hero" aria-live="polite">
+    <div class="hero-head">
+      <span class="verb" id="verb">Take</span>
+      <h1 class="hero-name" id="heroName">Loading…</h1>
+      <span class="hero-pos" id="heroPos" hidden></span>
+    </div>
+    <div class="hero-meta" id="heroMeta"></div>
+    <div class="rule"></div>
+    <div class="reasons" id="reasons"></div>
+    <div class="hero-foot">
+      <span class="cost" id="cost"></span>
+      <span class="push"></span>
+      <button class="mark" id="heroMark" type="button" hidden>mark taken</button>
+    </div>
+    <div class="then" id="then" hidden><span class="then-label">then</span></div>
+  </section>
 
-    <section class="panel">
+  <section class="panel cliffs" id="cliffs" aria-label="Value cliffs">
+    <div class="cliff-head">
+      <h2>Before the cliff</h2>
+      <span class="hint" id="cliffHint">players left above each position's measured drop-off</span>
+    </div>
+    <div id="cliffRows"></div>
+  </section>
+
+  <section class="panel runway" id="runway" aria-label="Roster runway">
+    <div class="runway-line">
+      <div class="slots" id="slots"></div>
+      <div class="runway-count" id="runwayCount"></div>
+    </div>
+    <div class="runway-note" id="runwayNote"></div>
+  </section>
+
+  <section class="panel board">
+    <div class="board-head">
       <h2>Board</h2>
-      <div class="filters" id="filters"></div>
-      <div class="board-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Player</th><th>Pos</th>
-              <th class="num">Proj</th><th class="num">VOR</th><th class="num">Tier</th>
-              <th class="num">ADP</th><th class="num">P(gone)</th>
-            </tr>
-          </thead>
-          <tbody id="boardBody"><tr class="empty"><td colspan="7">Loading...</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-  </div>
+      <div class="filters" id="filters" role="group" aria-label="Filter the board by position"></div>
+      <button class="only" id="only" type="button" aria-pressed="false"
+        title="Hide players who are already drafted">still available</button>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th class="l">Player</th>
+            <th class="l">Pos</th>
+            <th>Proj</th>
+            <th>VOR</th>
+            <th>Tier</th>
+            <th>ADP</th>
+            <th title="Where he is going relative to his own ADP right now. Positive means he is falling.">vs ADP</th>
+            <th title="Chance he is gone before your next pick">Gone</th>
+          </tr>
+        </thead>
+        <tbody id="rows"><tr class="empty-row"><td colspan="8">Loading the board…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
 
-  <div>
+  <div class="side">
     <section class="panel">
-      <h2>Your roster</h2>
+      <h2>Your lineup</h2>
       <div id="rosterSlots"></div>
-      <div class="bench-title">Bench</div>
-      <div id="rosterBench" class="slot-player empty">(none)</div>
+      <div class="bench"><span>Bench</span><div id="bench">none yet</div></div>
+    </section>
+
+    <section class="panel">
+      <details class="why">
+        <summary>Why these numbers?</summary>
+        <div class="why-body" id="whyBody"></div>
+      </details>
     </section>
   </div>
 </main>
@@ -196,252 +524,475 @@
 (function () {
   'use strict';
 
-  var state = null;          // last /api/state view model
-  var filter = 'ALL';        // current position filter
-  var boardRows = new Map(); // playerId -> <tr>
-  var pollTimer = null;
-  var tickTimer = null;
+  var state = null;      // last /api/state view model
+  var filter = 'ALL';    // survives every poll -- rebuilding it would lose the user's place
+  var availableOnly = false;
+  var rowsById = new Map();
+  var cliffCache = new Map();
+  var lastHeroId = null;
+  var POSITIONS = ['QB', 'RB', 'WR', 'TE'];
 
-  function pct(n) { return (n === null || n === undefined) ? '-' : Math.round(n * 100) + '%'; }
-  function num(n, d) {
-    if (n === null || n === undefined) return '-';
-    return (typeof d === 'number') ? n.toFixed(d) : String(n);
+  // ---- formatting. Every live number is tabular; none of these ever
+  // returns a different WIDTH for the same magnitude, so nothing shifts.
+  function num(v, d) {
+    if (v === null || v === undefined || !isFinite(v)) return '—';
+    return d === undefined ? String(v) : v.toFixed(d);
+  }
+  function pct(v) {
+    if (v === null || v === undefined || !isFinite(v)) return '—';
+    return Math.round(v * 100) + '%';
+  }
+  function signed(v) {
+    if (v === null || v === undefined || !isFinite(v)) return '—';
+    var r = Math.round(v);
+    return (r > 0 ? '+' : '') + r;
   }
   function el(tag, cls, text) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
-    if (text !== undefined) e.textContent = text;
+    if (text !== undefined && text !== null) e.textContent = text;
     return e;
   }
+  function setText(node, text) { if (node.textContent !== text) node.textContent = text; }
 
-  function classify(pGone) {
-    if (pGone === null || pGone === undefined) return '';
-    if (pGone >= 0.7) return 'danger';
-    if (pGone >= 0.35) return 'warn';
-    return 'hi';
+  // "RB4" -- position and rank in one token, the way a drafter says it.
+  function posTag(position, posRank) {
+    return (position || '?') + (posRank ? String(posRank) : '');
   }
 
+  // ---- api
   async function api(path, opts) {
     var res = await fetch(path, opts);
     return res.json();
   }
-
   async function markTaken(playerId) {
     if (!playerId) return;
-    var next = await api('/api/taken', {
+    render(await api('/api/taken', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ playerId: playerId }),
-    });
-    render(next);
+    }));
   }
+  async function undoMark() { render(await api('/api/undo', { method: 'POST' })); }
 
-  async function undoLast() {
-    var next = await api('/api/undo', { method: 'POST' });
-    render(next);
-  }
-
-  // "Round R, Pick N" reads far better at a glance than a bare pick number
-  // -- draft_results carries `round` (design doc 4.1/4.2), so show it
-  // whenever we have it; a bare pick number is still a fine fallback.
-  function pickLabel(pick, round) {
-    if (pick === null || pick === undefined) return '-';
-    return round ? ('Round ' + round + ', Pick ' + pick) : ('Pick ' + pick);
-  }
-
-  function renderClock(status) {
-    var clock = document.getElementById('clock');
-    var nextPick = document.getElementById('nextPick');
+  // ---- header
+  function renderHeader(status) {
+    var where = document.getElementById('where');
+    where.className = 'where';
     if (status.isMyTurn) {
-      clock.textContent = 'YOU ARE ON THE CLOCK';
-      clock.classList.add('my-turn');
+      setText(where, 'YOU ARE ON THE CLOCK');
+      where.className = 'onclock';
     } else if (status.draftStatus === 'postdraft') {
-      clock.textContent = 'Your draft is complete';
-      clock.classList.remove('my-turn');
+      setText(where, 'DRAFT COMPLETE');
     } else if (status.draftStatus === 'predraft') {
-      clock.textContent = 'Predraft';
-      clock.classList.remove('my-turn');
+      setText(where, 'BEFORE THE DRAFT');
     } else {
-      clock.textContent = pickLabel(status.currentPick, status.currentRound);
-      clock.classList.remove('my-turn');
+      setText(where, 'ROUND ' + (status.currentRound || '—') + ' · PICK ' + status.currentPick);
     }
-    nextPick.textContent = status.myNextPick === null ? '(done)'
-      : (status.myNextPickRound ? ('Round ' + status.myNextPickRound + ', #' + status.myNextPick) : ('#' + status.myNextPick));
+    setText(document.getElementById('next'),
+      status.myNextPick === null ? 'done'
+        : '#' + status.myNextPick + (status.myNextPickRound ? ' (r' + status.myNextPickRound + ')' : ''));
+  }
+
+  function renderIdentity(status) {
+    var e = document.getElementById('identity');
+    var id = status.identity;
+    if (!id || id.total === 0) { setText(e, 'identity n/a'); e.classList.remove('flag'); return; }
+    setText(e, 'identity ' + Math.round((id.rate || 0) * 100) + '% (' + id.matched + '/' + id.total + ')');
+    e.classList.toggle('flag', id.rate !== null && id.rate < 0.5);
+  }
+
+  function renderUpdated(status) {
+    var e = document.getElementById('updated');
+    if (!status.lastPollAt) { setText(e, 'not polled yet'); e.classList.remove('flag'); return; }
+    var secs = Math.max(0, Math.round((Date.now() - new Date(status.lastPollAt).getTime()) / 1000));
+    setText(e, 'updated ' + secs + 's ago' + (status.lastPollOk ? '' : ' · poll failing'));
+    e.classList.toggle('flag', secs > 10 || !status.lastPollOk);
   }
 
   function renderBanner(banner) {
     var b = document.getElementById('banner');
-    if (!banner) { b.className = 'banner'; b.textContent = ''; return; }
-    b.className = 'banner ' + (banner.level === 'error' ? 'error' : 'warn');
-    b.textContent = banner.message;
+    if (!banner) { b.className = ''; return; }
+    b.className = 'show ' + (banner.level === 'error' ? 'error' : 'warn');
+    setText(b.querySelector('.box'), banner.message);
   }
 
-  function renderUpdated(status) {
-    var u = document.getElementById('updated');
-    if (!status.lastPollAt) { u.textContent = 'never polled Yahoo yet'; u.classList.remove('stale'); return; }
-    var secs = Math.max(0, Math.round((Date.now() - new Date(status.lastPollAt).getTime()) / 1000));
-    u.textContent = 'updated ' + secs + 's ago' + (status.lastPollOk ? '' : ' (poll failing)');
-    u.classList.toggle('stale', secs > 10 || !status.lastPollOk);
+  // ---- hero: the decision as a sentence, not a metric row
+  function plural(n, one, many) { return n + ' ' + (Math.abs(n) === 1 ? one : many); }
+
+  function adpPhrase(delta) {
+    if (delta === null || delta === undefined || !isFinite(delta)) return null;
+    var d = Math.round(delta);
+    if (d === 0) return 'right at his ADP';
+    if (d > 0) return plural(d, 'pick', 'picks') + ' past his ADP';
+    return plural(Math.abs(d), 'pick', 'picks') + ' early';
   }
 
-  // How much of the board is trustworthy right now (see this branch's fix
-  // for why this exists): a silent identity-resolution gap is exactly what
-  // let a drafted player sit on the board marked available, invisibly, on a
-  // real draft day. This makes that number impossible to miss instead.
-  function renderIdentity(status) {
-    var e = document.getElementById('identity');
-    var id = status.identity;
-    if (!id || id.total === 0) {
-      e.textContent = 'identity: n/a (predraft)';
-      e.classList.remove('stale');
+  function renderHero(guidance, status) {
+    var hero = document.getElementById('hero');
+    var nameEl = document.getElementById('heroName');
+    var posEl = document.getElementById('heroPos');
+    var metaEl = document.getElementById('heroMeta');
+    var reasonsEl = document.getElementById('reasons');
+    var costEl = document.getElementById('cost');
+    var markEl = document.getElementById('heroMark');
+    var h = guidance.hero;
+
+    if (!h) {
+      hero.removeAttribute('data-pos');
+      hero.setAttribute('data-urgency', 'calm');
+      hero.setAttribute('data-runway', guidance.runway.level);
+      setText(document.getElementById('verb'), status.draftStatus === 'postdraft' ? 'Done' : 'Waiting');
+      setText(nameEl, status.draftStatus === 'postdraft' ? 'Your draft is complete' : 'No pick to make yet');
+      posEl.hidden = true;
+      setText(metaEl, '');
+      reasonsEl.textContent = '';
+      setText(costEl, '');
+      markEl.hidden = true;
+      lastHeroId = null;
       return;
     }
-    var pctText = id.rate === null ? '-' : Math.round(id.rate * 100) + '%';
-    e.textContent = 'identity: ' + id.matched + '/' + id.total + ' matched (' + pctText + ')';
-    e.classList.toggle('stale', id.rate !== null && id.rate < 0.5);
+
+    hero.setAttribute('data-pos', h.position || '');
+    hero.setAttribute('data-urgency', guidance.urgency.level);
+    hero.setAttribute('data-runway', guidance.runway.level);
+    setText(document.getElementById('verb'), 'Take');
+
+    if (h.playerId !== lastHeroId) {
+      // The single moment of motion on this page: the recommendation
+      // actually changed, which is the only thing worth an animation.
+      nameEl.classList.remove('changed');
+      void nameEl.offsetWidth;
+      nameEl.classList.add('changed');
+      lastHeroId = h.playerId;
+    }
+    setText(nameEl, h.name);
+    posEl.hidden = false;
+    posEl.textContent = posTag(h.position, h.posRank);
+
+    var bits = [];
+    if (h.proj !== null && h.proj !== undefined) bits.push(num(h.proj, 0) + ' projected');
+    if (h.vor !== null && h.vor !== undefined) bits.push(num(h.vor, 0) + ' over replacement');
+    if (h.tier) bits.push('tier ' + h.tier);
+    if (h.expectedLoss !== null && h.expectedLoss !== undefined) bits.push(num(h.expectedLoss, 0) + ' at stake');
+    var adp = adpPhrase(h.adpDelta);
+    if (adp) bits.push(adp);
+    setText(metaEl, bits.join('  ·  '));
+    metaEl.title = 'At stake = expected loss: his value over replacement times the chance he is gone '
+      + 'by your next pick. It is what the ranking sorts on.';
+
+    reasonsEl.textContent = '';
+    h.reasons.forEach(function (r, i) {
+      if (i === 1 || i === 3) reasonsEl.appendChild(el('span', 'dot', '·'));
+      var d = el('div', 'reason', r.text);
+      d.setAttribute('data-kind', r.kind);
+      reasonsEl.appendChild(d);
+    });
+
+    var u = guidance.urgency;
+    if (u.cost === null || u.cost === undefined) {
+      setText(costEl, 'Last round — there is no next turn to wait for.');
+      costEl.title = '';
+    } else {
+      var rounded = Math.round(u.cost);
+      setText(costEl, rounded <= 0
+        ? 'Waiting a turn at ' + h.position + ' has cost nothing in this round.'
+        : 'Waiting a turn at ' + h.position + ' has cost about ' + rounded + ' points in this round.');
+      costEl.title = 'Round ' + u.round + ', measured on actual points over ' + u.basisTeams
+        + '-team drafts, 2023-25 — the closest league depth the study measured to this '
+        + u.teams + '-team room.';
+    }
+
+    markEl.hidden = false;
+    markEl.onclick = function () { markTaken(h.playerId); };
   }
 
-  function renderRecs(recs) {
-    var wrap = document.getElementById('recs');
-    wrap.innerHTML = '';
-    if (!recs || recs.length === 0) {
-      wrap.appendChild(el('div', 'empty', 'No recommendations right now.'));
-      return;
-    }
-    recs.forEach(function (r, i) {
-      var card = el('div', 'rec-card');
-      card.appendChild(el('div', 'rec-rank', String(i + 1)));
-      card.appendChild(el('div', 'rec-name', r.name));
-      card.appendChild(el('div', 'rec-meta', r.position + (r.tier ? ' · tier ' + r.tier : '')));
-      var stats = el('div', 'rec-stats');
-      var vorBox = el('div'); vorBox.appendChild(el('span', 'label', 'VOR')); vorBox.appendChild(el('span', 'value', num(r.vor, 1)));
-      var goneBox = el('div'); goneBox.appendChild(el('span', 'label', 'P(gone)'));
-      var goneVal = el('span', 'value ' + classify(r.pGone), pct(r.pGone)); goneBox.appendChild(goneVal);
-      var lossBox = el('div'); lossBox.appendChild(el('span', 'label', 'Exp. loss')); lossBox.appendChild(el('span', 'value', num(r.expectedLoss, 1)));
-      stats.appendChild(vorBox); stats.appendChild(goneBox); stats.appendChild(lossBox);
-      card.appendChild(stats);
-      card.addEventListener('click', function () { markTaken(r.playerId); });
-      wrap.appendChild(card);
+  function renderThen(recs) {
+    var wrap = document.getElementById('then');
+    while (wrap.childElementCount > 1) wrap.removeChild(wrap.lastChild);
+    var rest = (recs || []).slice(1, 5);
+    wrap.hidden = rest.length === 0;
+    rest.forEach(function (r) {
+      var b = el('button');
+      b.type = 'button';
+      b.setAttribute('data-pos', r.position || '');
+      b.title = 'Mark ' + r.name + ' taken';
+      b.appendChild(el('span', 'tag', posTag(r.position, r.posRank)));
+      b.appendChild(el('span', null, r.name));
+      if (r.expectedLoss !== null && r.expectedLoss !== undefined) {
+        b.appendChild(el('span', 'tag stake', num(r.expectedLoss, 0)));
+      }
+      b.onclick = function () { markTaken(r.playerId); };
+      wrap.appendChild(b);
     });
   }
 
+  // ---- cliff strip: the signature. One segment per player above the
+  // measured cliff, filled while he is still on the board.
+  function renderCliffs(cliffs) {
+    var wrap = document.getElementById('cliffRows');
+    cliffs.forEach(function (c) {
+      var row = cliffCache.get(c.position);
+      if (!row) {
+        row = { root: el('div', 'cliff-row'), segs: [] };
+        row.root.setAttribute('data-pos', c.position);
+        row.root.appendChild(el('span', 'cliff-pos', c.position));
+        if (c.hasCliff) {
+          var track = el('div', 'bar-track');
+          for (var i = 0; i < c.afterRank; i += 1) {
+            var s = el('span', 'seg');
+            track.appendChild(s);
+            row.segs.push(s);
+          }
+          row.root.appendChild(track);
+        } else {
+          var slope = el('div', 'slope');
+          slope.setAttribute('aria-hidden', 'true');
+          row.root.appendChild(slope);
+        }
+        row.count = el('span', 'cliff-count');
+        row.note = el('span', 'cliff-note');
+        row.root.appendChild(row.count);
+        row.root.appendChild(row.note);
+        wrap.appendChild(row.root);
+        cliffCache.set(c.position, row);
+      }
+
+      if (!c.hasCliff) {
+        row.count.textContent = '';
+        row.count.appendChild(el('b', null, 'no cliff'));
+        setText(row.note, 'a slope from QB1 to QB24 — waiting is cheap');
+        return;
+      }
+
+      for (var j = 0; j < row.segs.length; j += 1) {
+        row.segs[j].classList.toggle('on', j < c.remaining);
+      }
+      row.count.textContent = '';
+      row.count.appendChild(el('b', null, String(c.remaining)));
+      row.count.appendChild(el('span', null, ' left'));
+      row.root.setAttribute('data-thin', c.remaining > 0 && c.remaining <= 2 ? '1' : '0');
+      row.root.setAttribute('data-empty', c.remaining === 0 ? '1' : '0');
+      // Red here only when the measured waiting cost says the pressure is
+      // real. In a 4-team league it never is, and the strip stays in the
+      // position's own colour.
+      row.root.setAttribute('data-alarm', (c.remaining <= 2 && c.reachable && c.level === 'alarm') ? '1' : '0');
+      setText(row.note, c.reachable === false
+        ? '−' + Math.round(c.drop) + ' after ' + c.position + c.afterRank + ', who goes around pick ' + c.pick + ' — past the end of this draft'
+        : '−' + Math.round(c.drop) + ' points after ' + c.position + c.afterRank);
+    });
+  }
+
+  // ---- runway: the largest measured effect in this league
+  function renderRunway(runway) {
+    var panel = document.getElementById('runway');
+    var slots = document.getElementById('slots');
+    panel.setAttribute('data-level', runway.level);
+    slots.textContent = '';
+    runway.slots.forEach(function (s) {
+      var chip = el('span', s.filled ? 'slot' : 'slot empty');
+      chip.setAttribute('data-pos', s.filled ? (s.position || '') : '');
+      chip.appendChild(el('span', null, s.label));
+      chip.appendChild(el('span', 'tick', s.filled ? '✓' : '·'));
+      if (s.filled && s.player) chip.title = s.player;
+      slots.appendChild(chip);
+    });
+
+    var count = document.getElementById('runwayCount');
+    count.textContent = '';
+    if (runway.empty === 0) {
+      count.appendChild(el('b', null, 'lineup full'));
+      count.appendChild(el('span', null, ' · ' + plural(runway.roundsRemaining, 'round', 'rounds') + ' to spare'));
+    } else {
+      count.appendChild(el('b', null, plural(runway.roundsRemaining, 'round', 'rounds')));
+      count.appendChild(el('span', null, ' for ' + plural(runway.empty, 'slot', 'slots')));
+    }
+    var left = runway.unprojectedEmpty || [];
+    setText(document.getElementById('runwayNote'), left.length === 0
+      ? 'Finishing with every starting slot filled is worth more than any positional strategy measured in this league.'
+      : left.join(' and ') + ' still to fill — neither is projected, so take them last. Everything above is worth more than any positional strategy measured in this league.');
+  }
+
+  // ---- board
   function applyFilter() {
-    boardRows.forEach(function (tr, playerId) {
-      var pos = tr.getAttribute('data-position');
-      tr.hidden = !(filter === 'ALL' || pos === filter);
+    rowsById.forEach(function (tr) {
+      var matchesPosition = filter === 'ALL' || tr.getAttribute('data-position') === filter;
+      tr.hidden = !matchesPosition || (availableOnly && tr.classList.contains('taken'));
     });
   }
 
-  function renderFilters(positions) {
+  function renderFilters() {
     var wrap = document.getElementById('filters');
-    if (wrap.childElementCount > 0) return; // built once
-    ['ALL'].concat(positions).forEach(function (p) {
-      var btn = el('button', p === filter ? 'active' : '', p);
-      btn.addEventListener('click', function () {
+    if (wrap.childElementCount > 0) return;
+    ['ALL'].concat(POSITIONS).forEach(function (p) {
+      var b = el('button', null, p === 'ALL' ? 'all' : p);
+      b.type = 'button';
+      b.setAttribute('data-pos', p === 'ALL' ? '' : p);
+      b.setAttribute('aria-pressed', String(p === filter));
+      b.onclick = function () {
         filter = p;
-        Array.prototype.forEach.call(wrap.children, function (b) { b.classList.toggle('active', b.textContent === p); });
+        Array.prototype.forEach.call(wrap.children, function (x) {
+          x.setAttribute('aria-pressed', String(x === b));
+        });
         applyFilter();
-      });
-      wrap.appendChild(btn);
+      };
+      wrap.appendChild(b);
     });
   }
 
-  function updateRow(tr, row) {
-    tr.className = row.taken ? 'taken' : '';
-    tr.querySelector('.pname').textContent = row.name;
-    tr.querySelector('.pgone').textContent = pct(row.pGone);
-    tr.querySelector('.pgone').className = 'num pgone ' + classify(row.pGone);
+  function buildRow(row) {
+    var tr = document.createElement('tr');
+    tr.setAttribute('data-position', row.position || '');
+    tr.setAttribute('data-pos', row.position || '');
+    tr.tabIndex = 0;
+
+    var name = el('td');
+    name.appendChild(el('span', 'who', row.name));
+    tr.appendChild(name);
+
+    var pos = el('td');
+    pos.appendChild(el('span', 'badge', posTag(row.position, row.posRank)));
+    tr.appendChild(pos);
+
+    tr.appendChild(el('td', 'num key', num(row.proj, 0)));
+    tr.appendChild(el('td', 'num key', num(row.vor, 0)));
+    tr.appendChild(el('td', 'num', row.tier === null || row.tier === undefined ? '—' : String(row.tier)));
+    tr.appendChild(el('td', 'num', num(row.adp, 0)));
+    tr.appendChild(el('td', 'num delta', signed(row.adpDelta)));
+    tr.appendChild(el('td', 'num', pct(row.pGone)));
+
+    function take() { if (!tr.classList.contains('taken')) markTaken(row.playerId); }
+    tr.onclick = take;
+    tr.onkeydown = function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); take(); }
+    };
+    return tr;
   }
 
   function renderBoard(rows) {
-    var body = document.getElementById('boardBody');
-    var isFirstRender = boardRows.size === 0;
-    if (isFirstRender) body.innerHTML = '';
-
-    var positions = [];
+    var body = document.getElementById('rows');
+    if (rowsById.size === 0) body.textContent = '';
     rows.forEach(function (row) {
-      if (positions.indexOf(row.position) === -1 && row.position) positions.push(row.position);
-      var tr = boardRows.get(row.playerId);
+      var tr = rowsById.get(row.playerId);
       if (!tr) {
-        tr = document.createElement('tr');
-        tr.setAttribute('data-position', row.position || '');
-        var nameTd = el('td'); nameTd.appendChild(el('span', 'pname', row.name));
-        tr.appendChild(nameTd);
-        var posTd = el('td'); posTd.appendChild(el('span', 'pos-badge', row.position || '-'));
-        tr.appendChild(posTd);
-        tr.appendChild(el('td', 'num', num(row.proj, 1)));
-        tr.appendChild(el('td', 'num', num(row.vor, 1)));
-        tr.appendChild(el('td', 'num', row.tier === null || row.tier === undefined ? '-' : String(row.tier)));
-        tr.appendChild(el('td', 'num', num(row.adp, 1)));
-        tr.appendChild(el('td', 'num pgone', pct(row.pGone)));
-        tr.addEventListener('click', function () { if (!row.taken) markTaken(row.playerId); });
-        boardRows.set(row.playerId, tr);
+        tr = buildRow(row);
+        rowsById.set(row.playerId, tr);
         body.appendChild(tr);
       }
-      tr._row = row;
-      updateRow(tr, row);
+      tr.classList.toggle('taken', row.taken);
+      tr.title = row.taken ? (row.name + ' — drafted') : ('Mark ' + row.name + ' taken');
+      var cells = tr.children;
+      setText(cells[6], row.taken ? '—' : signed(row.adpDelta));
+      cells[6].classList.toggle('late', !row.taken && isFinite(row.adpDelta) && row.adpDelta > 0);
+      setText(cells[7], pct(row.pGone));
+      var badge = cells[1].firstChild;
+      badge.classList.toggle('above', row.aboveCliff === true && !row.taken);
     });
-    positions.sort();
-    renderFilters(positions);
     applyFilter();
   }
 
+  // ---- roster
   function renderRoster(roster) {
-    var slotsWrap = document.getElementById('rosterSlots');
-    slotsWrap.innerHTML = '';
+    var wrap = document.getElementById('rosterSlots');
+    wrap.textContent = '';
     (roster.slots || []).forEach(function (s) {
-      var row = el('div', 'slot-row');
-      row.appendChild(el('div', 'slot-label', s.slot));
-      if (s.player) {
-        row.appendChild(el('div', 'slot-player', s.player.name + ' (' + s.player.position + ')'));
-      } else {
-        row.appendChild(el('div', 'slot-player empty', 'empty'));
-      }
-      slotsWrap.appendChild(row);
+      var r = el('div', 'rslot');
+      r.setAttribute('data-pos', s.player ? (s.player.position || '') : '');
+      r.appendChild(el('span', 'lab', s.slot));
+      r.appendChild(el('span', s.player ? 'val' : 'val none', s.player ? s.player.name : 'empty'));
+      wrap.appendChild(r);
     });
-    var bench = document.getElementById('rosterBench');
-    if (!roster.bench || roster.bench.length === 0) {
-      bench.textContent = '(none)';
-      bench.className = 'slot-player empty';
-    } else {
-      bench.className = 'slot-player';
-      // A pick the engine never matched still has a Yahoo name and still
-      // occupies a roster spot, so show it as a name with an honest marker
-      // rather than "470.p.42654 (null)" -- which told the user nothing at
-      // exactly the moment they were checking what they already own.
-      bench.textContent = roster.bench.map(function (p) {
-        if (p.position) return p.name + ' (' + p.position + ')';
-        return p.name + (p.unmatched ? ' (unmatched)' : '');
-      }).join(', ');
-    }
+    var bench = document.getElementById('bench');
+    setText(bench, (!roster.bench || roster.bench.length === 0) ? 'none yet'
+      : roster.bench.map(function (p) {
+        return p.position ? (p.name + ' (' + p.position + ')') : (p.name + (p.unmatched ? ' (unmatched)' : ''));
+      }).join(', '));
   }
 
+  // ---- the explainer, grounded in THIS board's own numbers
+  function renderWhy(guidance) {
+    var body = document.getElementById('whyBody');
+    if (body.getAttribute('data-built') === '1') return;
+    var rep = guidance.replacement || {};
+    var qb = rep.QB;
+    var rb = rep.RB;
+    var teams = guidance.league.teams;
+    var basis = guidance.urgency.basisTeams;
+
+    function p(html) { var e = el('p'); e.innerHTML = html; body.appendChild(e); }
+    body.textContent = '';
+
+    if (qb && rb) {
+      p('<b>VOR is points above the last starter at that position</b> — not points. '
+        + 'On this board the last starting quarterback projects <span class="n">' + Math.round(qb.points) + '</span> '
+        + 'and the last starting running back <span class="n">' + Math.round(rb.points) + '</span>. '
+        + 'So the best QB here (<span class="n">' + Math.round(qb.top) + '</span>) is worth '
+        + '<span class="n">' + Math.round(qb.top - qb.points) + '</span> over his replacement while the best RB '
+        + '(<span class="n">' + Math.round(rb.top) + '</span>) is worth <span class="n">' + Math.round(rb.top - rb.points) + '</span>. '
+        + 'Quarterbacks score more and are worth less, because almost the whole QB curve sits above almost the whole RB curve.');
+    } else {
+      p('<b>VOR is points above the last starter at that position</b>, which is why a quarterback who scores more can be worth less to draft.');
+    }
+    p('<b>Expected loss is VOR × the chance he is gone by your next pick.</b> A superb player certain to '
+      + 'survive scores near zero — you can wait and have him anyway. That is what the ranking sorts on.');
+    p('<b>Roster need outranks both, late.</b> In this ' + teams + '-team league, simply not finishing with an '
+      + 'empty starting slot was measured at <span class="n">+63</span> to <span class="n">+80</span> actual points — '
+      + 'larger than any positional strategy tested. That is why the runway row exists.');
+    p('<b>The cliffs are measured, not drawn by eye.</b> Actual points fall '
+      + '<span class="n">−68</span> after RB12 and <span class="n">−42</span> after WR12, and '
+      + '<span class="n">−38</span> after TE6. QB has no cliff at all — it is a slope from QB1 to QB24, '
+      + 'and no step in it is separable from noise.');
+    p('<b>Why this page rarely raises its voice.</b> The largest cost of waiting one turn measured anywhere in a '
+      + '4-team draft is <span class="n">20</span> points; most rounds are under <span class="n">10</span>. '
+      + 'At 10 teams the same numbers run <span class="n">20</span>–<span class="n">55</span>. Urgency is mostly a '
+      + 'deep-league problem, so the alarm colour is kept for the two things that are real here: an empty '
+      + 'starting slot, and a genuinely expensive wait. Waiting costs on this page read off the '
+      + basis + '-team table, the closest one the study actually measured.');
+    p('Everything above comes from <b>docs/positional-value.md</b>: 12 cells × 8 strategies × 400 trials, '
+      + 'projections fit out of sample and graded on the points players really scored in 2023–2025. '
+      + 'Three seasons is a small sample and no single round has a statistically separable winner.');
+    body.setAttribute('data-built', '1');
+  }
+
+  // ---- render
   function render(next) {
+    if (!next || !next.status) return;
     state = next;
-    renderClock(state.status);
+    renderHeader(state.status);
     renderBanner(state.status.banner);
     renderUpdated(state.status);
     renderIdentity(state.status);
-    renderRecs(state.recommendations);
+    renderFilters();
+    if (state.guidance) {
+      renderHero(state.guidance, state.status);
+      renderCliffs(state.guidance.cliffs);
+      renderRunway(state.guidance.runway);
+      renderWhy(state.guidance);
+    }
+    renderThen(state.recommendations);
     renderBoard(state.board);
     renderRoster(state.roster);
   }
 
   async function poll() {
     try {
-      var next = await api('/api/state');
-      render(next);
+      render(await api('/api/state'));
     } catch (e) {
-      // A dead network doesn't take the page down -- the last render stands,
-      // and renderUpdated's local ticking (below) still shows growing staleness.
+      // A dead network must not take the page down: the last render stands
+      // and the staleness clock below keeps counting up, honestly.
     }
   }
 
-  document.getElementById('undoBtn').addEventListener('click', undoLast);
-
+  var onlyBtn = document.getElementById('only');
+  onlyBtn.onclick = function () {
+    availableOnly = !availableOnly;
+    onlyBtn.setAttribute('aria-pressed', String(availableOnly));
+    applyFilter();
+  };
+  document.getElementById('undo').onclick = undoMark;
   poll();
-  pollTimer = setInterval(poll, 3000);
-  tickTimer = setInterval(function () { if (state) renderUpdated(state.status); }, 1000);
+  setInterval(poll, 3000);
+  setInterval(function () { if (state) renderUpdated(state.status); }, 1000);
 })();
 </script>
 </body>
