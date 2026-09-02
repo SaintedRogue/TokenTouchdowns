@@ -1263,3 +1263,40 @@ test('on your last pick of the draft, survival runs to the end of the draft', as
   assert.equal(room.getViewModel().status.survivalPick, 25); // teams * rounds + 1
   assert.equal(analytics.runScriptCalls.at(-1).opts.stdin.nextPick, 25);
 });
+
+test('a port already in use fails with an actionable message, not a stack trace', async () => {
+  // Draft day, ten minutes before the draft: the most likely way this command
+  // fails is that a draft room is ALREADY running -- the user re-ran it, or an
+  // earlier one never exited. Node's default for that is an EADDRINUSE stack
+  // trace with a `_listen2` frame, which tells someone under time pressure
+  // nothing about what to do. Every other failure in this module was designed
+  // to degrade into an instruction; this one escaped because it happens before
+  // the server exists.
+  const http = (await import('node:http')).default;
+  const blocker = http.createServer(() => {});
+  await new Promise((resolve) => blocker.listen(0, '127.0.0.1', resolve));
+  const takenPort = blocker.address().port;
+  try {
+    await assert.rejects(
+      () => startDraftRoomServer({
+        port: takenPort, teams: 4, slot: 2, rounds: 6, league: '470.l.1',
+        client: fakeClient({
+          'league/470.l.1/teams': TEAMS_RESPONSE,
+          'league/470.l.1/draftresults': [emptyDraftResults()],
+        }),
+        analytics: fakeAnalytics(),
+        leagueConfig: LEAGUE_CONFIG, crosswalk: new Map(),
+        pollSeconds: 3600,
+      }),
+      (e) => {
+        assert.ok(!/\b_listen2\b/.test(e.message), 'must not surface a node internals frame');
+        assert.match(e.message, new RegExp(String(takenPort)), 'names the port');
+        assert.match(e.message, /already/i, 'says what is wrong');
+        assert.match(e.message, /--port/, 'says how to fix it');
+        return true;
+      },
+    );
+  } finally {
+    await new Promise((resolve) => blocker.close(resolve));
+  }
+});

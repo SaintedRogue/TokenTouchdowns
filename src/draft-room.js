@@ -81,6 +81,7 @@ import { recordsOf } from './sources/index.js';
 import { readCache } from './cache.js';
 import {
   myTeamKey as fetchMyTeamKey, resolveLeagueKey as fetchLeagueKey, DEFAULT_NFLVERSE_ROSTER_PATH,
+  UsageError,
 } from './cli.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -907,7 +908,31 @@ export async function startDraftRoomServer({ port = 8787, host = '127.0.0.1', ..
   const room = await createDraftRoom(roomOptions);
   const server = http.createServer((req, res) => { room.requestListener(req, res); });
   await new Promise((resolve, reject) => {
-    server.once('error', reject);
+    server.once('error', (e) => {
+      // Ten minutes before a draft, the likeliest way this command fails is
+      // that a room is ALREADY running -- re-run by hand, or left over from an
+      // earlier start. Node's default is an EADDRINUSE stack trace with a
+      // `_listen2` frame, which tells someone under time pressure nothing
+      // about what to do. Every other failure in this module was built to
+      // degrade into an instruction; this one escaped because it happens
+      // before the server exists.
+      if (e?.code === 'EADDRINUSE') {
+        reject(new UsageError(
+          `Port ${port} is already in use — a draft room may already be running.\n`
+          + `Open http://${host}:${port}/ to check, or start this one on another port:\n`
+          + `  tt draft-room --teams=${roomOptions.teams} --slot=${roomOptions.slot} --port=${port + 1}`,
+        ));
+        return;
+      }
+      if (e?.code === 'EACCES') {
+        reject(new UsageError(
+          `Not allowed to bind port ${port}. Ports below 1024 need root; pick a higher one:\n`
+          + `  tt draft-room --teams=${roomOptions.teams} --slot=${roomOptions.slot} --port=8787`,
+        ));
+        return;
+      }
+      reject(e);
+    });
     server.listen(port, host, () => resolve());
   });
   room.startPolling();
