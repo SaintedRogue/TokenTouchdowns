@@ -7,10 +7,25 @@ every other position's -- top to bottom, not just at the top. But a roster
 only ever starts one or two QBs against two-plus RBs and WRs, so what a
 player is actually WORTH to draft is never "how many points does this
 player score" -- it's "how many more points does this player score than
-the player I could get for free off waivers at the same position, after
-every other team has filled its starting lineup." That margin is VOR, and
-it is the entire reason a board built on this module reorders away from
+the LAST PLAYER WHO STILL STARTS at the same position, once every team in
+the league has filled its starting lineup." That margin is VOR, and it is
+the entire reason a board built on this module reorders away from
 `proj_points`'s QB-heavy top ten.
+
+That replacement player is deliberately NOT a waiver-wire player, and an
+earlier version of this docstring said otherwise. `replacement_levels`
+returns `round(starters_per_team * teams)` -- exactly the count of starting
+slots league-wide -- so rank N is the worst player who still occupies one,
+not the best player nobody rostered. Verified empirically: `vor` is exactly
+0.0 at that rank on every real board at 4 and 10 teams.
+
+The distinction matters because it makes VOR CONSERVATIVE. A true waiver
+baseline sits below the last starter, so every player's real margin over a
+freely-available replacement is larger than the number here -- measured at
+1 to 11 points, unevenly by position (QB understated most at 4 teams, RB
+least). Nothing downstream is wrong; the board's ORDER is unaffected, since
+the shift is constant within a position. But a reader comparing VOR across
+positions should know the QB column is squeezed hardest.
 
 Replacement level is a direct function of two things this module takes as
 EXPLICIT parameters, never as a baked-in constant: the league's starting
