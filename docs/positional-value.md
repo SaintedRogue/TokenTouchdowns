@@ -18,7 +18,7 @@ Three seasons is a small sample. Where that matters, it is said so.
 1. **Fill your lineup.** In the real 4-team league, simply not finishing the draft
    with an empty QB or TE slot is worth **63-80 actual points** -- more than any
    positional strategy in this document. An ADP-following drafter who never checks
-   ends up with no tight end in 44% of 4-team drafts.
+   ends up with no tight end in 44% of 4-team drafts (11 of 25, real 2024 board).
 2. **Do not run Zero-RB.** It is the strongest result here: 11 losses in 12 cells,
    nine of them significant, **-85 points** on average, negative in all three seasons
    and getting worse each year. Forcing two receivers in rounds 1-2 (-48) is the same
@@ -248,9 +248,10 @@ zero. Seed 2026; the boards rebuild byte-identically from that seed (verified).
 Every arm also carries a **runway guard** -- once the picks remaining equal the
 mandatory starter slots still unfilled, the board is restricted to positions the
 roster still owes. It is identical across arms and cannot favour any of them. Without
-it a roster-blind ADP drafter finishes with no tight end in 11 of 25 four-team drafts,
-and every "take a TE early" arm would win on roster management rather than positional
-value. See Limits for what the guard alone is worth.
+it a roster-blind ADP drafter finishes with no tight end in 11 of 25 four-team drafts
+on the real 2024 board (and no QB in 2 of 25), and every "take a TE early" arm would
+win on roster management rather than positional value. See Limits for what the guard
+alone is worth.
 
 ### Result: delta vs BPA, all 12 cells (actual points)
 
@@ -293,6 +294,21 @@ By season (mean over the four team counts) -- this is where the honesty lives:
 | `late_te` | +1.4 | -0.2 | -6.7 |
 | `wr_first` | -7.3 | -36.9 | -99.6 |
 | `zero_rb` | -14.3 | -80.9 | -158.9 |
+
+By team count (mean over the three seasons) -- the real league is the 4 column:
+
+| arm | 4 | 6 | 8 | 10 |
+|---|---|---|---|---|
+| `rb_first` | +17.1 | +27.0 | +25.8 | +24.7 |
+| `early_qb` | **+3.0** | +8.2 | +14.5 | **+19.8** |
+| `late_te` | +3.1 | -4.0 | -4.7 | -1.5 |
+| `late_qb` | -17.6 | -19.4 | -19.6 | -16.8 |
+| `early_te` | -28.1 | -15.4 | -19.6 | -15.9 |
+| `wr_first` | -35.8 | -48.7 | -52.7 | -54.5 |
+| `zero_rb` | -85.6 | -84.1 | -84.6 | -84.4 |
+
+Zero-RB is the only arm whose damage is flat across league size (-84 to -86 in all
+four). Every positive effect shrinks as the league gets shallower.
 
 
 ### The arms really are different rosters
