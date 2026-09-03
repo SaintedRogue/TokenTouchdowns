@@ -324,6 +324,10 @@ export function replacementLine(rows) {
       points: ordered[best].proj_points,
       name: ordered[best].name ?? null,
       top: ordered[0].proj_points,
+      // Who that top projection belongs to. The explainer has to be able to
+      // say "Josh Allen projects the most points on this board and is still
+      // not the pick" by NAME -- an unattributed 253 explains nothing.
+      topName: ordered[0].name ?? null,
     };
   }
   return out;
@@ -379,4 +383,322 @@ export function heroReasons({ top, cliffs, runway, myNextPick }) {
         : `${runway?.roundsRemaining ?? 0} rounds left, lineup already full`,
     },
   ];
+}
+
+/* =========================================================================
+ * MAKING THE PAGE SELF-EXPLAINING.
+ *
+ * The user's own words, looking at the live page: "Can you explain the
+ * analysis? I don't know what the acronyms mean. How am I to read
+ * everything?" That is a usability failure, not a feature request, and the
+ * fix belongs HERE rather than in draft-room.html for the same reason
+ * everything else in this module does: a definition composed in the page is
+ * a definition nothing can check, and a WRONG definition on draft day is
+ * worse than none. Everything below is either a definition of a term the
+ * page prints, or a count/scale over rows the engine already produced.
+ * Nothing here computes a projection, a VOR, a survival probability or a
+ * ranking.
+ * ====================================================================== */
+
+/** Plain English for a position code, so a definition can say "quarterback"
+ * to a reader who does not yet know that QB is one. */
+const POSITION_WORDS = { QB: 'quarterback', RB: 'running back', WR: 'wide receiver', TE: 'tight end' };
+
+const positionWord = (position, count = 1) => {
+  const word = POSITION_WORDS[position] ?? String(position ?? 'player').toLowerCase();
+  return count === 1 ? word : `${word}s`;
+};
+
+function ordinal(n) {
+  if (!Number.isFinite(n)) return String(n);
+  const rem100 = Math.abs(n) % 100;
+  const rem10 = Math.abs(n) % 10;
+  const suffix = rem100 >= 11 && rem100 <= 13 ? 'th'
+    : rem10 === 1 ? 'st' : rem10 === 2 ? 'nd' : rem10 === 3 ? 'rd' : 'th';
+  return `${n}${suffix}`;
+}
+
+/** Middle value of the finite numbers in `values`, or null when there are
+ * none. Used for "the median expected games on this board", which is the
+ * only honest way to say what a projection actually covers. */
+function median(values) {
+  const sorted = (values ?? []).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+/**
+ * THE GLOSSARY: one definition per abbreviation the page prints, written in
+ * THIS board's own numbers.
+ *
+ * Two rules the tests enforce, because both were the actual defect:
+ *
+ *   1. NO GENERALITIES WHERE A REAL NUMBER EXISTS. "VOR is value over
+ *      replacement" is what the page already implied and is exactly what the
+ *      reader could not use. "This 4-team league starts 4 quarterbacks in
+ *      all, so the last one who still starts is the 4th best -- Josh Allen
+ *      projects the most points on the whole board and is still only 23
+ *      clear of him" is a definition someone can act on 40 seconds before a
+ *      pick.
+ *   2. EVERY NUMBER PRINTED HERE MUST MATCH THE NUMBER ON SCREEN. The page
+ *      renders integers, so every arithmetic step below is done on the
+ *      ROUNDED figures a reader can actually see; a sentence whose numbers
+ *      do not add up is a sentence that teaches the reader to distrust the
+ *      page. Where rounding would break a subtraction (a top QB projecting
+ *      253.49 against a last starter at 230.96 is 23 apart, but 253 - 231 is
+ *      22), the sentence states the margin and never prints the pair as an
+ *      arithmetic step.
+ *
+ * `detail` is null wherever the board cannot ground the example -- an empty
+ * or partial board loses the worked example, never the definition.
+ */
+export function glossary({ rows, replacement, teams, survivalPick, adp } = {}) {
+  const board = rows ?? [];
+  const rep = replacement ?? {};
+
+  // --- PROJ: what a projection actually covers ---------------------------
+  const medianGames = median(board.map((r) => r?.proj_games));
+  const projDetail = medianGames === null ? null
+    : `It is not a 17-game total. The projection already prices in injury risk: it is the points `
+      + `he is expected to score across the games he is expected to PLAY, and the median across `
+      + `this board is ${Math.round(medianGames)} games.`;
+
+  // --- VOR: the worked example that answers the actual question ----------
+  // Contrast the quarterback -- the position whose whole scoring curve sits
+  // above everyone else's -- against whichever OTHER position this board
+  // spreads widest, which is the pair that makes the paradox concrete.
+  // The margin between the best player at a position and the last one who
+  // still starts -- which IS that best player's own VOR, since replacement
+  // level is defined as the points of the row whose VOR is 0. Rounded from
+  // the exact difference, NEVER from the two rounded operands: 253.49 -
+  // 230.96 is 23, while the displayed 253 - 231 is 22, and the board prints
+  // 23. The panel must never contradict the column it is explaining.
+  const spread = (p) => (rep[p] && Number.isFinite(rep[p].top) && Number.isFinite(rep[p].points)
+    ? Math.round(rep[p].top - rep[p].points) : null);
+  const qb = rep.QB ?? null;
+  let foil = null;
+  for (const position of Object.keys(rep)) {
+    if (position === 'QB') continue;
+    const s = spread(position);
+    if (s === null) continue;
+    if (foil === null || s > spread(foil)) foil = position;
+  }
+  let vorDetail = null;
+  if (qb && foil && Number.isFinite(qb.top) && rep[foil] && qb.topName && rep[foil].topName) {
+    const other = rep[foil];
+    const qbVor = spread('QB');
+    const otherVor = spread(foil);
+    const qbTop = Math.round(qb.top);
+    const otherTop = Math.round(other.top);
+    const highest = board.reduce(
+      (best, r) => (Number.isFinite(r?.proj_points) && (best === null || r.proj_points > best.proj_points) ? r : best),
+      null,
+    );
+    const isBoardTop = highest && highest.name === qb.topName;
+    vorDetail = `This ${teams}-team league starts ${qb.rank} ${positionWord('QB', qb.rank)} in all, `
+      + `so the last one who still starts anywhere is the ${ordinal(qb.rank)} best. `
+      + `${qb.topName} projects ${qbTop}${isBoardTop ? ', the most of anyone on this board' : ''}, `
+      + `and is ${qbVor} clear of that line — so his VOR is ${qbVor}. `
+      + `The same league starts ${other.rank} ${positionWord(foil, other.rank)}, and `
+      + `${other.topName} projects ${otherTop} but is ${otherVor} clear of the ${ordinal(other.rank)} `
+      + `— VOR ${otherVor}. He scores ${qbTop - otherTop} fewer points than ${qb.topName} `
+      + `and is worth ${otherVor - qbVor} more, because you only ever start one `
+      + `${positionWord('QB')} and the next one is nearly as good. There is no such backup `
+      + `for a top ${positionWord(foil)}.`;
+  }
+  // Always said, grounded example or not: the bar is the one mark on this
+  // page that could be misread ACROSS positions, which is the exact mistake
+  // VOR exists to prevent.
+  const barNote = 'The bar under each VOR is his share of the best VOR at HIS OWN position, in that '
+    + 'position’s colour — so a quarterback’s bar can be longer than a wide receiver’s while his '
+    + 'number is smaller.';
+  vorDetail = vorDetail === null ? barNote : `${vorDetail} ${barNote}`;
+
+  // --- ADP: name the feed, never a number nobody can trace ---------------
+  const adpBits = [];
+  if (adp?.totalDrafts) adpBits.push(`${adp.totalDrafts.toLocaleString('en-US')} real drafts`);
+  if (adp?.type) adpBits.push(String(adp.type));
+  if (adp?.teams) adpBits.push(`${adp.teams}-team`);
+  const adpDetail = adpBits.length === 0
+    ? 'This board reports whatever ADP feed it was built from; if a player has none, nothing is invented for him.'
+    : `Averaged over ${adpBits.join(', ')} (Fantasy Football Calculator). A player the feed `
+      + 'does not carry gets no ADP at all rather than a guessed one.';
+
+  const at = Number.isFinite(survivalPick) ? `your next pick (#${survivalPick})` : 'your next pick';
+
+  return [
+    {
+      id: 'proj', term: 'PROJ', label: 'Projected points',
+      short: `Points he is projected to score over the whole season, under this league's own scoring rules.`,
+      detail: projDetail,
+    },
+    {
+      id: 'vor', term: 'VOR', label: 'Value over replacement',
+      short: 'Points above the last starter at his position — the worst player at that position '
+        + 'who still starts somewhere in this league, NOT a waiver-wire pickup.',
+      detail: vorDetail,
+    },
+    {
+      id: 'stake', term: 'AT STAKE', label: 'What passing on him costs',
+      short: 'VOR × GONE: the points you lose by not taking him now.',
+      detail: 'This is the number the recommendation is ranked on (nudged by which of your starting '
+        + 'slots are still empty), and it is why a player with a lower VOR can rank above one with a '
+        + 'higher VOR: a great player who is certain to still be there scores near zero, because you '
+        + 'can wait and have him anyway.',
+    },
+    {
+      id: 'gone', term: 'GONE', label: 'Chance he is taken first',
+      short: `The chance somebody else takes him before ${at}.`,
+      detail: 'Estimated from his own average draft position and how widely real drafts vary around '
+        + 'it. A player with no ADP at all counts as certain to survive rather than as a coin flip.',
+    },
+    {
+      id: 'tier', term: 'TIER', label: 'Interchangeable group',
+      short: 'A group of players at one position who are close enough in value to be interchangeable.',
+      detail: 'Same tier and same position: take whichever is cheapest, or whichever fills a slot you '
+        + 'still need. Tiers break where the drop to the next player is unusually large for that '
+        + 'position — the "reach now or wait a full round" gaps a drafter is already scanning for.',
+    },
+    {
+      id: 'adp', term: 'ADP', label: 'Average draft position',
+      short: 'Where he goes, on average, in real drafts — what he is expected to cost.',
+      detail: adpDetail,
+    },
+    {
+      id: 'adpDelta', term: 'VS ADP', label: 'Picks past his ADP',
+      short: 'How far he has already fallen past his own ADP. +14 means he is still sitting here '
+        + '14 picks after a typical draft takes him.',
+      detail: `A player who has lasted a full turn of this ${teams}-team draft past his ADP is `
+        + 'highlighted: he is the cheapest real value on the board, and the usual reason to look past '
+        + 'the top of the list.',
+    },
+    {
+      id: 'posRank', term: 'WR1 · RB5', label: 'Rank within his position',
+      short: 'His rank among his own position by average draft position — RB5 is the fifth '
+        + 'running back off the board in a typical draft.',
+      detail: 'That is the axis the measured cliffs sit on, so the badge is filled in while he is '
+        + 'still above his position’s cliff and hollow once he is past it.',
+    },
+    {
+      id: 'bye', term: 'BYE', label: 'Bye week',
+      short: 'The week his NFL team does not play, so he scores you nothing that week.',
+      detail: 'Two of your starters on the same bye is one week you cannot field a full lineup; the '
+        + 'lineup panel says so when it happens.',
+    },
+    {
+      // Yahoo publishes far more than four of these -- Q, O, IR, IR-R, PUP-R,
+      // NFI-R, NA, DNR and CEL all appear on a real board -- so this defines
+      // the common ones and then points at the full wording rather than
+      // pretending the list is closed. Yahoo sends `status_full` with every
+      // one of them, and the page shows it: spelled out beside the flag on
+      // the recommendation and in your lineup, and in the row's own tooltip
+      // on the board.
+      id: 'injury', term: 'Q · O · IR', label: 'Player status',
+      short: 'Yahoo’s own flag on a player who is not simply available: Q questionable, O out, '
+        + 'IR on injured reserve, NA not on an active roster, plus several reserve designations.',
+      detail: 'Whatever the code, the full wording and the body part are spelled out next to it — '
+        + 'on the recommendation, in your lineup, and in each board row’s tooltip. The projection '
+        + 'already discounts him for the games he is expected to miss across a season; this is '
+        + 'today’s news on top of that, and it is why the top recommendation can carry a flag.',
+    },
+  ];
+}
+
+/**
+ * Weeks where two or more of your STARTERS are on a bye at once -- a week
+ * you cannot field a full lineup, which is the same class of problem as an
+ * unfilled slot and the reason the bye is worth showing at all.
+ *
+ * Bench players are deliberately not counted: a bench player's bye costs
+ * nothing, and counting them would raise a flag on every roster.
+ * A player whose bye we do not know is skipped rather than guessed at.
+ */
+export function byeConflicts(slots) {
+  const byWeek = new Map();
+  for (const s of slots ?? []) {
+    const week = s?.player?.bye;
+    if (!Number.isFinite(week)) continue;
+    if (!byWeek.has(week)) byWeek.set(week, []);
+    byWeek.get(week).push(s.player.name ?? 'unnamed');
+  }
+  return [...byWeek.entries()]
+    .filter(([, players]) => players.length > 1)
+    .sort((a, b) => a[0] - b[0])
+    .map(([week, players]) => ({ week, players }));
+}
+
+/**
+ * How much of its own position's bar each row fills, 0..1 -- the board's
+ * per-row VOR bar.
+ *
+ * SCALED WITHIN POSITION, never across the whole board, for exactly the
+ * reason VOR exists in the first place: comparing a quarterback's raw VOR
+ * against a running back's is the mistake the whole page is built to
+ * prevent, and one bar scaled across all positions would reinstate it
+ * visually. A row worth nothing over replacement gets 0 (no bar drawn);
+ * a row with no VOR at all gets null (nothing to draw and nothing implied).
+ */
+export function vorShares(rows) {
+  const maxByPosition = new Map();
+  for (const r of rows ?? []) {
+    if (!r?.position || !Number.isFinite(r.vor)) continue;
+    const best = maxByPosition.get(r.position);
+    if (best === undefined || r.vor > best) maxByPosition.set(r.position, r.vor);
+  }
+  const shares = new Map();
+  for (const r of rows ?? []) {
+    if (!Number.isFinite(r?.vor)) { shares.set(r?.playerId, null); continue; }
+    const max = maxByPosition.get(r.position);
+    shares.set(r.playerId, !Number.isFinite(max) || max <= 0 ? 0 : Math.max(0, Math.min(1, r.vor / max)));
+  }
+  return shares;
+}
+
+/**
+ * Which visual band each row belongs to, so a run of same-tier players at
+ * one position reads as ONE GROUP rather than as four numbers a reader has
+ * to compare by eye. `band` increments every time the tier changes within a
+ * position, so its PARITY alternates and adjacent tiers are distinguishable;
+ * `first` marks the row that opens a band, which is where the rule is drawn.
+ *
+ * Banding is per position and follows the row order it is given (the board's
+ * own VOR order), because a tier only ever means anything against the other
+ * players at that position -- an interleaved wide receiver must not split a
+ * run of running backs. A missing tier is its own band rather than being
+ * merged into the one above it: "we do not know" is not "the same".
+ */
+export function tierBands(rows) {
+  const state = new Map(); // position -> {band, tier}
+  const out = new Map();
+  for (const r of rows ?? []) {
+    if (!r?.position) { out.set(r?.playerId, { band: 0, first: true }); continue; }
+    const prev = state.get(r.position);
+    const tier = r.tier ?? null;
+    const changed = prev === undefined || tier === null || prev.tier === null || prev.tier !== tier;
+    const band = prev === undefined ? 0 : (changed ? prev.band + 1 : prev.band);
+    state.set(r.position, { band, tier });
+    out.set(r.playerId, { band, first: changed });
+  }
+  return out;
+}
+
+/**
+ * How hard a player has fallen past his own ADP, SCALED TO THIS LEAGUE.
+ *
+ * 'past' is a full turn of the draft (`teams` picks): everyone has picked
+ * once since a typical draft would have taken him and he is still sitting
+ * there. 'far' is two full turns. Scaling by team count rather than by a
+ * fixed number of picks is the same discipline `urgencyLevel` applies to
+ * waiting cost: 8 picks past ADP is a genuine slide in a 4-team draft and
+ * unremarkable in a 10-team one, and a page that flags both teaches its
+ * reader to ignore the flag.
+ *
+ * A negative delta (he is going EARLIER than his ADP) is never a signal:
+ * that is the market being keen, not a bargain.
+ */
+export function adpFallLevel(adpDelta, teams) {
+  if (!Number.isFinite(adpDelta) || !Number.isFinite(teams) || teams <= 0) return 'none';
+  if (adpDelta >= teams * 2) return 'far';
+  if (adpDelta >= teams) return 'past';
+  return 'none';
 }

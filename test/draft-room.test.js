@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createDraftRoom, startDraftRoomServer } from '../src/draft-room.js';
@@ -1298,5 +1298,340 @@ test('a port already in use fails with an actionable message, not a stack trace'
     );
   } finally {
     await new Promise((resolve) => blocker.close(resolve));
+  }
+});
+
+// =========================================================================
+// ENRICHING EACH PLAYER (this branch).
+//
+// The #1 recommendation on the real predraft board is Ja'Marr Chase, who is
+// `Q` with a knee injury and a week-6 bye. The page showed neither.
+// Recommending an injured player without saying so is the most serious gap
+// on the screen, and every field needed to close it was already coming back
+// from Yahoo and being thrown away.
+//
+// The fetch discipline is pass 3's, unchanged and for the same reasons
+// (fetchYahooPlayers' own docstring): batched at Yahoo's own 100 ceiling,
+// cached permanently per player_key, never re-fetched, and structurally
+// incapable of throwing or of blocking a poll.
+// =========================================================================
+
+const ENRICH = 'league/470.l.1/players;sort=AR';
+
+/** One page of Yahoo's own `league/<key>/players` response, in exactly the
+ * shape the live API returns (verified against a real session: `bye_weeks`
+ * is nested, `bye_weeks.week` is a STRING, and `status`/`status_full`/
+ * `injury_note` are absent entirely for a healthy player). */
+function yahooPlayerPage(players) {
+  return {
+    league: {
+      players: players.map((p) => ({
+        player_key: p.key,
+        name: { full: p.name },
+        display_position: p.position,
+        editorial_team_abbr: p.team,
+        bye_weeks: p.bye === undefined ? undefined : { week: String(p.bye) },
+        uniform_number: p.number,
+        ...(p.status ? { status: p.status, status_full: p.statusFull, injury_note: p.note } : {}),
+      })),
+    },
+  };
+}
+
+const ENRICH_PLAYERS = [
+  { key: '470.p.1', name: 'Alpha Runner', position: 'RB', team: 'Aaa', bye: 7, number: '23', status: 'Q', statusFull: 'Questionable', note: 'Knee' },
+  { key: '470.p.2', name: 'Bravo Wideout', position: 'WR', team: 'Bbb', bye: 7, number: '1' },
+  { key: '470.p.3', name: 'Charlie Passer', position: 'QB', team: 'Ccc', bye: 9, number: '17' },
+  { key: '470.p.4', name: 'Delta End', position: 'TE', team: 'Ddd', bye: 11, number: '88' },
+];
+
+const ENRICH_NFLVERSE = [
+  { playerId: 'P1', name: 'Alpha Runner', position: 'RB', team: 'AAA' },
+  { playerId: 'P2', name: 'Bravo Wideout', position: 'WR', team: 'BBB' },
+  { playerId: 'P3', name: 'Charlie Passer', position: 'QB', team: 'CCC' },
+  { playerId: 'P4', name: 'Delta End', position: 'TE', team: 'DDD' },
+];
+
+/** A room whose Yahoo client also answers the enrichment resource. Returns
+ * the room with its background enrichment already settled, so assertions
+ * are deterministic. */
+async function enrichedRoom(overrides = {}) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tt-draft-room-enrich-'));
+  const nflverseRosterPath = path.join(dir, 'nflverse_players.json');
+  await writeFile(nflverseRosterPath, JSON.stringify(overrides.nflverse ?? ENRICH_NFLVERSE));
+  const pages = overrides.pages ?? [yahooPlayerPage(ENRICH_PLAYERS)];
+  const client = {
+    calls: [],
+    async get(resource) {
+      this.calls.push(resource);
+      if (resource.startsWith('league/470.l.1/teams')) return TEAMS_RESPONSE;
+      if (resource.startsWith('league/470.l.1/draftresults')) {
+        return overrides.draftResults ?? emptyDraftResults();
+      }
+      if (resource.startsWith(ENRICH)) {
+        const start = Number(/start=(\d+)/.exec(resource)?.[1] ?? 0);
+        const page = pages[start / 100];
+        if (page instanceof Error) throw page;
+        return page ?? { league: { players: [] } };
+      }
+      throw new Error(`unscripted resource: ${resource}`);
+    },
+  };
+  const analytics = fakeAnalytics(overrides.analyticsOpts);
+  const room = await createDraftRoom({
+    teams: 4, slot: 2, rounds: 6, league: '470.l.1',
+    client, analytics, leagueConfig: LEAGUE_CONFIG, crosswalk: new Map(),
+    nflverseRosterPath, ...overrides.extra,
+  });
+  if (overrides.settle !== false) await room.enrichment;
+  return { room, client, analytics, cleanup: () => rm(dir, { recursive: true, force: true }) };
+}
+
+test("every board row carries Yahoo's own NFL team, bye week and injury status -- the fields the page was already being handed and throwing away", async () => {
+  const { room, cleanup } = await enrichedRoom();
+  try {
+    const row = room.getViewModel().board.find((r) => r.playerId === 'P1');
+    assert.equal(row.team, 'AAA', "Yahoo spells it 'Aaa'; the board is uppercase");
+    assert.equal(row.bye, 7, 'a number, not the string Yahoo sends');
+    assert.equal(row.injuryStatus, 'Q');
+    assert.equal(row.injuryLabel, 'Questionable');
+    assert.equal(row.injuryNote, 'Knee');
+    const healthy = room.getViewModel().board.find((r) => r.playerId === 'P2');
+    assert.equal(healthy.bye, 7);
+    assert.equal(healthy.injuryStatus, null, 'a healthy player is flagged as nothing, never as unknown');
+  } finally { await cleanup(); }
+});
+
+test('the TOP RECOMMENDATION carries its injury flag too -- the actual defect was an injured hero with no flag on him', async () => {
+  const { room, cleanup } = await enrichedRoom();
+  try {
+    const hero = room.getViewModel().guidance.hero;
+    assert.equal(hero.playerId, 'P1');
+    assert.equal(hero.injuryStatus, 'Q');
+    assert.equal(hero.injuryLabel, 'Questionable');
+    assert.equal(hero.injuryNote, 'Knee');
+    assert.equal(hero.team, 'AAA');
+    assert.equal(hero.bye, 7);
+  } finally { await cleanup(); }
+});
+
+test('enrichment is batched at Yahoo\'s own 100 ceiling and stops as soon as a page comes back short', async () => {
+  const full = Array.from({ length: 100 }, (_, i) => ({
+    key: `470.p.${9000 + i}`, name: `Filler ${i}`, position: 'WR', team: 'ZZZ', bye: 5,
+  }));
+  const { room, client, cleanup } = await enrichedRoom({
+    pages: [yahooPlayerPage(full), yahooPlayerPage(ENRICH_PLAYERS)],
+  });
+  try {
+    const calls = client.calls.filter((r) => r.startsWith(ENRICH));
+    assert.equal(calls.length, 2, 'a short second page ends the walk -- never a fixed number of requests');
+    assert.match(calls[0], /start=0;count=100/);
+    assert.match(calls[1], /start=100;count=100/);
+    assert.equal(room.getViewModel().board.find((r) => r.playerId === 'P1').bye, 7);
+  } finally { await cleanup(); }
+});
+
+test('enrichment never re-fetches: a player key already cached is never asked about again, however many polls run', async () => {
+  const { room, client, cleanup } = await enrichedRoom();
+  try {
+    const before = client.calls.filter((r) => r.startsWith(ENRICH)).length;
+    assert.ok(before > 0);
+    await room.poll();
+    await room.poll();
+    await room.enrichment;
+    assert.equal(client.calls.filter((r) => r.startsWith(ENRICH)).length, before,
+      'a player\'s team, bye and injury are refreshed by restarting the room, never by hammering Yahoo mid-draft');
+  } finally { await cleanup(); }
+});
+
+test('a failing enrichment fetch is invisible: the board still serves, unenriched, and nothing throws', async () => {
+  const { room, cleanup } = await enrichedRoom({ pages: [new Error('rate limited')] });
+  try {
+    const view = room.getViewModel();
+    assert.ok(view.board.length > 0, 'the board is served regardless');
+    assert.equal(view.board[0].team, null);
+    assert.equal(view.board[0].bye, null);
+    assert.equal(view.board[0].injuryStatus, null);
+    assert.equal(view.status.banner, null, 'a missing bye week is not worth a banner on draft day');
+  } finally { await cleanup(); }
+});
+
+test('enrichment NEVER blocks startup: the room is serving before a single enrichment page has come back', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const dir = await mkdtemp(path.join(tmpdir(), 'tt-draft-room-enrich-gate-'));
+  try {
+    const nflverseRosterPath = path.join(dir, 'nflverse_players.json');
+    await writeFile(nflverseRosterPath, JSON.stringify(ENRICH_NFLVERSE));
+    const client = {
+      calls: [],
+      async get(resource) {
+        this.calls.push(resource);
+        if (resource.startsWith('league/470.l.1/teams')) return TEAMS_RESPONSE;
+        if (resource.startsWith('league/470.l.1/draftresults')) return emptyDraftResults();
+        if (resource.startsWith(ENRICH)) {
+          await gate;
+          return yahooPlayerPage(ENRICH_PLAYERS);
+        }
+        throw new Error(`unscripted resource: ${resource}`);
+      },
+    };
+    const room = await createDraftRoom({
+      teams: 4, slot: 2, rounds: 6, league: '470.l.1',
+      client, analytics: fakeAnalytics(), leagueConfig: LEAGUE_CONFIG,
+      crosswalk: new Map(), nflverseRosterPath,
+    });
+    // createDraftRoom has RESOLVED while the enrichment request is still
+    // hanging -- that is the whole contract. A full board, minus the
+    // decoration, is what a drafter needs in the first ten seconds.
+    const early = room.getViewModel();
+    assert.ok(early.board.length > 0);
+    assert.equal(early.board.find((r) => r.playerId === 'P1').bye, null);
+    release();
+    await room.enrichment;
+    assert.equal(room.getViewModel().board.find((r) => r.playerId === 'P1').bye, 7);
+  } finally {
+    release();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('one enrichment fetch also feeds pass 3: a pick whose key was already enriched is never re-asked via players;player_keys=', async () => {
+  const { room, client, cleanup } = await enrichedRoom({
+    draftResults: { league: { draft_results: [{ pick: 1, round: 1, team_key: '470.l.1.t.1', player_key: '470.p.1' }] } },
+  });
+  try {
+    await room.poll();
+    assert.equal(client.calls.filter((r) => r.startsWith('players;player_keys=')).length, 0,
+      'the enrichment walk already cached this key; asking Yahoo again for the same name is wasted quota');
+    assert.equal(room.getViewModel().status.identity.matched, 1);
+  } finally { await cleanup(); }
+});
+
+// --- what the page needs in order to explain itself -----------------------
+
+test('/api/state carries a glossary grounded in THIS board, so no abbreviation on the page is unlearnable', async () => {
+  const { room } = await baseRoom();
+  const terms = room.getViewModel().guidance.glossary;
+  assert.ok(Array.isArray(terms));
+  const byId = new Map(terms.map((t) => [t.id, t]));
+  for (const id of ['proj', 'vor', 'stake', 'gone', 'tier', 'adp', 'adpDelta', 'posRank', 'bye', 'injury']) {
+    assert.ok(byId.has(id), `the page prints ${id} and offers no way to learn what it means`);
+  }
+  // Grounded in the fixture board's OWN numbers, not a generality: the QB
+  // (300 projected, VOR 20) against the RB (200 projected, VOR 50).
+  assert.match(byId.get('vor').detail, /Charlie Passer/);
+  assert.match(byId.get('vor').detail, /Alpha Runner/);
+  assert.match(byId.get('gone').short, /#2\b/, 'measured to the pick the page is actually measuring to');
+});
+
+test("the glossary's GONE definition follows the survival horizon, not a fixed pick number", async () => {
+  const { room } = await baseRoom({ draftResultsScript: [draftResultsAfter(1)] });
+  await room.poll();
+  const view = room.getViewModel();
+  const gone = view.guidance.glossary.find((t) => t.id === 'gone');
+  assert.match(gone.short, new RegExp(`#${view.status.survivalPick}\\b`));
+});
+
+test('guidance flags two of YOUR STARTERS sharing a bye week -- a week you cannot field a lineup', async () => {
+  const { room, cleanup } = await enrichedRoom({
+    // P1 (RB, bye 7) and P2 (WR, bye 7) both to me, team 2.
+    draftResults: {
+      league: {
+        draft_results: [
+          { pick: 1, round: 1, team_key: '470.l.1.t.1', player_key: '470.p.3' },
+          { pick: 2, round: 1, team_key: '470.l.1.t.2', player_key: '470.p.1' },
+          { pick: 3, round: 1, team_key: '470.l.1.t.3', player_key: '470.p.4' },
+          { pick: 4, round: 1, team_key: '470.l.1.t.4', player_key: '470.p.5' },
+          { pick: 5, round: 2, team_key: '470.l.1.t.4', player_key: '470.p.6' },
+          { pick: 6, round: 2, team_key: '470.l.1.t.3', player_key: '470.p.7' },
+          { pick: 7, round: 2, team_key: '470.l.1.t.2', player_key: '470.p.2' },
+        ],
+      },
+    },
+  });
+  try {
+    await room.poll();
+    const { guidance, roster } = room.getViewModel();
+    assert.deepEqual(roster.slots.filter((s) => s.player).map((s) => s.player.name).sort(),
+      ['Alpha Runner', 'Bravo Wideout']);
+    assert.equal(guidance.byes.length, 1);
+    assert.equal(guidance.byes[0].week, 7);
+    assert.deepEqual(guidance.byes[0].players.sort(), ['Alpha Runner', 'Bravo Wideout']);
+    // And the bye reaches the roster panel itself, not only the warning.
+    assert.equal(roster.slots.find((s) => s.player?.name === 'Alpha Runner').player.bye, 7);
+  } finally { await cleanup(); }
+});
+
+// --- the quiet visuals the board draws ------------------------------------
+
+test('every board row carries what its VOR bar, tier band and ADP-fall chip are drawn from', async () => {
+  const { room } = await baseRoom();
+  const rows = room.getViewModel().board;
+  for (const key of ['vorShare', 'tierBand', 'tierFirst', 'adpFall', 'games']) {
+    assert.ok(key in rows[0], `board row is missing "${key}"`);
+  }
+  // P1 (RB, VOR 50) is the best RB, so his bar is full; P5 (RB, VOR 5) is a tenth of it.
+  assert.equal(rows.find((r) => r.playerId === 'P1').vorShare, 1);
+  assert.equal(rows.find((r) => r.playerId === 'P5').vorShare, 0.1);
+  // The QB's bar is full too, at a VOR of 20 -- bars compare within a
+  // position, never across the board (which is what VOR itself is for).
+  assert.equal(rows.find((r) => r.playerId === 'P3').vorShare, 1);
+  assert.equal(rows.find((r) => r.playerId === 'P1').tierFirst, true);
+  assert.equal(rows.find((r) => r.playerId === 'P5').tierFirst, true, 'a different tier opens a new band');
+});
+
+test('the ADP-fall chip is scaled to this league, so a shallow draft never shows a false bargain', async () => {
+  // Fifteen picks in, a player with an ADP of 1 has fallen 15 picks -- more
+  // than three full turns of a 4-team draft.
+  const { room } = await baseRoom({ draftResultsScript: [draftResultsAfter(15)] });
+  await room.poll();
+  const rows = room.getViewModel().board;
+  assert.equal(rows.find((r) => r.playerId === 'P1').adpFall, 'far', 'ADP 1 at pick 16 is nearly four turns past');
+  assert.equal(rows.find((r) => r.playerId === 'P6').adpFall, 'past', 'ADP 12 at pick 16 is one turn past');
+  // ...while at the very first pick nobody has fallen at all.
+  const { room: fresh } = await baseRoom();
+  assert.ok(fresh.getViewModel().board.every((r) => r.adpFall === 'none'));
+});
+
+test("the ADP glossary entry names the feed the board was ACTUALLY built from, resolved against Python's own cwd", async () => {
+  // The bug this guards: `adp_source` comes back as whatever path the Python
+  // side resolved, and its `--data-dir` default is a RELATIVE "data" -- so
+  // reading it against Node's cwd silently found nothing and the page went
+  // back to explaining the column with no provenance at all. The Node-side
+  // `ffc` cache is NOT a substitute: it holds a different pull entirely (2026
+  // Half-PPR 10-team over 3,208 drafts) from the one the engine used.
+  const dir = await mkdtemp(path.join(tmpdir(), 'tt-draft-room-adp-'));
+  try {
+    // tt.cli's `_load_adp` reports `best.name` -- a BARE FILENAME -- and its
+    // own --data-dir default is a relative "data", so the file really lives
+    // at <analytics cwd>/data/<name>. That second hop is the whole bug.
+    await mkdir(path.join(dir, 'data'), { recursive: true });
+    await writeFile(path.join(dir, 'data', 'ffc_adp_2025.json'), JSON.stringify({
+      meta: { type: 'Half-PPR', teams: 12, totalDrafts: 718 }, players: [],
+    }));
+    const analytics = fakeAnalytics();
+    analytics.cwd = dir;
+    const room = await createDraftRoom({
+      teams: 4, slot: 2, rounds: 6, league: '470.l.1',
+      client: fakeClient({
+        'league/470.l.1/teams': TEAMS_RESPONSE,
+        'league/470.l.1/draftresults': [emptyDraftResults()],
+      }),
+      analytics: {
+        ...analytics,
+        async run(subcommand, opts) {
+          const payload = await analytics.run(subcommand, opts);
+          return { ...payload, adp_source: 'ffc_adp_2025.json' }; // relative, exactly as Python reports it
+        },
+      },
+      leagueConfig: LEAGUE_CONFIG, crosswalk: new Map(),
+    });
+    const adp = room.getViewModel().guidance.glossary.find((t) => t.id === 'adp');
+    assert.match(adp.detail, /718/);
+    assert.match(adp.detail, /Half-PPR/);
+    assert.match(adp.detail, /12-team/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

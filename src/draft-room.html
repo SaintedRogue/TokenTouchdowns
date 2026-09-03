@@ -37,6 +37,10 @@
     --field: #0A0E17;
     --card: #131A27;
     --chalk: #E6EDF7;
+    /* A second body tone. `--faded` is a LABEL colour -- it sits at about
+       4.3:1 on the card, which is fine for a two-word column header and not
+       fine for the paragraphs of explanation this page now carries. */
+    --chalk-2: #B7C2D4;
     --faded: #76839A;
     --qb: #F2A93B;
     --rb: #3FB984;
@@ -77,12 +81,75 @@
 
   /* Hue means position. The fallback MUST come first: these all have equal
      specificity, so a generic [data-pos] rule placed last would win over
-     every specific one and quietly grey out the whole palette. */
-  [data-pos] { --pos: var(--faded); }
-  [data-pos="QB"] { --pos: var(--qb); }
-  [data-pos="RB"] { --pos: var(--rb); }
-  [data-pos="WR"] { --pos: var(--wr); }
-  [data-pos="TE"] { --pos: var(--te); }
+     every specific one and quietly grey out the whole palette.
+     `--pos-dim` and `--pos-wash` are the SAME hue at two lower strengths,
+     spelled out rather than derived, so the new per-row visuals (the VOR bar
+     and the fallen-past-ADP chip) can carry position meaning while staying
+     quieter than the cliff strip, which keeps the hue at full strength. */
+  [data-pos] { --pos: var(--faded); --pos-dim: rgba(118, 131, 154, 0.5); --pos-wash: rgba(118, 131, 154, 0.16); }
+  [data-pos="QB"] { --pos: var(--qb); --pos-dim: rgba(242, 169, 59, 0.5); --pos-wash: rgba(242, 169, 59, 0.15); }
+  [data-pos="RB"] { --pos: var(--rb); --pos-dim: rgba(63, 185, 132, 0.5); --pos-wash: rgba(63, 185, 132, 0.15); }
+  [data-pos="WR"] { --pos: var(--wr); --pos-dim: rgba(76, 155, 234, 0.5); --pos-wash: rgba(76, 155, 234, 0.15); }
+  [data-pos="TE"] { --pos: var(--te); --pos-dim: rgba(197, 123, 224, 0.5); --pos-wash: rgba(197, 123, 224, 0.15); }
+
+  /* ---------- a term you can look up without leaving the page ----------
+     The page's whole defect was that VOR, ADP, PROJ, TIER and GONE were
+     printed and never defined. A `title` attribute is not an answer: it is
+     invisible until you happen to hover, and it is unreachable from the
+     keyboard. So every abbreviation on this page is a real BUTTON with a
+     dotted underline (the visible affordance), which opens its definition on
+     hover, on focus, and on click/Enter -- and closes on Escape. The
+     definition text itself comes from the server's own glossary
+     (src/draft-guidance.js), so what the page says a number means and what
+     the number actually is can never drift apart. */
+  .has-tip { position: relative; }
+  .term {
+    font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit;
+    background: none; border: 0; padding: 0; margin: 0; cursor: help;
+    border-bottom: 1px dotted currentColor;
+  }
+  .term:hover { color: var(--chalk); }
+  .tip {
+    position: absolute; z-index: 40; top: calc(100% + 0.45rem); left: 0;
+    width: min(300px, 74vw);
+    background: var(--raised); color: var(--chalk);
+    border: 1px solid var(--line); border-left: 3px solid var(--chalk);
+    border-radius: 0 6px 6px 0; padding: 0.5rem 0.65rem;
+    font-family: var(--display); font-size: 0.78rem; font-weight: 400;
+    letter-spacing: 0; text-transform: none; text-align: left; line-height: 1.4;
+    white-space: normal;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.55);
+    /* `display: none`, not `visibility: hidden`: a hidden-but-laid-out
+       absolute box still counts toward the document's scroll width, and two
+       dozen of them were giving the page a horizontal scrollbar on a narrow
+       screen. Both states are equally invisible to assistive technology, and
+       the description becomes available at the moment focus arrives, which is
+       exactly when a screen reader needs it. */
+    display: none;
+  }
+  .tip b { display: block; color: var(--chalk-2); font-weight: 700; font-size: 0.66rem;
+           letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 0.2rem; }
+  /* Right-aligned columns anchor their tooltip to the right edge so it opens
+     INTO the table rather than off the end of the scroll container, which
+     clips it. */
+  .has-tip.right .tip { left: auto; right: 0; }
+  .has-tip:hover > .tip,
+  .has-tip:focus-within > .tip,
+  .has-tip.open > .tip { display: block; }
+
+  /* ---------- injury: information, never the alarm colour ----------
+     Red is spent on the runway and nowhere else (see the file header), so an
+     injury flag is drawn in chalk -- the highest-contrast thing on this page
+     and the only non-position ink available. It has to be unmissable on the
+     #1 recommendation, because recommending an injured player without saying
+     so is the worst thing this screen can do; it must not read as an alarm,
+     because a questionable knee in August is news, not an emergency. */
+  .inj {
+    font-family: var(--data); font-size: 0.62rem; font-weight: 800; letter-spacing: 0.06em;
+    color: var(--field); background: var(--chalk); border-radius: 3px;
+    padding: 0.02rem 0.28rem; flex: none;
+  }
+  .injnote { color: var(--chalk); }
 
   /* ---------- header: thin and quiet, never the story ---------- */
   header {
@@ -112,6 +179,12 @@
     padding: 0.2rem 0.55rem; cursor: pointer;
   }
   #undo:hover { color: var(--chalk); border-color: var(--faded); }
+  #explainLink {
+    font: inherit; font-size: 0.78rem; letter-spacing: 0.03em;
+    color: var(--chalk-2); background: transparent; border: 0; padding: 0; cursor: pointer;
+    border-bottom: 1px dotted currentColor;
+  }
+  #explainLink:hover { color: var(--chalk); }
 
   #banner {
     display: none;
@@ -136,12 +209,13 @@
        somewhere. Without this it inflates the middle rows and opens a gap
        above the board; `1fr` on the last row sends it to the bottom of the
        page instead, where nobody sees it. */
-    grid-template-rows: auto auto auto 1fr;
+    grid-template-rows: auto auto auto 1fr auto;
     grid-template-areas:
-      "hero   side"
-      "cliffs side"
-      "runway side"
-      "board  side";
+      "hero    side"
+      "cliffs  side"
+      "runway  side"
+      "board   side"
+      "explain explain";
     align-items: start;
   }
   .hero    { grid-area: hero; }
@@ -149,6 +223,11 @@
   .runway  { grid-area: runway; }
   .board   { grid-area: board; }
   .side    { grid-area: side; display: grid; gap: 0.7rem; }
+  /* The explainer spans the full width, under the board, where the eye ends.
+     Collapsed it is one line; open it has room to be a real glossary rather
+     than a paragraph squeezed into a 305px column -- which is most of why the
+     old collapsed panel was not doing its job. */
+  .explain { grid-area: explain; padding: 0.7rem 1.1rem 0.8rem; }
 
   .panel {
     background: var(--card);
@@ -179,11 +258,27 @@
     border: 1px solid var(--pos, var(--line)); border-radius: 4px;
     padding: 0.1rem 0.45rem;
   }
+  /* Who he plays for, when he is off, and whether he is hurt -- three facts
+     Yahoo was already sending and this page threw away. The #1 recommendation
+     on the real board is a questionable knee with a week-6 bye, and it showed
+     neither. */
+  .hero-tags {
+    display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    margin-top: 0.3rem; font-size: 0.78rem; color: var(--faded);
+    font-family: var(--data); font-variant-numeric: tabular-nums; letter-spacing: 0.04em;
+  }
+  .hero-tags .nfl { color: var(--pos, var(--faded)); font-weight: 700; }
+  .hero-tags .sep { color: var(--line); }
+  /* The injury note on the recommendation is the one tag that must not be
+     skimmable-past: chalk, not the label grey the rest of the row uses. */
+  .hero-tags .has-tip[data-term="injury"] .term { color: var(--chalk); }
+  .hero-tags .inj { font-size: 0.66rem; }
   .hero-meta {
     margin-top: 0.35rem; font-size: 0.8rem; color: var(--faded);
     font-family: var(--data); font-variant-numeric: tabular-nums;
   }
   .hero-meta b { color: var(--chalk); font-weight: 600; }
+  .hero-meta .term { font-family: var(--display); }
   .rule { height: 1px; background: var(--line); margin: 0.6rem 0 0.55rem; }
 
   .reasons {
@@ -237,7 +332,7 @@
   /* ---------- CLIFF STRIP: the signature ---------- */
   .cliffs { padding: 0.7rem 1.1rem 0.75rem; }
   .cliff-head { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.45rem; }
-  .cliff-head .hint { font-size: 0.72rem; color: var(--faded); }
+  .cliff-head .hint, .board-head .hint { font-size: 0.72rem; color: var(--faded); }
   /* ONE grid for the whole strip, with each row contributing its cells
      directly (display: contents). Four separate row-grids do not share
      column widths, so the counts drifted out of line by however long that
@@ -349,7 +444,9 @@
   }
   tbody td.num.key { color: var(--chalk); }
   tbody tr { cursor: pointer; }
-  tbody tr:hover:not(.taken) { background: var(--raised); }
+  /* Hover targets the CELL, not the row: tier banding paints a cell
+     background, and a row-level hover colour would lose to it. */
+  tbody tr:hover:not(.taken) td { background-color: var(--raised); }
   tbody tr.taken { color: var(--faded); cursor: default; }
   tbody tr.taken .who { text-decoration: line-through; opacity: 0.65; }
   tbody tr.taken td.num { opacity: 0.45; }
@@ -362,8 +459,53 @@
     padding: 0.02rem 0.28rem; color: var(--pos, var(--faded));
   }
   .badge.above { background: var(--pos, transparent); color: var(--field); }
-  td.delta.late { color: var(--chalk); }
   .empty-row td { color: var(--faded); padding: 0.9rem 1.2rem; text-align: left; }
+
+  /* Team, bye and injury, inline with the name -- the first column is 45%
+     wide and was carrying one short string. */
+  .rowmeta {
+    font-family: var(--data); font-variant-numeric: tabular-nums;
+    font-size: 0.7rem; letter-spacing: 0.04em; color: var(--faded);
+    margin-left: 0.5rem;
+  }
+  .rowmeta .nfl { color: var(--pos, var(--faded)); }
+  tbody td:first-child .inj { margin-left: 0.4rem; font-size: 0.58rem; }
+  tr.taken .rowmeta, tr.taken .inj { opacity: 0.4; }
+
+  /* ---------- THE PER-ROW VOR BAR ----------
+     A 2px rule under the number, its length scaled WITHIN the player's own
+     position (src/draft-guidance.js's `vorShares`) -- never across the board,
+     because comparing a quarterback's raw VOR to a running back's is the
+     exact mistake this page exists to prevent. Drawn as a background on the
+     cell so it costs no element per row across 300 rows, and at half strength
+     so the cliff strip above it stays the loudest thing on the page. */
+  td.vorcell {
+    background-image: linear-gradient(var(--pos-dim), var(--pos-dim));
+    background-repeat: no-repeat;
+    background-position: right 0.7rem bottom 2px;
+    background-size: 0 3px;
+  }
+
+  /* ---------- TIER BANDS ----------
+     Only while a single position is being shown: with everything on screen
+     the board is in VOR order and tiers from four positions interleave, so
+     banding would be noise. Filtered to one position, a band IS the answer to
+     "are these two the same pick?" -- a hairline where the tier changes and a
+     barely-there wash on alternate groups. */
+  tbody.banded tr[data-band="1"] td { background-color: rgba(230, 237, 247, 0.032); }
+  tbody.banded tr[data-tier-first="1"] td { border-top: 1px solid var(--line); }
+  tbody.banded tr[data-tier-first="1"] td.tiercell { color: var(--chalk); }
+
+  /* ---------- FALLEN PAST HIS ADP ----------
+     The most actionable thing on a live board, previously rendered as an
+     unremarkable grey number. 'past' is a full turn of THIS draft, 'far' is
+     two -- scaled to team count so a 4-team room never shows a false bargain
+     (src/draft-guidance.js's `adpFallLevel`). */
+  .fall { border-radius: 3px; padding: 0.02rem 0.3rem; }
+  td.delta[data-fall="past"] .fall { color: var(--pos, var(--chalk)); }
+  td.delta[data-fall="far"] .fall {
+    color: var(--pos, var(--chalk)); font-weight: 700; background: var(--pos-wash);
+  }
 
   /* ---------- SIDE: roster + the explainer ---------- */
   .side .panel { padding: 0.85rem 1rem 0.95rem; }
@@ -377,25 +519,69 @@
     font-family: var(--data); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.04em;
     color: var(--pos, var(--faded)); width: 2.9rem; flex: none;
   }
-  .rslot .val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rslot .val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
   .rslot .val.none { color: var(--faded); }
+  .rslot .rbye {
+    font-family: var(--data); font-variant-numeric: tabular-nums;
+    font-size: 0.68rem; color: var(--faded); flex: none;
+  }
+  .rslot .rbye.clash { color: var(--chalk); font-weight: 700; }
+  .rslot .inj { font-size: 0.58rem; }
+  .byes {
+    margin-top: 0.55rem; padding-top: 0.5rem; border-top: 1px solid var(--line-soft);
+    font-size: 0.76rem; color: var(--chalk);
+  }
+  .byes:empty { display: none; }
   .bench { margin-top: 0.7rem; font-size: 0.8rem; color: var(--faded); }
   .bench span { display: block; font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 0.25rem; }
 
+  /* The old trigger read "WHY THESE NUMBERS? +" in 0.68rem uppercase grey and
+     was, in the user's own words, not answering the question. It is now an
+     inviting, full-width control that says what is behind it. */
   details.why summary {
     cursor: pointer; list-style: none;
-    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.14em;
-    text-transform: uppercase; color: var(--faded);
+    display: inline-flex; align-items: baseline; gap: 0.5rem;
+    font-size: 0.86rem; font-weight: 600; color: var(--chalk);
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 0.22rem 0.85rem;
   }
   details.why summary::-webkit-details-marker { display: none; }
-  details.why summary::after { content: " +"; }
-  details.why[open] summary::after { content: " −"; }
-  details.why summary:hover { color: var(--chalk); }
-  .why-body { margin-top: 0.7rem; font-size: 0.82rem; color: var(--faded); }
+  details.why summary::after { content: "+"; color: var(--faded); font-weight: 700; }
+  details.why[open] summary::after { content: "−"; }
+  details.why summary:hover { border-color: var(--faded); background: var(--raised); }
+  details.why summary .lede { color: var(--faded); font-weight: 400; font-size: 0.8rem; }
+  .why-body { margin-top: 0.9rem; font-size: 0.82rem; color: var(--chalk-2); }
   .why-body p { margin: 0 0 0.65rem; }
   .why-body p:last-child { margin-bottom: 0; }
   .why-body b { color: var(--chalk); font-weight: 600; }
   .why-body .n { color: var(--chalk); }
+
+  /* The glossary itself: one column per pair of terms on a wide screen, so a
+     reader can find "VOR" by scanning rather than by reading a paragraph. */
+  .terms {
+    margin: 0 0 1rem;
+    column-width: 285px; column-gap: 1.6rem;
+  }
+  .terms .row { break-inside: avoid; margin-bottom: 0.75rem; }
+  .terms dt {
+    font-family: var(--data); font-size: 0.74rem; font-weight: 700; letter-spacing: 0.06em;
+    color: var(--chalk);
+  }
+  .terms dt span {
+    font-family: var(--display); font-size: 0.68rem; font-weight: 400;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--chalk-2);
+    margin-left: 0.5rem;
+  }
+  /* The definition is the brighter half; the worked example under it supports
+     it. The old panel had this the other way round. */
+  .terms dd { margin: 0.15rem 0 0; color: var(--chalk); }
+  .terms dd .detail { color: var(--chalk-2); }
+  .why-notes {
+    border-top: 1px solid var(--line-soft); padding-top: 0.75rem;
+    columns: 2; column-gap: 1.6rem;
+  }
+  .why-notes p { break-inside: avoid; }
+  @media (max-width: 900px) { .why-notes { columns: 1; } }
 
   /* ---------- the one restrained moment ---------- */
   @keyframes lift {
@@ -412,7 +598,7 @@
     main {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: none;
-      grid-template-areas: "hero" "cliffs" "runway" "board" "side";
+      grid-template-areas: "hero" "cliffs" "runway" "board" "side" "explain";
     }
     .side { grid-template-columns: 1fr 1fr; }
   }
@@ -436,6 +622,8 @@
     <span class="sep">|</span>
     <span class="mine">your next <b id="next" class="n">—</b></span>
     <span class="push"></span>
+    <button id="explainLink" type="button">what do these numbers mean?</button>
+    <span class="sep">|</span>
     <span id="identity" class="n" title="Of the picks Yahoo has confirmed, how many matched a board row and got struck off. A gap here means a drafted player may still show as available.">identity —</span>
     <span class="sep">|</span>
     <span id="updated" class="n">not polled yet</span>
@@ -451,6 +639,7 @@
       <h1 class="hero-name" id="heroName">Loading…</h1>
       <span class="hero-pos" id="heroPos" hidden></span>
     </div>
+    <div class="hero-tags" id="heroTags"></div>
     <div class="hero-meta" id="heroMeta"></div>
     <div class="rule"></div>
     <div class="reasons" id="reasons"></div>
@@ -481,6 +670,7 @@
   <section class="panel board">
     <div class="board-head">
       <h2>Board</h2>
+      <span class="hint" id="boardHint" hidden></span>
       <div class="filters" id="filters" role="group" aria-label="Filter the board by position"></div>
       <button class="only" id="only" type="button" aria-pressed="false"
         title="Hide players who are already drafted">still available</button>
@@ -488,15 +678,19 @@
     <div class="scroll">
       <table>
         <thead>
+          <!-- Every abbreviated header is a real, keyboard-reachable control
+               with a dotted underline; its definition is filled in from the
+               server's own glossary on first render, so the page can never
+               explain a number differently from the way it computes it. -->
           <tr>
             <th class="l">Player</th>
-            <th class="l">Pos</th>
-            <th>Proj</th>
-            <th>VOR</th>
-            <th>Tier</th>
-            <th>ADP</th>
-            <th title="Where he is going relative to his own ADP right now. Positive means he is falling.">vs ADP</th>
-            <th title="Chance he is gone before your next pick">Gone</th>
+            <th class="l" data-term="posRank">Pos</th>
+            <th data-term="proj">Proj</th>
+            <th data-term="vor">VOR</th>
+            <th data-term="tier">Tier</th>
+            <th data-term="adp">ADP</th>
+            <th data-term="adpDelta">vs ADP</th>
+            <th data-term="gone">Gone</th>
           </tr>
         </thead>
         <tbody id="rows"><tr class="empty-row"><td colspan="8">Loading the board…</td></tr></tbody>
@@ -508,16 +702,17 @@
     <section class="panel">
       <h2>Your lineup</h2>
       <div id="rosterSlots"></div>
+      <div class="byes" id="byeWarning"></div>
       <div class="bench"><span>Bench</span><div id="bench">none yet</div></div>
     </section>
-
-    <section class="panel">
-      <details class="why">
-        <summary>Why these numbers?</summary>
-        <div class="why-body" id="whyBody"></div>
-      </details>
-    </section>
   </div>
+
+  <section class="panel explain">
+    <details class="why">
+      <summary>Every number on this page, explained <span class="lede">VOR, ADP, tiers, "at stake"</span></summary>
+      <div class="why-body" id="whyBody"></div>
+    </details>
+  </section>
 </main>
 
 <script>
@@ -531,6 +726,8 @@
   var cliffCache = new Map();
   var lastHeroId = null;
   var POSITIONS = ['QB', 'RB', 'WR', 'TE'];
+  var glossaryById = new Map();   // term id -> the server's own definition
+  var tipSeq = 0;
 
   // ---- formatting. Every live number is tabular; none of these ever
   // returns a different WIDTH for the same magnitude, so nothing shifts.
@@ -558,6 +755,93 @@
   // "RB4" -- position and rank in one token, the way a drafter says it.
   function posTag(position, posRank) {
     return (position || '?') + (posRank ? String(posRank) : '');
+  }
+
+  // ---- LOOKING A TERM UP WITHOUT LEAVING THE PAGE.
+  // Every abbreviation the board prints becomes a real button with a dotted
+  // underline: hover shows its definition, so does keyboard focus, and so
+  // does clicking or pressing Enter (Escape closes). A bare `title` attribute
+  // was what this page had, and it is invisible until you guess to hover and
+  // unreachable from the keyboard entirely. The definition text is never
+  // written here -- it comes from guidance.glossary, composed and tested in
+  // src/draft-guidance.js against the same board these numbers come from.
+  function fillTip(wrap) {
+    var term = glossaryById.get(wrap.getAttribute('data-term'));
+    var tip = wrap.lastChild;
+    if (!term || !tip) return;
+    tip.textContent = '';
+    tip.appendChild(el('b', null, term.term + ' \u2014 ' + term.label));
+    tip.appendChild(el('span', null, term.short));
+  }
+
+  function termNode(id, text, align) {
+    var wrap = el('span', align === 'right' ? 'has-tip right' : 'has-tip');
+    wrap.setAttribute('data-term', id);
+    var btn = el('button', 'term', text);
+    btn.type = 'button';
+    btn.setAttribute('aria-expanded', 'false');
+    tipSeq += 1;
+    var tip = el('span', 'tip');
+    tip.id = 'tip-' + id + '-' + tipSeq;
+    tip.setAttribute('role', 'tooltip');
+    btn.setAttribute('aria-describedby', tip.id);
+    btn.onclick = function (e) {
+      e.stopPropagation();
+      var open = !wrap.classList.contains('open');
+      closeAllTips();
+      anchorTip(wrap);
+      if (open) wrap.classList.add('open');
+      btn.setAttribute('aria-expanded', String(open));
+    };
+    // Whichever way it opens -- pointer, keyboard, or click -- the tooltip
+    // opens toward the side that has room. A term near the right edge of a
+    // narrow window would otherwise push a horizontal scrollbar onto the page.
+    wrap.addEventListener('mouseenter', function () { anchorTip(wrap); });
+    btn.addEventListener('focus', function () { anchorTip(wrap); });
+    wrap.appendChild(btn);
+    wrap.appendChild(tip);
+    fillTip(wrap);
+    return wrap;
+  }
+
+  var TIP_WIDTH = 306; // .tip's 300px plus its border and a hair of margin.
+  function anchorTip(wrap) {
+    var box = wrap.getBoundingClientRect();
+    // The board scrolls, so the edge that actually clips a header's tooltip is
+    // the scroll box's, not the window's -- a tooltip on the last column had
+    // room in the viewport and was still cut in half by `overflow: auto`.
+    var clip = wrap.closest('.scroll');
+    var limit = document.documentElement.clientWidth;
+    if (clip) limit = Math.min(limit, clip.getBoundingClientRect().right);
+    wrap.classList.toggle('right', box.left + TIP_WIDTH > limit);
+  }
+
+  function closeAllTips() {
+    Array.prototype.forEach.call(document.querySelectorAll('.has-tip.open'), function (w) {
+      w.classList.remove('open');
+      var b = w.firstChild;
+      if (b && b.setAttribute) b.setAttribute('aria-expanded', 'false');
+    });
+  }
+
+  // The column headers are static markup (they must exist before the first
+  // /api/state lands, or the board has no header); they are upgraded in place
+  // exactly once, the first time a glossary arrives.
+  function upgradeHeaders() {
+    Array.prototype.forEach.call(document.querySelectorAll('thead th[data-term]'), function (th) {
+      var id = th.getAttribute('data-term');
+      var label = th.textContent;
+      th.textContent = '';
+      th.removeAttribute('data-term');
+      th.appendChild(termNode(id, label, th.classList.contains('l') ? 'left' : 'right'));
+    });
+  }
+
+  function renderGlossaryTerms(terms) {
+    if (!terms || terms.length === 0) return;
+    glossaryById = new Map(terms.map(function (t) { return [t.id, t]; }));
+    upgradeHeaders();
+    Array.prototype.forEach.call(document.querySelectorAll('.has-tip[data-term]'), fillTip);
   }
 
   // ---- api
@@ -646,6 +930,7 @@
       setText(nameEl, status.draftStatus === 'postdraft' ? 'Your draft is complete' : 'No pick to make yet');
       posEl.hidden = true;
       setText(metaEl, '');
+      renderHeroTags(null);
       reasonsEl.textContent = '';
       setText(costEl, '');
       markEl.hidden = true;
@@ -670,16 +955,29 @@
     posEl.hidden = false;
     posEl.textContent = posTag(h.position, h.posRank);
 
+    renderHeroTags(h);
+
+    // The hero's own numbers, each LABELLED with a term the reader can look
+    // up in place. This line used to be one unlabelled string; the labels are
+    // the explanation and the tooltips are the long form.
+    metaEl.textContent = '';
     var bits = [];
-    if (h.proj !== null && h.proj !== undefined) bits.push(num(h.proj, 0) + ' projected');
-    if (h.vor !== null && h.vor !== undefined) bits.push(num(h.vor, 0) + ' over replacement');
-    if (h.tier) bits.push('tier ' + h.tier);
-    if (h.expectedLoss !== null && h.expectedLoss !== undefined) bits.push(num(h.expectedLoss, 0) + ' at stake');
+    if (h.proj !== null && h.proj !== undefined) {
+      bits.push([num(h.proj, 0) + ' ', 'proj',
+        h.games ? 'projected over ' + num(h.games, 0) + ' games' : 'projected']);
+    }
+    if (h.vor !== null && h.vor !== undefined) bits.push([num(h.vor, 0) + ' ', 'vor', 'over replacement']);
+    if (h.tier) bits.push(['', 'tier', 'tier ' + h.tier]);
+    if (h.expectedLoss !== null && h.expectedLoss !== undefined) {
+      bits.push([num(h.expectedLoss, 0) + ' ', 'stake', 'at stake']);
+    }
     var adp = adpPhrase(h.adpDelta);
-    if (adp) bits.push(adp);
-    setText(metaEl, bits.join('  ·  '));
-    metaEl.title = 'At stake = expected loss: his value over replacement times the chance he is gone '
-      + 'by your next pick. It is what the ranking sorts on.';
+    if (adp) bits.push(['', 'adpDelta', adp]);
+    bits.forEach(function (b, i) {
+      if (i > 0) metaEl.appendChild(el('span', null, '  ·  '));
+      if (b[0]) metaEl.appendChild(el('span', null, b[0]));
+      metaEl.appendChild(termNode(b[1], b[2]));
+    });
 
     reasonsEl.textContent = '';
     h.reasons.forEach(function (r, i) {
@@ -705,6 +1003,27 @@
 
     markEl.hidden = false;
     markEl.onclick = function () { markTaken(h.playerId); };
+  }
+
+  // Who he plays for, when he is off, and whether he is hurt. Yahoo sends all
+  // three with every player and this page discarded them: the real #1
+  // recommendation is a questionable knee with a week-6 bye and the screen
+  // said neither, which is the most serious thing this tool can get wrong.
+  function renderHeroTags(h) {
+    var wrap = document.getElementById('heroTags');
+    wrap.textContent = '';
+    if (!h) return;
+    if (h.team) wrap.appendChild(el('span', 'nfl', h.team));
+    if (h.bye !== null && h.bye !== undefined) {
+      if (wrap.childElementCount > 0) wrap.appendChild(el('span', 'sep', '·'));
+      wrap.appendChild(termNode('bye', 'bye ' + h.bye));
+    }
+    if (h.injuryStatus) {
+      if (wrap.childElementCount > 0) wrap.appendChild(el('span', 'sep', '·'));
+      wrap.appendChild(el('span', 'inj', h.injuryStatus));
+      wrap.appendChild(termNode('injury',
+        (h.injuryLabel || h.injuryStatus) + (h.injuryNote ? ' — ' + h.injuryNote : '')));
+    }
   }
 
   function renderThen(recs) {
@@ -819,6 +1138,14 @@
       var matchesPosition = filter === 'ALL' || tr.getAttribute('data-position') === filter;
       tr.hidden = !matchesPosition || (availableOnly && tr.classList.contains('taken'));
     });
+    // Tier bands are only meaningful with ONE position on screen: unfiltered,
+    // the board is in VOR order and four positions' tiers interleave, so the
+    // banding would be noise rather than a grouping.
+    var banded = filter !== 'ALL';
+    document.getElementById('rows').classList.toggle('banded', banded);
+    var hint = document.getElementById('boardHint');
+    hint.hidden = !banded;
+    setText(hint, banded ? 'grouped by tier — players inside a band are interchangeable, so take the cheapest' : '');
   }
 
   function renderFilters() {
@@ -846,8 +1173,17 @@
     tr.setAttribute('data-pos', row.position || '');
     tr.tabIndex = 0;
 
+    // Name, then who he plays for, when he is off, and whether he is hurt --
+    // the first column is 45% wide and was carrying one short string.
     var name = el('td');
     name.appendChild(el('span', 'who', row.name));
+    var meta = el('span', 'rowmeta');
+    meta.appendChild(el('span', 'nfl'));
+    meta.appendChild(el('span', 'bye'));
+    name.appendChild(meta);
+    var inj = el('span', 'inj');
+    inj.hidden = true;
+    name.appendChild(inj);
     tr.appendChild(name);
 
     var pos = el('td');
@@ -855,10 +1191,12 @@
     tr.appendChild(pos);
 
     tr.appendChild(el('td', 'num key', num(row.proj, 0)));
-    tr.appendChild(el('td', 'num key', num(row.vor, 0)));
-    tr.appendChild(el('td', 'num', row.tier === null || row.tier === undefined ? '—' : String(row.tier)));
+    tr.appendChild(el('td', 'num key vorcell', num(row.vor, 0)));
+    tr.appendChild(el('td', 'num tiercell', row.tier === null || row.tier === undefined ? '—' : String(row.tier)));
     tr.appendChild(el('td', 'num', num(row.adp, 0)));
-    tr.appendChild(el('td', 'num delta', signed(row.adpDelta)));
+    var delta = el('td', 'num delta');
+    delta.appendChild(el('span', 'fall', signed(row.adpDelta)));
+    tr.appendChild(delta);
     tr.appendChild(el('td', 'num', pct(row.pGone)));
 
     function take() { if (!tr.classList.contains('taken')) markTaken(row.playerId); }
@@ -880,10 +1218,41 @@
         body.appendChild(tr);
       }
       tr.classList.toggle('taken', row.taken);
-      tr.title = row.taken ? (row.name + ' — drafted') : ('Mark ' + row.name + ' taken');
+      var story = [row.name];
+      if (row.team) story.push(row.team);
+      if (row.bye !== null && row.bye !== undefined) story.push('bye week ' + row.bye);
+      if (row.injuryStatus) {
+        story.push((row.injuryLabel || row.injuryStatus) + (row.injuryNote ? ' (' + row.injuryNote + ')' : ''));
+      }
+      story.push(row.taken ? 'already drafted' : 'click to mark taken');
+      tr.title = story.join(' — ');
       var cells = tr.children;
-      setText(cells[6], row.taken ? '—' : signed(row.adpDelta));
-      cells[6].classList.toggle('late', !row.taken && isFinite(row.adpDelta) && row.adpDelta > 0);
+
+      // Enrichment lands on a LATER poll than the board itself (it is fetched
+      // in the background, on purpose), so these are updated every render
+      // rather than built once.
+      var meta = cells[0].children[1];
+      setText(meta.children[0], row.team || '');
+      setText(meta.children[1], row.bye === null || row.bye === undefined ? ''
+        : (row.team ? ' · bye ' + row.bye : 'bye ' + row.bye));
+      var inj = cells[0].children[2];
+      inj.hidden = !row.injuryStatus;
+      if (row.injuryStatus) {
+        setText(inj, row.injuryStatus);
+        inj.title = (row.injuryLabel || row.injuryStatus) + (row.injuryNote ? ' — ' + row.injuryNote : '');
+      }
+
+      // The VOR bar: a 2px rule under the number, scaled within his own
+      // position. Drawn as a background so 300 rows cost 300 style writes and
+      // not 300 extra elements.
+      cells[3].style.backgroundSize = row.vorShare
+        ? 'calc((100% - 1.4rem) * ' + row.vorShare.toFixed(3) + ') 3px' : '0 3px';
+
+      tr.setAttribute('data-band', String((row.tierBand || 0) % 2));
+      tr.setAttribute('data-tier-first', row.tierFirst ? '1' : '0');
+
+      setText(cells[6].firstChild, row.taken ? '—' : signed(row.adpDelta));
+      cells[6].setAttribute('data-fall', row.taken ? 'none' : (row.adpFall || 'none'));
       setText(cells[7], pct(row.pGone));
       var badge = cells[1].firstChild;
       badge.classList.toggle('above', row.aboveCliff === true && !row.taken);
@@ -892,7 +1261,8 @@
   }
 
   // ---- roster
-  function renderRoster(roster) {
+  function renderRoster(roster, byes) {
+    var clashWeeks = new Set((byes || []).map(function (b) { return b.week; }));
     var wrap = document.getElementById('rosterSlots');
     wrap.textContent = '';
     (roster.slots || []).forEach(function (s) {
@@ -900,7 +1270,31 @@
       r.setAttribute('data-pos', s.player ? (s.player.position || '') : '');
       r.appendChild(el('span', 'lab', s.slot));
       r.appendChild(el('span', s.player ? 'val' : 'val none', s.player ? s.player.name : 'empty'));
+      if (s.player && s.player.injuryStatus) {
+        var chip = el('span', 'inj', s.player.injuryStatus);
+        chip.title = (s.player.injuryLabel || s.player.injuryStatus)
+          + (s.player.injuryNote ? ' — ' + s.player.injuryNote : '');
+        r.appendChild(chip);
+      }
+      if (s.player && s.player.bye !== null && s.player.bye !== undefined) {
+        var bye = el('span', clashWeeks.has(s.player.bye) ? 'rbye clash' : 'rbye', 'bye ' + s.player.bye);
+        r.appendChild(bye);
+      }
       wrap.appendChild(r);
+    });
+
+    // Two starters out in the same week is the same class of problem as an
+    // unfilled slot -- and, until the byes were fetched, was invisible.
+    var warn = document.getElementById('byeWarning');
+    warn.textContent = '';
+    (byes || []).forEach(function (b) {
+      var names = b.players.length < 3
+        ? b.players.join(' and ')
+        : b.players.slice(0, -1).join(', ') + ' and ' + b.players[b.players.length - 1];
+      var line = el('div');
+      line.appendChild(el('b', null, 'Week ' + b.week + ': '));
+      line.appendChild(el('span', null, names + (b.players.length > 2 ? ' are all off.' : ' are both off.')));
+      warn.appendChild(line);
     });
     var bench = document.getElementById('bench');
     setText(bench, (!roster.bench || roster.bench.length === 0) ? 'none yet'
@@ -909,39 +1303,51 @@
       }).join(', '));
   }
 
-  // ---- the explainer, grounded in THIS board's own numbers
+  // ---- THE EXPLAINER. The user's question, verbatim: "Can you explain the
+  // analysis? I don't know what the acronyms mean. How am I to read
+  // everything?" A collapsed panel of generalities was the answer before, and
+  // it plainly was not one. It is now a glossary FIRST -- every abbreviation
+  // the page prints, defined in this board's own numbers, straight from
+  // guidance.glossary so it cannot drift from the columns it explains -- with
+  // the study's own findings underneath it.
   function renderWhy(guidance) {
     var body = document.getElementById('whyBody');
-    if (body.getAttribute('data-built') === '1') return;
-    var rep = guidance.replacement || {};
-    var qb = rep.QB;
-    var rb = rep.RB;
-    var teams = guidance.league.teams;
-    var basis = guidance.urgency.basisTeams;
-
-    function p(html) { var e = el('p'); e.innerHTML = html; body.appendChild(e); }
+    var terms = guidance.glossary || [];
+    // Rebuilt only when the wording actually changes (the GONE definition
+    // names your next pick, so it moves during a draft).
+    var signature = terms.map(function (t) { return t.short + (t.detail || ''); }).join('|');
+    if (body.getAttribute('data-signature') === signature) return;
     body.textContent = '';
 
-    if (qb && rb) {
-      p('<b>VOR is points above the last starter at that position</b> — not points. '
-        + 'On this board the last starting quarterback projects <span class="n">' + Math.round(qb.points) + '</span> '
-        + 'and the last starting running back <span class="n">' + Math.round(rb.points) + '</span>. '
-        + 'So the best QB here (<span class="n">' + Math.round(qb.top) + '</span>) is worth '
-        + '<span class="n">' + Math.round(qb.top - qb.points) + '</span> over his replacement while the best RB '
-        + '(<span class="n">' + Math.round(rb.top) + '</span>) is worth <span class="n">' + Math.round(rb.top - rb.points) + '</span>. '
-        + 'Quarterbacks score more and are worth less, because almost the whole QB curve sits above almost the whole RB curve.');
-    } else {
-      p('<b>VOR is points above the last starter at that position</b>, which is why a quarterback who scores more can be worth less to draft.');
-    }
-    p('<b>Expected loss is VOR × the chance he is gone by your next pick.</b> A superb player certain to '
-      + 'survive scores near zero — you can wait and have him anyway. That is what the ranking sorts on.');
-    p('<b>Roster need outranks both, late.</b> In this ' + teams + '-team league, simply not finishing with an '
-      + 'empty starting slot was measured at <span class="n">+63</span> to <span class="n">+80</span> actual points — '
-      + 'larger than any positional strategy tested. That is why the runway row exists.');
+    var dl = el('dl', 'terms');
+    terms.forEach(function (t) {
+      var row = el('div', 'row');
+      var dt = el('dt', null, t.term);
+      dt.appendChild(el('span', null, t.label));
+      var dd = el('dd', null, t.short);
+      if (t.detail) {
+        dd.appendChild(el('span', null, ' '));
+        dd.appendChild(el('span', 'detail', t.detail));
+      }
+      row.appendChild(dt);
+      row.appendChild(dd);
+      dl.appendChild(row);
+    });
+    body.appendChild(dl);
+
+    var notes = el('div', 'why-notes');
+    function p(html) { var e = el('p'); e.innerHTML = html; notes.appendChild(e); }
+    var teams = guidance.league.teams;
+    var basis = guidance.urgency.basisTeams;
+    p('<b>Roster need outranks every one of them, late.</b> In this ' + teams + '-team league, simply '
+      + 'not finishing with an empty starting slot was measured at <span class="n">+63</span> to '
+      + '<span class="n">+80</span> actual points — larger than any positional strategy tested. '
+      + 'That is why the runway row exists, and why it is the only thing on this page allowed to go red.');
     p('<b>The cliffs are measured, not drawn by eye.</b> Actual points fall '
       + '<span class="n">−68</span> after RB12 and <span class="n">−42</span> after WR12, and '
       + '<span class="n">−38</span> after TE6. QB has no cliff at all — it is a slope from QB1 to QB24, '
-      + 'and no step in it is separable from noise.');
+      + 'and no step in it is separable from noise, which is why the QB row of the strip is a gradient '
+      + 'and not a count.');
     p('<b>Why this page rarely raises its voice.</b> The largest cost of waiting one turn measured anywhere in a '
       + '4-team draft is <span class="n">20</span> points; most rounds are under <span class="n">10</span>. '
       + 'At 10 teams the same numbers run <span class="n">20</span>–<span class="n">55</span>. Urgency is mostly a '
@@ -951,7 +1357,8 @@
     p('Everything above comes from <b>docs/positional-value.md</b>: 12 cells × 8 strategies × 400 trials, '
       + 'projections fit out of sample and graded on the points players really scored in 2023–2025. '
       + 'Three seasons is a small sample and no single round has a statistically separable winner.');
-    body.setAttribute('data-built', '1');
+    body.appendChild(notes);
+    body.setAttribute('data-signature', signature);
   }
 
   // ---- render
@@ -964,6 +1371,8 @@
     renderIdentity(state.status);
     renderFilters();
     if (state.guidance) {
+      // Definitions first: everything below can hang a tooltip off them.
+      renderGlossaryTerms(state.guidance.glossary);
       renderHero(state.guidance, state.status);
       renderCliffs(state.guidance.cliffs);
       renderRunway(state.guidance.runway);
@@ -971,7 +1380,7 @@
     }
     renderThen(state.recommendations);
     renderBoard(state.board);
-    renderRoster(state.roster);
+    renderRoster(state.roster, state.guidance ? state.guidance.byes : []);
   }
 
   async function poll() {
@@ -990,6 +1399,19 @@
     applyFilter();
   };
   document.getElementById('undo').onclick = undoMark;
+  document.getElementById('explainLink').onclick = function () {
+    var why = document.querySelector('details.why');
+    why.open = true;
+    // Reduced motion is honoured here explicitly: the CSS blanket rule at the
+    // bottom of this stylesheet cannot reach a scroll started from script.
+    var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    why.scrollIntoView({ block: 'start', behavior: still ? 'auto' : 'smooth' });
+  };
+  // A definition opened by click stays open until it is dismissed -- Escape,
+  // or a click anywhere else. Hover and keyboard focus need no dismissal;
+  // they close themselves.
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeAllTips(); });
+  document.addEventListener('click', closeAllTips);
   poll();
   setInterval(poll, 3000);
   setInterval(function () { if (state) renderUpdated(state.status); }, 1000);

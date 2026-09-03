@@ -141,7 +141,7 @@ def test_board_adp_is_attached_for_players_present_in_the_crosswalk(tmp_path):
     data_dir = _write_parquet(tmp_path)
     _write_adp(data_dir)
     code, out, err = _run([
-        "board", f"--config={league}", f"--data-dir={data_dir}", "--mc-n=30", "--seed=1",
+        "board", f"--config={league}", f"--data-dir={data_dir}", f"--adp-cache={tmp_path}/no-live-cache.json", "--mc-n=30", "--seed=1",
     ])
     assert code == 0, err
     players = {p["player_id"]: p for p in json.loads(out)["players"]}
@@ -156,7 +156,7 @@ def test_board_with_slot_adds_survival_columns(tmp_path):
     data_dir = _write_parquet(tmp_path)
     _write_adp(data_dir)
     code, out, err = _run([
-        "board", f"--config={league}", f"--data-dir={data_dir}",
+        "board", f"--config={league}", f"--data-dir={data_dir}", f"--adp-cache={tmp_path}/no-live-cache.json",
         "--mc-n=30", "--seed=1", "--slot=2",
     ])
     assert code == 0, err
@@ -848,3 +848,53 @@ def test_unknown_command_fails_cleanly():
     code, out, err = _run(["bogus"])
     assert code != 0
     assert out == ""
+
+
+# --- the board must rank against THIS season's market, not a backtest fixture ---
+
+
+def test_load_adp_prefers_the_current_seasons_file_over_an_older_one(tmp_path):
+    """`analytics/data/` holds ffc_adp_<season>.json files built for the
+    BACKTEST. `_load_adp` took the highest-numbered one, which before a
+    current-season file existed meant the LIVE board ranked against LAST
+    SEASON'S market. Measured against the real files: median ADP error 19.6
+    picks, 89 of 131 shared players off by more than a full round (Alvin
+    Kamara 39 vs 158, Cam Skattebo 131 vs 40), and 102 players in the real
+    2026 market -- this year's rookies among them -- missing entirely.
+
+    Nothing errored. The board loaded, ranked, and looked plausible.
+
+    (An earlier pass at this fix preferred the raw `tt sync` cache instead.
+    That was wrong: the cache carries no playerId, so joining it produced a
+    board with NO adp and every survival probability at zero. The joined
+    per-season file, built by scripts/build_ffc_crosswalk.mjs, is the usable
+    artifact.)
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    for season, adp in ((2025, 5.0), (2026, 2.0)):
+        (data_dir / f"ffc_adp_{season}.json").write_text(json.dumps({
+            "season": season, "meta": {"teams": 10},
+            "players": [{"name": "Guy", "playerId": "00-0000001",
+                         "adp": adp, "stdev": 1.0}],
+        }))
+
+    frame, source = cli._load_adp(data_dir, None, season=2026)
+    assert "2026" in source and "2025" not in source
+    assert float(frame.iloc[0]["adp"]) == 2.0
+    assert "stale" not in source.lower()
+
+
+def test_load_adp_says_so_when_it_falls_back_to_a_stale_season_file(tmp_path):
+    """Falling back is legitimate -- there may be no live cache yet. Doing it
+    SILENTLY is not: the whole defect was that the board looked correct while
+    ranked against a different year. The label has to carry the season."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "ffc_adp_2025.json").write_text(json.dumps({
+        "season": 2025, "meta": {}, "players": [
+            {"name": "Stale Guy", "playerId": "00-0000001", "adp": 5.0, "stdev": 1.0}],
+    }))
+    _, source = cli._load_adp(data_dir, None, season=2026)
+    assert "2025" in source
+    assert "stale" in source.lower() or "historical" in source.lower()
