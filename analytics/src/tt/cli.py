@@ -181,6 +181,9 @@ def _load_history(data_dir: Path) -> pd.DataFrame:
 
 _ADP_SEASON_RE = re.compile(r"ffc_adp_(\d+)\.json$")
 
+# Where `tt sync` writes the live FFC feed (src/cache.js owns this path).
+_DEFAULT_ADP_CACHE = Path.home() / ".tokentouchdowns" / "cache" / "ffc.json"
+
 _ADP_COLUMNS = ("player_id", "adp", "stdev")
 
 
@@ -189,7 +192,9 @@ def _empty_adp() -> pd.DataFrame:
 
 
 def _parse_adp_payload(payload: dict) -> pd.DataFrame:
-    players = payload.get("players") or []
+    # Season files (built for the backtest) key their rows "players"; the live
+    # `tt sync` cache keys them "records". Same rows, different wrapper.
+    players = payload.get("players") or payload.get("records") or []
     if not players:
         return _empty_adp()
     df = pd.DataFrame(players).rename(columns={"playerId": "player_id"})
@@ -199,7 +204,11 @@ def _parse_adp_payload(payload: dict) -> pd.DataFrame:
     return df[list(_ADP_COLUMNS)]
 
 
-def _load_adp(data_dir: Path, adp_path: str | None) -> tuple[pd.DataFrame, str | None]:
+def _load_adp(
+    data_dir: Path,
+    adp_path: str | None,
+    live_cache: Path | None = None,
+) -> tuple[pd.DataFrame, str | None]:
     """The ADP crosswalk to attach (`player_id`/`adp`/`stdev`), and a label
     for where it came from (for the output footer). `board`/`pick`/`mock`
     all still work with NO adp file at all -- `attach_adp` (reused from
@@ -210,18 +219,53 @@ def _load_adp(data_dir: Path, adp_path: str | None) -> tuple[pd.DataFrame, str |
     never invent an ADP number for a league/season with no real feed
     cached yet.
 
-    Auto-detects the highest-season `ffc_adp_<season>.json` present in
-    `data_dir` when `adp_path` isn't given explicitly -- `analytics/data/`
-    is gitignored and never guaranteed to hold a file for the CURRENT
-    season, so "most recent available" is a reasonable, clearly-labelled
-    stand-in rather than a silent requirement this command would otherwise
-    have no way to satisfy.
+    Resolution order, and the order matters more than it looks:
+
+      1. an explicit `--adp` path
+      2. THE LIVE CACHE written by `tt sync` (default
+         `~/.tokentouchdowns/cache/ffc.json`) -- this season's real market
+      3. the highest-numbered `ffc_adp_<season>.json` in `data_dir`, LABELLED
+         STALE, because those files exist for the BACKTEST
+
+    Step 2 was missing, and the omission was expensive. `analytics/data/`
+    holds `ffc_adp_2023/2024/2025.json`, created to grade historical drafts.
+    They look exactly like a current-season file, sort highest, and were
+    silently preferred -- so the live board ranked against LAST SEASON'S
+    market while looking entirely plausible. Measured against the real files:
+    median ADP error 19.6 picks, 89 of 131 shared players off by more than a
+    full round (Alvin Kamara 39 vs 158, Cam Skattebo 131 vs 40), and 102
+    players in the actual 2026 market -- this year's rookies among them --
+    absent from the board altogether.
+
+    Falling back is still legitimate when no live cache exists yet, but it is
+    no longer silent: the returned label names the season and says it is
+    stale, so every surface that shows provenance can warn.
     """
     if adp_path:
         p = Path(adp_path)
         if not p.exists():
             raise CliError(f"ADP file not found: {p}")
         return _parse_adp_payload(json.loads(p.read_text())), str(p)
+
+    cache = Path(live_cache) if live_cache is not None else _DEFAULT_ADP_CACHE
+    if cache.exists():
+        try:
+            raw = json.loads(cache.read_text())
+        except (json.JSONDecodeError, OSError):
+            raw = None
+        if raw is not None:
+            # `tt sync` wraps the payload as {fetchedAt, data}; accept both.
+            payload = raw.get("data", raw) if isinstance(raw, dict) else {}
+            frame = _parse_adp_payload(payload)
+            if not frame.empty:
+                meta = payload.get("meta") or {}
+                drafts = meta.get("totalDrafts") or meta.get("total_drafts")
+                teams = meta.get("teams")
+                label = "live ffc cache"
+                if drafts:
+                    label += f" ({drafts} drafts"
+                    label += f", {teams}-team)" if teams else ")"
+                return frame, label
 
     candidates = sorted(data_dir.glob("ffc_adp_*.json"))
     if not candidates:
@@ -232,7 +276,12 @@ def _load_adp(data_dir: Path, adp_path: str | None) -> tuple[pd.DataFrame, str |
         return int(m.group(1)) if m else -1
 
     best = max(candidates, key=_season)
-    return _parse_adp_payload(json.loads(best.read_text())), best.name
+    season = _season(best)
+    # Named STALE on purpose. This file exists to grade a past draft; using it
+    # to rank a live one is a fallback, and every surface that prints
+    # provenance should be able to say so.
+    label = f"STALE historical ADP -- {best.name} ({season} season), no live cache found"
+    return _parse_adp_payload(json.loads(best.read_text())), label
 
 
 def _train_seasons(history: pd.DataFrame, season: int) -> tuple[int, ...]:
@@ -399,7 +448,7 @@ def cmd_board(args: argparse.Namespace, stdin_payload: dict) -> dict:
     history = _load_history(data_dir)
     teams = args.teams or config.num_teams
     season = args.season or _default_season(history)
-    ffc, adp_source = _load_adp(data_dir, args.adp)
+    ffc, adp_source = _load_adp(data_dir, args.adp, getattr(args, 'adp_cache', None))
 
     board = _build_board(history, config, teams, season, ffc, n=args.mc_n, seed=args.seed)
 
@@ -980,6 +1029,10 @@ def _add_data_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--data-dir", default="data")
     p.add_argument("--season", type=int, default=None)
     p.add_argument("--adp", default=None, help="Path to an ffc_adp_<season>.json crosswalk file")
+    p.add_argument(
+        "--adp-cache",
+        help="Path to the live `tt sync` FFC cache. Defaults to ~/.tokentouchdowns/cache/ffc.json; point it at a missing file to force the historical fallback.",
+    )
     p.add_argument("--mc-n", type=int, default=DEFAULT_MC_N, dest="mc_n",
                     help="Monte Carlo draws per player stream (project_players' own n)")
     p.add_argument("--seed", type=int, default=None)
