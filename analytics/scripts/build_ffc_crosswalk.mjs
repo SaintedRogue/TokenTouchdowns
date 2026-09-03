@@ -55,7 +55,13 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const SLEEPER_CACHE = path.join(os.homedir(), '.tokentouchdowns', 'cache', 'sleeper.json');
 const OUT_DIR = path.join(REPO_ROOT, 'analytics', 'data');
 const NFLVERSE_ROSTER = path.join(OUT_DIR, 'nflverse_players.json');
-const SEASONS = [2023, 2024, 2025];
+// Backtest seasons by default; pass seasons on argv to build others -- notably
+// the CURRENT season, whose joined file is what the LIVE draft board ranks on.
+// Without a current-season file the board silently fell back to the newest
+// backtest fixture and ranked against last year's market.
+const SEASONS = process.argv.slice(2).length
+  ? process.argv.slice(2).map(Number)
+  : [2023, 2024, 2025];
 
 /**
  * The already-cached Sleeper players feed. `sleeper.json`'s `data` field is

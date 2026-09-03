@@ -207,6 +207,7 @@ def _parse_adp_payload(payload: dict) -> pd.DataFrame:
 def _load_adp(
     data_dir: Path,
     adp_path: str | None,
+    season: int | None = None,
     live_cache: Path | None = None,
 ) -> tuple[pd.DataFrame, str | None]:
     """The ADP crosswalk to attach (`player_id`/`adp`/`stdev`), and a label
@@ -222,10 +223,14 @@ def _load_adp(
     Resolution order, and the order matters more than it looks:
 
       1. an explicit `--adp` path
-      2. THE LIVE CACHE written by `tt sync` (default
-         `~/.tokentouchdowns/cache/ffc.json`) -- this season's real market
-      3. the highest-numbered `ffc_adp_<season>.json` in `data_dir`, LABELLED
-         STALE, because those files exist for the BACKTEST
+      2. `ffc_adp_<season>.json` for THE SEASON BEING DRAFTED
+      3. any other season's file, LABELLED STALE
+      4. the raw `tt sync` cache, labelled unjoined -- last resort only
+
+    Step 4 is last on purpose. The raw cache carries no `playerId`, so joining
+    it yields a board with NO adp at all and every survival probability at
+    zero. `scripts/build_ffc_crosswalk.mjs <season>` turns that feed into the
+    joined per-season file this function actually wants.
 
     Step 2 was missing, and the omission was expensive. `analytics/data/`
     holds `ffc_adp_2023/2024/2025.json`, created to grade historical drafts.
@@ -247,6 +252,29 @@ def _load_adp(
             raise CliError(f"ADP file not found: {p}")
         return _parse_adp_payload(json.loads(p.read_text())), str(p)
 
+    candidates = sorted(data_dir.glob("ffc_adp_*.json"))
+
+    def _season_of(path: Path) -> int:
+        m = _ADP_SEASON_RE.search(path.name)
+        return int(m.group(1)) if m else -1
+
+    if candidates and season is not None:
+        exact = [c for c in candidates if _season_of(c) == season]
+        if exact:
+            return _parse_adp_payload(json.loads(exact[0].read_text())), exact[0].name
+
+    if candidates:
+        best = max(candidates, key=_season_of)
+        best_season = _season_of(best)
+        if season is None or best_season == season:
+            return _parse_adp_payload(json.loads(best.read_text())), best.name
+        # Named STALE on purpose: this file exists to grade a PAST draft.
+        # Ranking a live one on it is a fallback, and every surface that
+        # prints provenance should be able to say so.
+        label = (f"STALE historical ADP -- {best.name} ({best_season} season) used for a "
+                 f"{season} draft. Run: node analytics/scripts/build_ffc_crosswalk.mjs {season}")
+        return _parse_adp_payload(json.loads(best.read_text())), label
+
     cache = Path(live_cache) if live_cache is not None else _DEFAULT_ADP_CACHE
     if cache.exists():
         try:
@@ -267,21 +295,7 @@ def _load_adp(
                     label += f", {teams}-team)" if teams else ")"
                 return frame, label
 
-    candidates = sorted(data_dir.glob("ffc_adp_*.json"))
-    if not candidates:
-        return _empty_adp(), None
-
-    def _season(path: Path) -> int:
-        m = _ADP_SEASON_RE.search(path.name)
-        return int(m.group(1)) if m else -1
-
-    best = max(candidates, key=_season)
-    season = _season(best)
-    # Named STALE on purpose. This file exists to grade a past draft; using it
-    # to rank a live one is a fallback, and every surface that prints
-    # provenance should be able to say so.
-    label = f"STALE historical ADP -- {best.name} ({season} season), no live cache found"
-    return _parse_adp_payload(json.loads(best.read_text())), label
+    return _empty_adp(), None
 
 
 def _train_seasons(history: pd.DataFrame, season: int) -> tuple[int, ...]:
@@ -448,7 +462,7 @@ def cmd_board(args: argparse.Namespace, stdin_payload: dict) -> dict:
     history = _load_history(data_dir)
     teams = args.teams or config.num_teams
     season = args.season or _default_season(history)
-    ffc, adp_source = _load_adp(data_dir, args.adp, getattr(args, 'adp_cache', None))
+    ffc, adp_source = _load_adp(data_dir, args.adp, season, getattr(args, 'adp_cache', None))
 
     board = _build_board(history, config, teams, season, ffc, n=args.mc_n, seed=args.seed)
 
