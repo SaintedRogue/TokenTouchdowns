@@ -46,10 +46,18 @@
  *   recommendations the engine's own ranking, top N, each with name/position/
  *                  proj/vor/tier/adp/pGone/expectedLoss + posRank (ADP rank
  *                  within position), adpDelta (currentPick - adp; positive =
- *                  he is falling) and fillsNeed
+ *                  he is falling), adpFall (that delta as a league-scaled
+ *                  level), fillsNeed, games (expected games played, which is
+ *                  what makes `proj` not a 17-game total), and Yahoo's own
+ *                  team/bye/injuryStatus/injuryLabel/injuryNote (see
+ *                  `enrichBoard`)
  *   board          the same decoration for every VOR-sorted row, plus
- *                  taken/takenBy and aboveCliff
- *   roster         {slots:[{slot,player}], bench:[...]}
+ *                  taken/takenBy, aboveCliff, and the three quiet visuals the
+ *                  page draws from: vorShare (bar length, scaled within
+ *                  position), tierBand/tierFirst (which rows are
+ *                  interchangeable) and adpFall
+ *   roster         {slots:[{slot,player}], bench:[...]}, each player carrying
+ *                  his bye week and injury status
  *   guidance       THE REDESIGN (see `buildGuidance`): hero (= the engine's
  *                  own top recommendation, with four plain-language reasons),
  *                  cliffs (per-position count still above the measured cliff),
@@ -57,7 +65,11 @@
  *                  largest measured effect in this league), urgency (the
  *                  MEASURED waiting cost for this round and team count, and
  *                  the level the page is allowed to render at), replacement
- *                  (where this board's own VOR crosses zero) and league.
+ *                  (where this board's own VOR crosses zero), glossary (one
+ *                  plain-language definition per abbreviation the page
+ *                  prints, written in THIS board's own numbers -- the fix for
+ *                  "I don't know what the acronyms mean"), byes (weeks where
+ *                  two of your starters are out at once) and league.
  *                  All of it built from src/draft-guidance.js, which
  *                  transcribes docs/positional-value.md and computes no
  *                  fantasy logic of its own.
@@ -74,6 +86,7 @@ import {
 import {
   CLIFFS, positionAdpRanks, cliffStrip, waitingCost, urgencyLevel, basisTeamsFor,
   runwayState, replacementLine, heroReasons,
+  glossary, byeConflicts, vorShares, tierBands, adpFallLevel,
 } from './draft-guidance.js';
 import { SessionExpiredError, YahooApiError } from './client.js';
 import { buildCrosswalk, lookupByYahooKey, buildAdpIndex, matchAdp } from './identity.js';
@@ -101,6 +114,14 @@ const ALL_PLAYERS_COUNT = 5000;
 // hundreds of players nobody would ever draft.
 const DEFAULT_BOARD_VIEW_LIMIT = 300;
 const DEFAULT_RECOMMEND_N = 10;
+// How deep into Yahoo's own draft-rank-ordered player list `enrichBoard`
+// walks for team/bye/injury. Measured against the real league: 400 covers
+// 187 of the 300 rows the page renders, 600 covers 195, and 900 covers 195 --
+// the ceiling is Yahoo's pool, not this number, because the rest of the
+// VOR-sorted 300 are retired players the projection engine still carries
+// (Gronkowski, Calvin Johnson, Tom Brady). 600 is where the curve flattens:
+// six background requests, ~1.7s, and nothing gained by asking for more.
+const DEFAULT_ENRICH_PLAYER_LIMIT = 600;
 
 /** Yahoo roster slot -> which real positions can fill it (analytics/src/tt/
  * league.py's own FLEX_ELIGIBLE, duplicated here deliberately: this is
@@ -178,6 +199,7 @@ export async function createDraftRoom({
   now = () => Date.now(),
   recommendCount = DEFAULT_RECOMMEND_N,
   boardViewLimit = DEFAULT_BOARD_VIEW_LIMIT,
+  enrichPlayerLimit = DEFAULT_ENRICH_PLAYER_LIMIT,
   allPlayersCount = ALL_PLAYERS_COUNT,
   htmlPath = DEFAULT_HTML_PATH,
   recomputeScript = DEFAULT_RECOMPUTE_SCRIPT,
@@ -203,6 +225,37 @@ export async function createDraftRoom({
   // Where THIS board's own VOR crosses zero, per position. Startup-constant
   // for the same reason, and the ground the page's explainer stands on.
   const replacementByPosition = replacementLine(boardRecords);
+
+  // WHICH ADP feed the numbers in the `adp` column came from -- read from the
+  // file the Python side says it actually used (`adp_source`), never from the
+  // Node-side `ffc` cache, which is a DIFFERENT feed: at the time of writing
+  // the cache holds a 2026 Half-PPR 10-team pull over 3,208 drafts while the
+  // engine built this board from analytics/data/ffc_adp_2025.json, Half-PPR
+  // 12-team over 718. Explaining a column with the wrong feed's provenance is
+  // the same class of error as showing the wrong number in it. Unreadable or
+  // unlabelled -> null, and the glossary simply says less rather than
+  // inventing a draft count.
+  // `adp_source` is `tt.cli`'s own `_load_adp`, which returns a BARE FILENAME
+  // ("ffc_adp_2025.json", `best.name`) -- not a path -- and its `--data-dir`
+  // defaults to a relative "data". So it is resolved against the cwd the
+  // analytics client spawns Python in, then against that cwd's data
+  // directory. Reading it against Node's own cwd finds nothing, and the page
+  // silently loses the provenance of the column it is trying to explain.
+  let adpFeedMeta = null;
+  const analyticsCwd = analytics.cwd ?? '.';
+  for (const candidate of [
+    path.resolve(analyticsCwd, boardPayload.adp_source ?? ''),
+    path.resolve(analyticsCwd, 'data', boardPayload.adp_source ?? ''),
+  ]) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const parsed = JSON.parse(await readFile(candidate, 'utf8'));
+      if (parsed?.meta) { adpFeedMeta = parsed.meta; break; }
+    } catch {
+      // Not here (or not readable): try the next candidate, then give up and
+      // let the glossary simply say less rather than invent a draft count.
+    }
+  }
 
   const leagueConfigDict = leagueConfigOverride ?? JSON.parse(
     await readFile(path.join(analytics.cwd, 'data', 'league.json'), 'utf8'),
@@ -253,37 +306,126 @@ export async function createDraftRoom({
   // `keysNeedingYahooNames`/`fetchYahooNames` below). This is enrichment
   // data only, feeding the SAME tested buildAdpIndex/matchAdp matcher pass 2
   // already uses -- no new matching logic.
-  const yahooNameCache = new Map(); // yahooKey -> {name, position, team}
+  const yahooPlayerCache = new Map(); // yahooKey -> yahooPlayerRecord
+  // Engine player_id -> the same record, for the rows the BOARD renders. See
+  // `enrichBoard` for why this is keyed separately from the cache above.
+  const enrichmentByPlayerId = new Map();
   const YAHOO_PLAYERS_CHUNK = 100; // Yahoo's own ceiling, verified live -- see above.
 
   /**
-   * Fetch Yahoo's own name/position/team for `keys` (Yahoo player_keys not
-   * already in `yahooNameCache`), batched at `YAHOO_PLAYERS_CHUNK` per
-   * request, and cache every one that comes back. NEVER throws (design doc
-   * section 5's explicit worst case: a poller that rejects crashes the
-   * server mid-draft) -- a failing or rate-limited chunk is skipped, those
-   * keys simply stay out of the cache and are retried on a later poll;
-   * chunks that already succeeded are kept. Never re-fetches: a key is only
-   * ever passed in here once, by `keysNeedingYahooNames`.
+   * One Yahoo player, reduced to the fields this app shows. Verified field by
+   * field against a live session; the shapes are Yahoo's, not ours:
+   * `bye_weeks.week` arrives as a STRING and is coerced here so the page
+   * never has to; `editorial_team_abbr` arrives title-cased ("Cin") and is
+   * uppercased so a column of them lines up; and `status`/`status_full`/
+   * `injury_note` are ABSENT ENTIRELY for a healthy player, which is why a
+   * missing status becomes `null` (nothing wrong with him) rather than
+   * anything the page could render as unknown.
+   */
+  function yahooPlayerRecord(p) {
+    const bye = Number(p?.bye_weeks?.week);
+    const team = p?.editorial_team_abbr;
+    return {
+      name: p?.name?.full ?? null,
+      position: p?.display_position ?? null,
+      team: team ? String(team).toUpperCase() : null,
+      bye: Number.isFinite(bye) ? bye : null,
+      status: p?.status ?? null,
+      statusFull: p?.status_full ?? null,
+      injuryNote: p?.injury_note ?? null,
+      uniform: p?.uniform_number ?? null,
+    };
+  }
+
+  /**
+   * THE ONE PLACE THIS MODULE ASKS YAHOO ABOUT PLAYERS. Fetch `resource`,
+   * fold every player it returns into `yahooPlayerCache` (keyed by Yahoo
+   * player_key) and, where the SAME tested matchAdp/nflverseIndex matcher
+   * passes 2-3 already use resolves one, into `enrichmentByPlayerId` (keyed
+   * by the engine's own player_id, which is what the board is keyed on).
+   * Returns how many players came back, so a caller walking pages knows when
+   * to stop; returns 0 on any failure at all.
+   *
+   * NEVER THROWS (design doc section 5's explicit worst case: a poller that
+   * rejects crashes the server mid-draft). A failing, rate-limited or
+   * malformed response leaves the caches exactly as they were -- the affected
+   * players simply stay undecorated, which costs a bye week on screen and
+   * nothing else.
+   *
+   * FIRST ANSWER WINS, and it is never overwritten: a Yahoo player's team,
+   * bye and identity do not change during a draft, so re-fetching one would
+   * spend a live draft's request budget on nothing (and an injury designation
+   * that flips mid-draft is not something this page should chase).
+   */
+  async function ingestYahooPlayers(resource) {
+    let body;
+    try {
+      body = await client.get(resource);
+    } catch {
+      return 0;
+    }
+    const players = body?.league?.players ?? body?.players ?? [];
+    if (!Array.isArray(players)) return 0;
+    for (const p of players) {
+      const key = p?.player_key;
+      if (!key) continue;
+      const record = yahooPlayerRecord(p);
+      if (!yahooPlayerCache.has(key)) yahooPlayerCache.set(key, record);
+      const match = matchAdp(nflverseIndex, record);
+      if (match?.playerId && !enrichmentByPlayerId.has(match.playerId)) {
+        enrichmentByPlayerId.set(match.playerId, record);
+      }
+    }
+    return players.length;
+  }
+
+  /**
+   * PASS 3's fetch: Yahoo's own record for `keys` (player_keys not already
+   * cached), batched at `YAHOO_PLAYERS_CHUNK` per request. Never re-fetches:
+   * a key is only ever passed in here once, by `keysNeedingYahooNames`. A
+   * chunk that fails is skipped and retried on a later poll; chunks that
+   * already succeeded are kept.
    */
   async function fetchYahooNames(keys) {
     for (let i = 0; i < keys.length; i += YAHOO_PLAYERS_CHUNK) {
       const chunk = keys.slice(i, i + YAHOO_PLAYERS_CHUNK);
-      let body;
-      try {
-        body = await client.get(`players;player_keys=${chunk.join(',')}`);
-      } catch {
-        continue; // rate-limited/errored -- leave this chunk unresolved, retry next poll
-      }
-      for (const p of body?.players ?? []) {
-        const key = p?.player_key;
-        if (!key) continue;
-        yahooNameCache.set(key, {
-          name: p.name?.full ?? null,
-          position: p.display_position ?? null,
-          team: p.editorial_team_abbr ?? null,
-        });
-      }
+      // eslint-disable-next-line no-await-in-loop
+      await ingestYahooPlayers(`players;player_keys=${chunk.join(',')}`);
+    }
+  }
+
+  /**
+   * THE ENRICHMENT WALK: Yahoo's own NFL team, bye week and injury status for
+   * the players on the board, in the background.
+   *
+   * WHY NOT `players;player_keys=`, THE WAY PASS 3 DOES IT. That resource
+   * needs Yahoo player_keys, and the board is keyed on nflverse ids. The only
+   * gsis -> yahoo crosswalk this app has is Sleeper's, and its gap clusters
+   * on exactly the players who go early -- measured on the real board, it has
+   * no yahoo id for Bijan Robinson, Jahmyr Gibbs, Ja'Marr Chase or Ashton
+   * Jeanty, i.e. the whole top of the page. Worse, Yahoo rejects an ENTIRE
+   * batch of 100 keys with a 400 if a single one is stale ("Player key
+   * 470.p.24017 does not exist"), which is exactly what a crosswalk built
+   * from another provider's ids produces. Both problems disappear by asking
+   * Yahoo for its own list, in its own draft-rank order, and matching the
+   * result back through the SAME tested matchAdp/nflverseIndex matcher
+   * passes 2-3 already use -- no new matching logic, and every key it yields
+   * is one Yahoo itself just handed us.
+   *
+   * ON A BACKGROUND PROMISE, NEVER AWAITED BY STARTUP. Six requests, ~1.7s
+   * measured; the board is fully usable without any of it, and a drafter who
+   * opens the page ten seconds before his pick needs the board, not the bye
+   * weeks. The decoration simply appears on the next 3s poll.
+   */
+  async function enrichBoard() {
+    for (let start = 0; start < enrichPlayerLimit; start += YAHOO_PLAYERS_CHUNK) {
+      // eslint-disable-next-line no-await-in-loop
+      const got = await ingestYahooPlayers(
+        `league/${leagueKey}/players;sort=AR;start=${start};count=${YAHOO_PLAYERS_CHUNK}`,
+      );
+      // A short page is the end of Yahoo's list (or a failure, which returns
+      // 0). Either way there is nothing further to walk toward.
+      if (got < YAHOO_PLAYERS_CHUNK) return;
     }
   }
 
@@ -436,7 +578,7 @@ export async function createDraftRoom({
    *     never even fire for the 71% of a real draft with no Sleeper record
    *     for that yahoo id at all (not merely a missing gsis_id). Yahoo's OWN
    *     name/position/team for exactly those keys -- fetched in bulk via
-   *     `players;player_keys=` and cached in `yahooNameCache` (see
+   *     `players;player_keys=` and cached in `yahooPlayerCache` (see
    *     `fetchYahooNames`/`keysNeedingYahooNames` above) -- is fed into the
    *     SAME matchAdp/nflverseIndex matcher pass 2 already uses. A key not
    *     yet in the cache (not fetched yet, or the fetch failed/rate-limited)
@@ -456,7 +598,7 @@ export async function createDraftRoom({
 
   function rememberName(id, playerKey) {
     if (!id) return;
-    const known = yahooNameCache.get(playerKey);
+    const known = yahooPlayerCache.get(playerKey);
     if (known?.name) displayNameById.set(id, known);
   }
 
@@ -467,7 +609,7 @@ export async function createDraftRoom({
       const fallback = matchAdp(nflverseIndex, { name: xw.name, position: xw.position, team: xw.team });
       if (fallback?.playerId) { rememberName(fallback.playerId, playerKey); return fallback.playerId; }
     }
-    const yahooRecord = yahooNameCache.get(playerKey);
+    const yahooRecord = yahooPlayerCache.get(playerKey);
     if (yahooRecord) {
       const fallback = matchAdp(nflverseIndex, yahooRecord);
       if (fallback?.playerId) { rememberName(fallback.playerId, playerKey); return fallback.playerId; }
@@ -481,8 +623,9 @@ export async function createDraftRoom({
   /**
    * Which of `picks`' Yahoo player_keys are worth asking Yahoo's own
    * `players;player_keys=` resource about: made picks whose key
-   *   (a) isn't already in `yahooNameCache` (never re-fetch a resolved key
-   *       -- a player's identity doesn't change mid-draft), AND
+   *   (a) isn't already in `yahooPlayerCache` (never re-fetch a resolved
+   *       key -- a player's identity doesn't change mid-draft, and
+   *       `enrichBoard` has usually cached it already), AND
    *   (b) doesn't already resolve via passes 1-2 (asking Yahoo for a name
    *       the Sleeper crosswalk already gave us for free would waste a
    *       poll's worth of quota on nothing).
@@ -496,7 +639,7 @@ export async function createDraftRoom({
     const keys = [];
     for (const p of picks) {
       const key = p?.playerKey;
-      if (!key || seen.has(key) || yahooNameCache.has(key)) continue;
+      if (!key || seen.has(key) || yahooPlayerCache.has(key)) continue;
       seen.add(key);
       if (resolveYahooKey(key) == null) keys.push(key);
     }
@@ -622,17 +765,39 @@ export async function createDraftRoom({
     return m;
   }
 
-  /** Positional ADP rank, and how far past (or short of) his own ADP a
-   * player is RIGHT NOW. A positive `adpDelta` means he is falling -- "going
-   * 14 picks later than ADP" is one of the most actionable things on a live
-   * board and the old page rendered nothing at all for it. */
+  /** Positional ADP rank, how far past (or short of) his own ADP a player is
+   * RIGHT NOW, and Yahoo's own team/bye/injury for him.
+   *
+   * A positive `adpDelta` means he is falling -- "going 14 picks later than
+   * ADP" is one of the most actionable things on a live board and the old
+   * page rendered nothing at all for it; `adpFall` grades that same number
+   * against a full turn of THIS league's draft, so a shallow room never shows
+   * a false bargain (src/draft-guidance.js's `adpFallLevel`).
+   *
+   * `games` is the engine's own `proj_games` -- the number that makes `proj`
+   * an expected-games total rather than a 17-game one. The engine has always
+   * produced it; the view model simply dropped it, which is what let the page
+   * imply a projection was a full healthy season.
+   *
+   * Every enrichment field is null until `enrichBoard`'s background walk has
+   * come back (or forever, if it fails). A null bye is "we don't know", never
+   * "no bye", and the page renders nothing at all for it. */
   function decorate(r) {
     const posRank = adpRankByPlayerId.get(r.player_id) ?? null;
     const cliff = CLIFFS[r.position] ?? null;
+    const adpDelta = Number.isFinite(r.adp) ? draftState.currentPick - r.adp : null;
+    const enriched = enrichmentByPlayerId.get(r.player_id) ?? null;
     return {
       posRank,
-      adpDelta: Number.isFinite(r.adp) ? draftState.currentPick - r.adp : null,
+      adpDelta,
+      adpFall: adpFallLevel(adpDelta, teams),
       aboveCliff: cliff !== null && posRank !== null ? posRank <= cliff.afterRank : null,
+      games: Number.isFinite(r.proj_games) ? r.proj_games : null,
+      team: enriched?.team ?? null,
+      bye: enriched?.bye ?? null,
+      injuryStatus: enriched?.status ?? null,
+      injuryLabel: enriched?.statusFull ?? null,
+      injuryNote: enriched?.injuryNote ?? null,
     };
   }
 
@@ -655,7 +820,22 @@ export async function createDraftRoom({
       };
     });
     rows.sort((a, b) => (b.vor ?? -Infinity) - (a.vor ?? -Infinity));
-    return rows.slice(0, boardViewLimit);
+    const visible = rows.slice(0, boardViewLimit);
+    // The two quiet visuals, computed over exactly the rows that get drawn
+    // and in exactly the order they get drawn in: a bar scaled within its own
+    // position (never across the board -- comparing a QB's raw VOR to an RB's
+    // is the mistake this whole page exists to prevent), and the tier runs
+    // that make "these four are interchangeable" something you see rather
+    // than infer. Both live in src/draft-guidance.js and are tested there.
+    const shares = vorShares(visible);
+    const bands = tierBands(visible);
+    for (const row of visible) {
+      row.vorShare = shares.get(row.playerId) ?? null;
+      const band = bands.get(row.playerId);
+      row.tierBand = band?.band ?? 0;
+      row.tierFirst = band?.first ?? true;
+    }
+    return visible;
   }
 
   function buildRecommendationsView(runway) {
@@ -688,8 +868,20 @@ export async function createDraftRoom({
       for (let i = 0; i < count; i += 1) slotDefs.push(pos);
     }
     const remaining = draftState.myRoster.map((id) => {
+      // Yahoo's own bye week and injury status for a player you already own:
+      // the bye is what `byeConflicts` reads to warn about a week you cannot
+      // field a lineup, and it belongs on the lineup panel either way.
+      const enriched = enrichmentByPlayerId.get(id) ?? displayNameById.get(id) ?? null;
+      const extra = {
+        bye: enriched?.bye ?? null,
+        injuryStatus: enriched?.status ?? null,
+        injuryLabel: enriched?.statusFull ?? null,
+        injuryNote: enriched?.injuryNote ?? null,
+      };
       const rec = boardByPlayerId.get(id);
-      if (rec) return { playerId: id, name: rec.name, position: rec.position ?? null, unmatched: false };
+      if (rec) {
+        return { playerId: id, name: rec.name, position: rec.position ?? null, unmatched: false, ...extra };
+      }
       // Not on the board: either an unresolved pick, or a resolved one the
       // engine never projects (K and DEF). Either way Yahoo told us the name.
       const known = displayNameById.get(id);
@@ -698,6 +890,7 @@ export async function createDraftRoom({
         name: known?.name ?? id,
         position: known?.position ?? null,
         unmatched: true,
+        ...extra,
       };
     });
     const slots = slotDefs.map((slotPos) => {
@@ -759,7 +952,7 @@ export async function createDraftRoom({
    * here re-ranks, re-scores, or second-guesses the engine: `hero` is
    * literally `recommendations[0]`, explained.
    */
-  function buildGuidance(status, runway, recommendations) {
+  function buildGuidance(status, runway, recommendations, roster) {
     const cliffs = cliffStrip({
       rows: recomputeCache.board ?? boardRecords,
       available: draftState.available,
@@ -804,6 +997,26 @@ export async function createDraftRoom({
       runway,
       urgency,
       replacement: replacementByPosition,
+      // Every abbreviation this page prints, defined in THIS board's own
+      // numbers. Composed in src/draft-guidance.js and asserted there, for
+      // the reason that module exists: a definition written in the HTML is a
+      // definition nothing can check, and a wrong one on draft day is worse
+      // than none at all.
+      glossary: glossary({
+        rows: recomputeCache.board ?? boardRecords,
+        replacement: replacementByPosition,
+        teams,
+        survivalPick: status.survivalPick,
+        adp: adpFeedMeta,
+      }),
+      // Weeks where two of YOUR STARTERS are out at once -- the same class of
+      // problem as an unfilled slot, and invisible until the byes were shown.
+      // Read off the ROSTER's own slots (which carry the whole player, byes
+      // included) rather than the runway's, whose `player` is only ever a
+      // display name -- and every starting slot counts, K and DEF included:
+      // the runway excludes those two because the engine cannot recommend
+      // into them, which has nothing to do with whether they play that week.
+      byes: byeConflicts(roster?.slots ?? []),
       league: { teams, rounds, slot },
     };
   }
@@ -818,7 +1031,7 @@ export async function createDraftRoom({
       recommendations,
       board: buildBoardView(),
       roster,
-      guidance: buildGuidance(status, runway, recommendations),
+      guidance: buildGuidance(status, runway, recommendations, roster),
     };
   }
 
@@ -892,9 +1105,17 @@ export async function createDraftRoom({
 
   await recompute(); // so /api/state has real data before the first poll ever runs
 
+  // The enrichment walk starts here and is DELIBERATELY NOT AWAITED: the room
+  // must be serving a full board the moment this function returns (measured:
+  // ~7s, all of it the one-off Monte Carlo, and this adds none of it). It can
+  // never reject -- `ingestYahooPlayers` swallows every failure by
+  // construction -- so the promise is safe to hold and to hand out for tests
+  // and verification harnesses that need the decoration to have landed.
+  const enrichment = enrichBoard();
+
   return {
     requestListener, poll, markTaken, undo, getViewModel, startPolling, stopPolling,
-    leagueKey, myTeamKey: myTeamKeyValue,
+    leagueKey, myTeamKey: myTeamKeyValue, enrichment,
   };
 }
 

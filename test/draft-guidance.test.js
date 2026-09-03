@@ -5,6 +5,7 @@ import {
   CLIFFS, CLIFF_ORDER, WAITING_COST, URGENCY_NOTABLE, URGENCY_ALARM,
   positionAdpRanks, cliffStrip, waitingCost, urgencyLevel,
   runwayState, replacementLine, heroReasons,
+  glossary, byeConflicts, vorShares, tierBands, adpFallLevel,
 } from '../src/draft-guidance.js';
 
 // A tiny board shaped exactly like `tt.cli board`'s own "players" rows.
@@ -295,4 +296,282 @@ test('the reason sentences use real punctuation, never ASCII stand-ins', () => {
     heroFor({ cliffs: cliffStrip({ rows: ROWS, available: new Set(), teams: 4, rounds: 15 }) }),
   ].flat();
   for (const r of all) assert.doesNotMatch(r.text, /--/, r.text);
+});
+
+// =========================================================================
+// MAKING THE PAGE SELF-EXPLAINING (this branch)
+//
+// The user's own words, looking at the live page: "Can you explain the
+// analysis? I don't know what the acronyms mean. How am I to read
+// everything?" Every definition the page shows is composed HERE, from THIS
+// board's own numbers, for exactly the reason the rest of this module
+// exists: a sentence composed in draft-room.html is a sentence nothing can
+// check, and a wrong explanation on draft day is worse than no explanation.
+// =========================================================================
+
+// A board with proj_games, so the PROJ definition can be honest about what a
+// projection actually is. QB deliberately has the highest projection AND the
+// smallest VOR -- the exact shape that prompted the question.
+const GLOSSARY_ROWS = [
+  { player_id: 'qb1', name: 'Top Passer', position: 'QB', proj_points: 253.49, vor: 22.53, tier: 1, adp: 20, proj_games: 15 },
+  { player_id: 'qb2', name: 'Second Passer', position: 'QB', proj_points: 247.94, vor: 16.98, tier: 1, adp: 30, proj_games: 15 },
+  { player_id: 'qb3', name: 'Third Passer', position: 'QB', proj_points: 234.82, vor: 3.86, tier: 2, adp: 45, proj_games: 14 },
+  { player_id: 'qb4', name: 'Last Starting Passer', position: 'QB', proj_points: 230.96, vor: 0, tier: 2, adp: 55, proj_games: 14 },
+  { player_id: 'qb5', name: 'Backup Passer', position: 'QB', proj_points: 210.0, vor: -20.96, tier: 3, adp: 80, proj_games: 12 },
+  { player_id: 'rb1', name: 'Top Runner', position: 'RB', proj_points: 239.81, vor: 52.08, tier: 1, adp: 7, proj_games: 13 },
+  { player_id: 'rb2', name: 'Second Runner', position: 'RB', proj_points: 200.0, vor: 12.27, tier: 2, adp: 12, proj_games: 12 },
+  { player_id: 'rb3', name: 'Last Starting Runner', position: 'RB', proj_points: 187.73, vor: 0, tier: 3, adp: 40, proj_games: 11 },
+  { player_id: 'rb4', name: 'Bench Runner', position: 'RB', proj_points: 150.0, vor: -37.73, tier: 4, adp: 90, proj_games: 8 },
+];
+
+const GLOSSARY_ARGS = {
+  rows: GLOSSARY_ROWS,
+  replacement: replacementLine(GLOSSARY_ROWS),
+  teams: 4,
+  survivalPick: 2,
+  adp: { totalDrafts: 718, type: 'Half-PPR', teams: 12 },
+};
+
+const termsById = (args = GLOSSARY_ARGS) =>
+  new Map(glossary(args).map((t) => [t.id, t]));
+
+test('glossary defines every abbreviation the page renders, so nothing on screen is unlearnable', () => {
+  const ids = glossary(GLOSSARY_ARGS).map((t) => t.id);
+  for (const id of ['proj', 'vor', 'stake', 'gone', 'tier', 'adp', 'adpDelta', 'posRank', 'bye', 'injury']) {
+    assert.ok(ids.includes(id), `no definition for ${id} -- it appears on the page and cannot be looked up`);
+  }
+});
+
+test('every glossary term carries the token as it is printed, an expanded label, and a plain-language sentence', () => {
+  for (const t of glossary(GLOSSARY_ARGS)) {
+    assert.ok(t.term && t.term.length > 0, `${t.id} has no printed token`);
+    assert.ok(t.label && /[a-z]/.test(t.label), `${t.id} has no expanded label`);
+    assert.ok(t.short && t.short.length > 20, `${t.id}'s definition is too short to be a definition`);
+    assert.ok(/[.!]$/.test(t.short), `${t.id}'s definition is not a sentence: ${t.short}`);
+  }
+});
+
+test('PROJ is honest that a projection is not a 17-game total: it already prices in expected games missed', () => {
+  const proj = termsById().get('proj');
+  const text = `${proj.short} ${proj.detail}`;
+  assert.match(text, /season/i);
+  assert.match(text, /17/, 'the reader has to be told it is NOT a 17-game total');
+  // The median expected games across this board: 9 rows, middle value 13.
+  assert.match(proj.detail, /\b13\b/, "the board's own median expected games, not a generality");
+});
+
+test('VOR is defined against the LAST STARTER, never a waiver-wire player (vor.py\'s own corrected docstring)', () => {
+  const vor = termsById().get('vor');
+  assert.match(vor.short, /last starter/i);
+  assert.match(`${vor.short} ${vor.detail}`, /waiver/i, 'the wrong definition is the one the reader already has; say it is wrong');
+});
+
+test("VOR's explanation is grounded in THIS board's own numbers, and resolves the quarterback paradox by name", () => {
+  const vor = termsById().get('vor');
+  // 4 teams x 1 starting QB = the 4th QB is the last one who still starts.
+  assert.match(vor.detail, /Top Passer/, 'the highest-projected player on the board, named');
+  assert.match(vor.detail, /Top Runner/);
+  assert.match(vor.detail, /\b253\b/, "the top QB's own projection");
+  assert.match(vor.detail, /\b23\b/, "the top QB's own VOR");
+  assert.match(vor.detail, /\b240\b/, "the top RB's own projection");
+  assert.match(vor.detail, /\b52\b/, "the top RB's own VOR");
+  assert.match(vor.detail, /\b4 quarterbacks\b/, '4 teams x 1 starting QB');
+  assert.match(vor.detail, /\b3 running backs\b/, '4 teams x the RB starter share of this fixture');
+});
+
+test('VOR never prints a subtraction the rounded numbers on screen do not support', () => {
+  const detail = termsById().get('vor').detail;
+  // 253 - 231 = 22 by the rounded figures, but the board's own VOR is 23:
+  // the sentence must never show that pair as an arithmetic step.
+  assert.ok(!/253\D{1,12}231/.test(detail), `do not print an operand pair that does not subtract to the printed VOR: ${detail}`);
+});
+
+test('AT STAKE says outright that it is what the ranking sorts on -- the answer to "why is a lower VOR ranked higher?"', () => {
+  const stake = termsById().get('stake');
+  const text = `${stake.short} ${stake.detail}`;
+  assert.match(stake.short, /VOR/);
+  assert.match(text, /rank/i);
+  assert.match(text, /lower VOR/i, 'the reader\'s actual confusion, named');
+});
+
+test('GONE is measured to the pick the page is actually measuring to, not "your next pick" in the abstract', () => {
+  assert.match(termsById().get('gone').short, /#2\b/);
+  const noPick = termsById({ ...GLOSSARY_ARGS, survivalPick: null }).get('gone');
+  assert.match(noPick.short, /next pick/i);
+  assert.ok(!/#/.test(noPick.short), 'never invent a pick number when there is no next pick');
+});
+
+test('ADP reports the feed the board was actually built from, drafts counted, never a hardcoded number', () => {
+  const adp = termsById().get('adp');
+  assert.match(adp.detail, /718/);
+  assert.match(adp.detail, /Half-PPR/);
+  const noMeta = termsById({ ...GLOSSARY_ARGS, adp: null }).get('adp');
+  assert.ok(noMeta.short.length > 20);
+  assert.ok(!/\d/.test(noMeta.detail ?? ''), 'with no feed metadata, invent no draft count');
+});
+
+test('TIER says what to DO with two players in the same tier, not merely what a tier is', () => {
+  const tier = termsById().get('tier');
+  assert.match(`${tier.short} ${tier.detail}`, /interchangeable/i);
+  assert.match(`${tier.short} ${tier.detail}`, /cheap|slot/i);
+});
+
+test('the positional rank badge is defined on the axis it is actually computed on -- ADP, not points', () => {
+  const rank = termsById().get('posRank');
+  assert.match(rank.term, /WR1|RB5/);
+  assert.match(`${rank.short} ${rank.detail}`, /average draft position|ADP/i);
+  assert.match(`${rank.short} ${rank.detail}`, /cliff/i, 'it is the axis the cliffs are measured on');
+});
+
+test('VS ADP is defined as the bargain signal it is, scaled to this league\'s own turn length', () => {
+  const d = termsById().get('adpDelta');
+  assert.match(`${d.short} ${d.detail}`, /fallen|past/i);
+  assert.match(d.detail, /\b4\b/, 'a full turn of a 4-team draft');
+});
+
+test('bye and injury are defined, because the page now shows both', () => {
+  const bye = termsById().get('bye');
+  assert.match(bye.short, /week/i);
+  assert.match(`${bye.short} ${bye.detail}`, /two|2/i);
+  const inj = termsById().get('injury');
+  assert.match(inj.term, /Q/);
+  assert.match(`${inj.short} ${inj.detail}`, /questionable/i);
+});
+
+test('glossary degrades to definitions with no worked example rather than throwing on an empty board', () => {
+  const terms = glossary({ rows: [], replacement: {}, teams: 4, survivalPick: null, adp: null });
+  assert.ok(terms.length >= 10);
+  for (const t of terms) assert.ok(t.short && t.short.length > 20, `${t.id} lost its definition`);
+});
+
+// --- bye conflicts -------------------------------------------------------
+
+test('byeConflicts finds two STARTERS sharing a bye week -- a week you cannot field a lineup', () => {
+  const conflicts = byeConflicts([
+    { slot: 'QB', player: { name: 'A Passer', bye: 7 } },
+    { slot: 'WR', player: { name: 'A Wideout', bye: 6 } },
+    { slot: 'RB', player: { name: 'A Runner', bye: 6 } },
+    { slot: 'TE', player: null },
+  ]);
+  assert.equal(conflicts.length, 1);
+  assert.equal(conflicts[0].week, 6);
+  assert.deepEqual(conflicts[0].players, ['A Wideout', 'A Runner']);
+});
+
+test('byeConflicts reports three on the same week as one conflict, not three pairs', () => {
+  const conflicts = byeConflicts([
+    { slot: 'WR', player: { name: 'One', bye: 9 } },
+    { slot: 'WR', player: { name: 'Two', bye: 9 } },
+    { slot: 'RB', player: { name: 'Three', bye: 9 } },
+  ]);
+  assert.equal(conflicts.length, 1);
+  assert.equal(conflicts[0].players.length, 3);
+});
+
+test('byeConflicts is silent about a bye we do not know, and about a lone starter on a week', () => {
+  assert.deepEqual(byeConflicts([
+    { slot: 'WR', player: { name: 'One', bye: null } },
+    { slot: 'RB', player: { name: 'Two', bye: null } },
+    { slot: 'TE', player: { name: 'Three', bye: 4 } },
+  ]), []);
+  assert.deepEqual(byeConflicts(null), []);
+});
+
+// --- the quiet visuals ---------------------------------------------------
+
+test('vorShares scales each bar WITHIN its own position, so a bar compares like with like', () => {
+  const shares = vorShares([
+    { playerId: 'a', position: 'RB', vor: 50 },
+    { playerId: 'b', position: 'RB', vor: 25 },
+    { playerId: 'c', position: 'QB', vor: 20 },
+    { playerId: 'd', position: 'QB', vor: 10 },
+  ]);
+  assert.equal(shares.get('a'), 1);
+  assert.equal(shares.get('b'), 0.5);
+  // The best QB fills his own position's bar, even though 20 < 50.
+  assert.equal(shares.get('c'), 1);
+  assert.equal(shares.get('d'), 0.5);
+});
+
+test('vorShares draws no bar at all for a player worth nothing over replacement', () => {
+  const shares = vorShares([
+    { playerId: 'a', position: 'RB', vor: 40 },
+    { playerId: 'z', position: 'RB', vor: 0 },
+    { playerId: 'n', position: 'RB', vor: -12 },
+    { playerId: 'x', position: 'RB', vor: null },
+  ]);
+  assert.equal(shares.get('z'), 0);
+  assert.equal(shares.get('n'), 0);
+  assert.equal(shares.get('x'), null);
+});
+
+test('tierBands group consecutive rows of the same tier within a position, so "interchangeable" is seen', () => {
+  const bands = tierBands([
+    { playerId: 'r1', position: 'RB', tier: 1 },
+    { playerId: 'w1', position: 'WR', tier: 1 },
+    { playerId: 'r2', position: 'RB', tier: 1 },
+    { playerId: 'r3', position: 'RB', tier: 2 },
+    { playerId: 'w2', position: 'WR', tier: 2 },
+  ]);
+  // Interleaved WRs must not break the RB band: banding is per position.
+  assert.equal(bands.get('r1').band, bands.get('r2').band);
+  assert.notEqual(bands.get('r2').band, bands.get('r3').band);
+  assert.equal(bands.get('r1').first, true);
+  assert.equal(bands.get('r2').first, false);
+  assert.equal(bands.get('r3').first, true);
+  assert.equal(bands.get('w1').band, bands.get('r1').band, 'each position starts its own banding at the same parity');
+});
+
+test('tierBands alternate parity so adjacent tiers are distinguishable', () => {
+  const bands = tierBands([
+    { playerId: 'a', position: 'RB', tier: 1 },
+    { playerId: 'b', position: 'RB', tier: 2 },
+    { playerId: 'c', position: 'RB', tier: 3 },
+  ]);
+  assert.notEqual(bands.get('a').band % 2, bands.get('b').band % 2);
+  assert.notEqual(bands.get('b').band % 2, bands.get('c').band % 2);
+});
+
+test('tierBands treat a missing tier as its own group rather than merging it into the one above', () => {
+  const bands = tierBands([
+    { playerId: 'a', position: 'RB', tier: 1 },
+    { playerId: 'b', position: 'RB', tier: null },
+    { playerId: 'c', position: 'RB', tier: 1 },
+  ]);
+  assert.notEqual(bands.get('a').band, bands.get('b').band);
+  assert.notEqual(bands.get('b').band, bands.get('c').band);
+});
+
+test('adpFallLevel scales to the league: a falling player is one who lasted a full turn past his own ADP', () => {
+  // 4 teams: a full turn is 4 picks, two turns is 8.
+  assert.equal(adpFallLevel(3, 4), 'none');
+  assert.equal(adpFallLevel(4, 4), 'past');
+  assert.equal(adpFallLevel(7, 4), 'past');
+  assert.equal(adpFallLevel(8, 4), 'far');
+  // 10 teams: the same absolute fall is unremarkable in a deeper league.
+  assert.equal(adpFallLevel(7, 10), 'none');
+  assert.equal(adpFallLevel(10, 10), 'past');
+});
+
+test('adpFallLevel never flags a player going EARLIER than his ADP, or one with no ADP at all', () => {
+  assert.equal(adpFallLevel(-9, 4), 'none');
+  assert.equal(adpFallLevel(0, 4), 'none');
+  assert.equal(adpFallLevel(null, 4), 'none');
+  assert.equal(adpFallLevel(12, null), 'none');
+});
+
+test('replacementLine also names the best player at the position, so the explainer can say who it is', () => {
+  const rep = replacementLine(GLOSSARY_ROWS);
+  assert.equal(rep.QB.topName, 'Top Passer');
+  assert.equal(rep.RB.topName, 'Top Runner');
+  assert.equal(rep.QB.name, 'Last Starting Passer');
+});
+
+test('the VOR entry explains the per-row bar too, because a bar is the one mark that invites the cross-position comparison VOR exists to prevent', () => {
+  const grounded = termsById().get('vor').detail;
+  assert.match(grounded, /bar/i);
+  assert.match(grounded, /own position/i);
+  // And it is said even when the board is too thin to ground the example.
+  const bare = glossary({ rows: [], replacement: {}, teams: 4 }).find((t) => t.id === 'vor');
+  assert.match(bare.detail, /bar/i);
 });
